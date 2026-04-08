@@ -1,0 +1,34 @@
+# ChatDome Configuration Template
+# Copy to config.yaml and fill in your values.
+# Sensitive fields support environment variable references: ${VAR_NAME}
+
+chatdome:
+  telegram:
+    bot_token: "${CHATDOME_BOT_TOKEN}"
+    allowed_chat_ids: []
+    # - 123456789
+    max_message_length: 4000
+
+  ai:
+    base_url: "https://api.openai.com/v1"
+    api_key: "${CHATDOME_AI_API_KEY}"
+    model: "gpt-4o"
+    temperature: 0.1
+    max_tokens: 2000
+
+  agent:
+    allow_generated_commands: false
+    session_timeout: 600
+    max_rounds_per_turn: 10
+    max_history_tokens: 16000
+    command_timeout: 10
+    max_output_chars: 4000
+
+  # Scheduled patrol (not yet implemented)
+  # patrol:
+  #   enabled: false
+  #   interval: 3600
+  #   checks:
+  #     - ssh_bruteforce
+  #     - disk_usage
+  #     - suspicious_processes
