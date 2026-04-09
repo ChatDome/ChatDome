@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chatdome"
+version = "0.1.0"
+description = "AI-powered host security assistant, delivered through Telegram."
+readme = "../README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+dependencies = [
+    "python-telegram-bot[ext]>=20.0",
+    "openai>=1.0",
+    "pyyaml>=6.0",
+    "httpx>=0.25.0",
+]
+
+[project.scripts]
+chatdome = "chatdome.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
