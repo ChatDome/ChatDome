@@ -53,15 +53,25 @@ ChatDome: Ran ssh_bruteforce check...
 
 ### Install
 
+First, clone the repository:
 ```bash
-# Clone
 git clone https://github.com/your-username/ChatDome.git
 cd ChatDome/controlplane
+```
 
-# Install dependencies
+Choose one of the following installation methods:
+
+#### Method A: Standard Install (Recommended for Servers)
+Simply installs the required dependencies.
+```bash
 python3 -m pip install -r requirements.txt
 ```
-*(Optional for development: `python3 -m pip install -e .` to install the `chatdome` CLI command)*
+
+#### Method B: Development Install (Editable Mode)
+Installs dependencies as well as the globally accessible `chatdome` CLI command.
+```bash
+python3 -m pip install -e .
+```
 
 ### Configure
 
@@ -87,10 +97,17 @@ cp config.example.yaml config.yaml
 
 ### Run
 
+Depending on your installation method, start ChatDome using one of the following commands:
+
+**If you used Method A (Standard Install):**
 ```bash
 python3 -m chatdome.main
 ```
-*(If you installed via editable mode, you can simply run `chatdome`)*
+
+**If you used Method B (Development Install):**
+```bash
+chatdome
+```
 
 Open Telegram, send your bot a message. Done.
 
