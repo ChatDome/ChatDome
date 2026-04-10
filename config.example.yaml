@@ -26,6 +26,20 @@ chatdome:
     max_tokens: 2000
 
   agent:
+    # -------------------------------------------------------------------------
+    # allow_generated_commands: The "Infinite Possibilities" Switch
+    # -------------------------------------------------------------------------
+    # When `false` (default): Strictly secure mode. ChatDome can ONLY use
+    #   the ~15 predefined safety audit commands hardcoded in its codebase.
+    # When `true`: Unlocks infinite potential. The LLM can dynamically write and run
+    #   ANY shell command on your server to fulfill your prompt (e.g. `ls`, `du`, `find`).
+    #
+    # Safety Guarantee: Even when set to true, NO command runs automatically. 
+    #   It goes through a strict AI Reviewer for impact assessment, and presents 
+    #   a mandatory Human-in-the-loop dual-confirmation UI in Telegram. Safe commands
+    #   require button approval; high-risk commands physically disable the 'Approve' 
+    #   button, requiring an explicit `/confirm` text chat override.
+    # -------------------------------------------------------------------------
     allow_generated_commands: false
     session_timeout: 600
     max_rounds_per_turn: 10

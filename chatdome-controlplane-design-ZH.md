@@ -362,9 +362,9 @@ DANGEROUS_PATTERNS = [
 ]
 ```
 
-## 6. 会话管理
+## 6. 会话管理与长时记忆 (Local Memory Vault)
 
-```python
+ChatDome 采用“零基础架构”的轻量方式，在不依赖任何外部数据库的情况下，实现了健壮的上下文管理与断点跨端持久记忆。
 class AgentSession:
     chat_id: int                     # Telegram Chat ID
     messages: list[dict]             # OpenAI 格式的消息历史
@@ -378,20 +378,40 @@ class AgentSession:
     MAX_OUTPUT_CHARS = 4000          # 单条 Telegram 消息的输出上限
 ```
 
-### 会话生命周期
+```
+
+### 6.1 核心内存回收与压缩策略
+
+1. **会话池与超时销毁（TTL Cleanup）**：
+   通过 `SessionManager` 按 `Chat ID` 隔离管理。如果用户对话中断时间超过 `MAX_IDLE_SECONDS`（如 10 分钟），系统将自动从内存中移除该 `AgentSession` 以防内存泄漏。
+2. **AI 本地化上下文智能压缩（Context Compression）**：
+   对于超长对话，不再采取暴力的 `pop(1)` 抛弃旧对话，而是当 `messages` 容量逐渐逼近 `MAX_HISTORY_TOKENS` 时，系统会自动寻找安全锚点截断前半部分记录，向 LLM 提交一次后台异步提炼请求。最终这部分历史消息会被替换为一句由 AI 凝练的简短背景说明（System Context），既解决了 Token 越界爆炸问题，又保证了重点线索（IP、报错、排查结论）在下文持续有效。
+
+### 6.2 本地长时记忆库 (Local Memory Vault)
+
+为了让 ChatDome 实现“昨天解决过的警报今天依然有印象”，我们将记忆下沉于本地文件树：
+- **原始交互流水账 (`chat_data/{chat_id}_raw.log`)**：记录 AI 和用户对话期间每一轮的 User Prompt、Tool Call Args 及 Sandbox Result，提供不可篡改的安全操作审计追踪源文件。
+- **持久化精华案卷 (`chat_data/{chat_id}_memory.json`)**：当内存发生上文提到的“上下文压缩”时，生成的总结会被追加合并到本地文件中。
+- **跨会话唤醒（RAG-like Injection）**：即使是因为内存闲置导致会话对象被清除，下一次用户重新发言触发实例化 `AgentSession` 时，系统也会读取并把这个 JSON 的精华记录塞入到对大模型的背景设定中，实现零 DB 负担的长线持久记忆。
+
+### 6.3 会话生命周期状态机
 
 ```
 用户发送任意消息
+    │
+    ├─ 读取本地 memory.json 注入背景（若有）
     │
     ├─ 已有活跃会话 → 追加消息到会话，继续 Agent 循环
     │
     └─ 无活跃会话 → 创建新会话
                     │
-                    ├─ Agent 循环 → 回复
+                    ├─ Agent 循环 → 记录 raw.log
                     │
-                    ├─ 用户 10 分钟未说话 → 会话自动过期
+                    ├─ 若达到临界值 → 触发上下文提炼压缩，并更新 memory.json
                     │
-                    └─ /clear → 手动清除会话
+                    ├─ 用户 10 分钟未说话 → 内存自动过期销毁
+                    │
+                    └─ /clear → 手动清除会话与临时上下文
 ```
 
 ## 7. 配置

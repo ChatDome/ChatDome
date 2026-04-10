@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import os
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +36,9 @@ class AgentSession:
     pending_approval: bool = False
     pending_tool_call_id: str | None = None
     pending_command: str | None = None
+    
+    # UI Mode
+    command_echo: bool = False
 
     def add_system_message(self, content: str) -> None:
         """Add or replace the system prompt."""
@@ -95,20 +100,105 @@ class AgentSession:
                     total_chars += len(fn.get("arguments", ""))
         return total_chars // 3  # rough: ~3 chars per token for mixed content
 
+    def append_raw_log(self, text: str) -> None:
+        """Append raw interaction text to persistent log file."""
+        try:
+            with open(f"chat_data/{self.chat_id}_raw.log", "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
+        except Exception as e:
+            logger.error("Failed to write raw log: %s", e)
+
+    async def summarize_and_trim_history(self, llm_client, max_tokens: int) -> None:
+        """
+        AI Context Compression. If tokens exceed max_tokens, summarize the oldest valid block,
+        save to long-term memory vault, and inject into context as a system string.
+        """
+        if self.estimate_tokens() <= max_tokens:
+            return
+            
+        from chatdome.agent.prompts import COMPRESSION_PROMPT
+        
+        # Don't try to compress if there are very few messages
+        if len(self.messages) <= 3:
+            return
+            
+        logger.info("Token limit reached (%d > %d), compressing history...", self.estimate_tokens(), max_tokens)
+        
+        # Safe cut point
+        cut_idx = len(self.messages) - 2
+        while cut_idx > 1:
+            if self.messages[cut_idx].get("role") == "tool":
+                cut_idx -= 1
+            elif self.messages[cut_idx].get("role") == "assistant" and self.messages[cut_idx].get("tool_calls"):
+                cut_idx -= 1
+            else:
+                break
+                
+        if cut_idx <= 2:
+            self.messages.pop(1)  # Fallback
+            return
+            
+        messages_to_compress = self.messages[1:cut_idx]
+        history_text = ""
+        for msg in messages_to_compress:
+            role = msg.get("role", "unknown")
+            if role == "user":
+                history_text += f"\nUser: {msg.get('content')}"
+            elif role == "assistant":
+                if msg.get("content"):
+                    history_text += f"\nAI: {msg.get('content')}"
+                if msg.get("tool_calls"):
+                    history_text += f"\nAI Tool Executed: {msg.get('tool_calls')}"
+            elif role == "tool":
+                content = str(msg.get("content", ""))[:500] 
+                history_text += f"\nTool Result Snippet: {content}..."
+                
+        prompt = COMPRESSION_PROMPT + f"\n\n{history_text}"
+        
+        try:
+            summary_response = await llm_client.chat_completion([{"role": "user", "content": prompt}])
+            summary = summary_response.content or ""
+            
+            # Formulate the payload memory
+            summarized_msg = {
+                "role": "system",
+                "content": f"[System Context: The following is a summary of earlier conversation turns]\n{summary}"
+            }
+            
+            # Apply to memory list
+            self.messages = [self.messages[0], summarized_msg] + self.messages[cut_idx:]
+            
+            # Dump to memory vault
+            memory_file = f"chat_data/{self.chat_id}_memory.json"
+            # Merge if exists
+            existing_summary = ""
+            if os.path.exists(memory_file):
+                try:
+                    with open(memory_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        existing_summary = data.get("summary", "")
+                except Exception:
+                    pass
+            
+            new_summary = existing_summary + "\n\n[UPDATE]\n" + summary if existing_summary else summary
+                
+            with open(memory_file, "w", encoding="utf-8") as f:
+                json.dump({"summary": new_summary, "last_updated": time.time()}, f, ensure_ascii=False, indent=2)
+                
+            self.append_raw_log(f"--- Context Compressed ---\n{summary}\n-------------------------")
+            logger.info("Context compressed successfully to Vault.")
+            
+        except Exception as e:
+            logger.error("Failed to compress context: %s. Falling back to simple trim.", e)
+            self.messages.pop(1)
+
     def trim_history(self, max_tokens: int) -> None:
         """
         Remove oldest non-system messages to stay within token budget.
-
-        Preserves the system prompt (first message) and the most recent
-        messages.
         """
         while self.estimate_tokens() > max_tokens and len(self.messages) > 2:
-            # Remove the second message (oldest non-system)
             removed = self.messages.pop(1)
-            logger.debug(
-                "Trimmed message from session %d: role=%s",
-                self.chat_id, removed.get("role"),
-            )
+            logger.debug("Trimmed message from session %d: role=%s", self.chat_id, removed.get("role"))
 
     def clear(self) -> None:
         """Clear all messages except the system prompt."""
@@ -120,6 +210,32 @@ class AgentSession:
             self.messages.append(system_msg)
         self.round_count = 0
         self.last_active = time.time()
+
+    def get_turn_executed_commands(self) -> list[str]:
+        """Extract commands executed since the last user message for the Echo Mode UI."""
+        import json
+        cmds = []
+        for msg in reversed(self.messages):
+            if msg.get("role") == "user":
+                break
+            if msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    fn = tc.get("function", {})
+                    name = fn.get("name", "")
+                    try:
+                        args = json.loads(fn.get("arguments", "{}"))
+                    except Exception:
+                        args = {}
+                        
+                    if name == "run_shell_command":
+                        cmd_str = args.get("command", "(unknown)")
+                        # Remove markdown backticks if AI added them
+                        cmd_str = cmd_str.strip("`")
+                        cmds.append(f"👨‍💻 `run_shell_command`: `{cmd_str}`")
+                    elif name == "run_security_check":
+                        cmds.append(f"🛡️ `run_security_check`: `{args.get('check_id', '')}`")
+        cmds.reverse()
+        return cmds
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +263,7 @@ class SessionManager:
         self.system_prompt = system_prompt
         self._sessions: dict[int, AgentSession] = {}
         self._cleanup_task: asyncio.Task | None = None
+        os.makedirs("chat_data", exist_ok=True)
 
     def get_or_create(self, chat_id: int) -> AgentSession:
         """Get an existing session or create a new one."""
@@ -156,7 +273,21 @@ class SessionManager:
             if session is not None:
                 logger.info("Session expired for chat_id=%d, creating new", chat_id)
             session = AgentSession(chat_id=chat_id)
-            session.add_system_message(self.system_prompt)
+            
+            # Load local memory vault if exists
+            memory_file = f"chat_data/{chat_id}_memory.json"
+            memory_prompt = self.system_prompt
+            if os.path.exists(memory_file):
+                try:
+                    with open(memory_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if "summary" in data and data["summary"]:
+                            logger.info("Loaded external Memory Vault for chat_id=%d", chat_id)
+                            memory_prompt += "\n\n[Local Memory Vault - 历史总结档]\n" + data["summary"]
+                except Exception as e:
+                    logger.error("Failed to load memory file: %s", e)
+                    
+            session.add_system_message(memory_prompt)
             self._sessions[chat_id] = session
             logger.info("Created new session for chat_id=%d", chat_id)
 

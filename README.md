@@ -18,9 +18,11 @@
 
 ## What is ChatDome?
 
-ChatDome is an open-source, self-hosted **AI security agent** that lives in your Telegram. Talk to it in plain language — it figures out what commands to run on your server, executes them safely, analyzes the results, and reports back.
+ChatDome is a **lightweight, fast, and low-intrusion** open-source, self-hosted **AI security agent** that lives directly in your Telegram. Designed specifically for individuals and small teams, it provides a zero-intrusion security layer without the need for bloated monitoring architectures.
 
-Think of it as a lightweight SOC analyst in your pocket, designed for individuals and small teams who manage Linux servers but don't have the budget for enterprise security tools.
+Talk to it in plain language—it autonomously figures out what commands to run, utilizing either its built-in knowledge or **dynamically generating AI commands subjected to a strict safety validation and dual-confirmation (Human-in-the-loop) mechanism**. It executes these commands safely, analyzes the results, and reports back to you.
+
+Think of it as a lightweight SOC analyst in your pocket, designed to be as friendly as possible for individual developers and small remote teams who manage Linux servers but don't have the budget or time for enterprise security tools.
 
 ```
 You:     "Has anyone been brute-forcing my SSH?"
@@ -34,13 +36,23 @@ ChatDome: Ran ssh_bruteforce check...
 
 ## Features
 
+- **Dynamic Command Generation & Dual-Confirmation** — When unlocked, the AI can dynamically generate commands to answer arbitrary questions. These commands are processed by an AI Reviewer for impact analysis and require explicit interactive confirmation (or a mandatory `/confirm` for high-risk actions) before execution.
 - **Natural Language Interface** — No commands to memorize. Just describe what you want to know.
 - **AI Agent with Tool Use** — Multi-turn reasoning: the AI plans, executes host commands, analyzes output, and iterates until it has a complete answer.
 - **Built-in Security Audit Commands** — Pre-defined checks for SSH brute force, login history, open ports, disk usage, suspicious processes, and more.
-- **Sandboxed Execution** — Commands run in a security sandbox with timeouts, output truncation, and dangerous command blocking.
+- **Sandboxed Execution** — Commands run in a security sandbox with timeouts, output truncation, and dangerous command regex blocking.
+- **Long-term Memory & Context Management** — Features an intelligent, automatic AI-compression memory vault. It remembers past alerts and server diagnostics across multiple sessions without blowing up token limits or requiring an external database.
 - **Telegram-Native** — Manage your server from your phone, anywhere.
 - **OpenAI-Compatible** — Works with any LLM API that supports the OpenAI function calling format (OpenAI, Claude, local models via LiteLLM, etc.).
-- **Zero Infrastructure** — Single Python process, no database, no external dependencies beyond a Telegram bot token and an LLM API key.
+- **Zero Infrastructure & Low Intrusion** — Single Python process, no database, no agent installation on target filespaces, requiring just a Telegram bot token and an LLM API key.
+
+### 🔓 The "Infinite Possibilities" Mode
+
+ChatDome ships with a robust set of predefined safety checks. However, **the true power of ChatDome is unleashed when you set `allow_generated_commands: true` in your config**.
+
+When enabled, the AI is no longer bound by predefined rules. If you ask *"Show me the 3 largest files in `/var/log`"*, the LLM will dynamically generate the correct Linux shell commands (`du`, `sort`, `head`, etc.) from its vast knowledge base. 
+
+Because we use the **Dual-Confirmation Mechanism**, granting the AI this "Infinite Power" remains safe and predictable: every dynamically generated command is individually vetted by a secondary AI Reviewer, providing you with a specific impact analysis and forcing an interactive human approval step in Telegram before anything touches your server's bash shell.
 
 ## Quick Start
 

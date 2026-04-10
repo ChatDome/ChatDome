@@ -46,6 +46,7 @@ HELP_TEXT = """\
 *命令：*
 /help \\- 显示帮助
 /clear \\- 清除对话上下文
+/cmd\\-echo \\- 开关命令回显模式（显示底层执行的具体步骤）
 
 _直接发送你的问题即可，无需命令前缀。_
 """
@@ -85,6 +86,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("start", self._handle_help))
         self._app.add_handler(CommandHandler("clear", self._handle_clear))
         self._app.add_handler(CommandHandler("confirm", self._handle_confirm))
+        self._app.add_handler(CommandHandler("cmd-echo", self._handle_cmd_echo))
         self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
@@ -124,6 +126,24 @@ class TelegramBot:
             await update.message.reply_text("✅ 对话上下文已清除，可以开始新的对话。")
         else:
             await update.message.reply_text("ℹ️ 当前没有活跃的对话。")
+
+    async def _handle_cmd_echo(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /cmd-echo command — toggle command echo mode."""
+        if not self._check_auth(update):
+            return
+
+        chat_id = update.effective_chat.id
+        session = self.agent.session_manager.get_or_create(chat_id)
+        session.command_echo = not session.command_echo
+        
+        if session.command_echo:
+            msg = "🔍 *Command Echo (命令回显模式) 已开启* 🟢\n\n在接下来的回话底部，将会附带实际执行底层步骤的命令代码，供您审计和学习。"
+        else:
+            msg = "🔍 *Command Echo (命令回显模式) 已关闭* 🔴\n\n对话展示将恢复为干净清爽的安全专家总结模式。"
+            
+        await update.message.reply_text(msg, parse_mode="Markdown")
 
     # ----- Message handler -----
 

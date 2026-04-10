@@ -53,8 +53,8 @@ class Agent:
             
         session.add_user_message(user_message)
 
-        # Trim history if needed
-        session.trim_history(self.config.max_history_tokens)
+        # Trim or compress history if needed using the Local Memory Vault
+        await session.summarize_and_trim_history(self.llm, self.config.max_history_tokens)
 
         return await self._run_loop(chat_id, session)
 
@@ -152,11 +152,15 @@ class Agent:
             else:
                 # No tool calls — this is the final response
                 final_content = response.content or "（AI 未返回有效回复）"
+                
+                if session.command_echo:
+                    cmds = session.get_turn_executed_commands()
+                    if cmds:
+                        echo_text = "\n\n---\n*🔍 Command Echo 模式*\n" + "\n".join(cmds)
+                        final_content += echo_text
+                        
                 session.add_assistant_message(final_content)
-                logger.info(
-                    "Agent completed for chat_id=%d in %d rounds",
-                    chat_id, round_num,
-                )
+                logger.info("Agent completed for chat_id=%d in %d rounds", chat_id, round_num)
                 return final_content
 
         # Exceeded max rounds
@@ -164,6 +168,13 @@ class Agent:
             f"⚠️ 已达到最大执行轮次 ({self.config.max_rounds_per_turn})，"
             "请尝试缩小问题范围或重新描述你的需求。"
         )
+        
+        if session.command_echo:
+            cmds = session.get_turn_executed_commands()
+            if cmds:
+                echo_text = "\n\n---\n*🔍 Command Echo 模式*\n" + "\n".join(cmds)
+                max_rounds_msg += echo_text
+                
         session.add_assistant_message(max_rounds_msg)
         logger.warning(
             "Max rounds reached for chat_id=%d", chat_id,
