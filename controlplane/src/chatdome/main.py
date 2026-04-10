@@ -100,9 +100,6 @@ def main() -> None:
     bot = TelegramBot(config=config, agent=agent)
     app = bot.build()
 
-    # Start background tasks
-    agent.start()
-
     # ── Run ──
     logger.info("Starting Telegram bot polling...")
     try:

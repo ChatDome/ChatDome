@@ -65,11 +65,16 @@ class TelegramBot:
         self.max_message_length = config.telegram.max_message_length
         self._app: Application | None = None
 
+    async def post_init(self, app: Application) -> None:
+        """Called by the Telegram application after initialization, inside the event loop."""
+        self.agent.start()
+
     def build(self) -> Application:
         """Build and configure the Telegram Application."""
         self._app = (
             Application.builder()
             .token(self.config.telegram.bot_token)
+            .post_init(self.post_init)
             .build()
         )
 
