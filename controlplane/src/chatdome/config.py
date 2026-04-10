@@ -158,6 +158,11 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     if base_url:
         config.ai.base_url = base_url
 
+    # Optional: AI Model
+    model = os.environ.get("CHATDOME_AI_MODEL", "")
+    if model:
+        config.ai.model = model
+
     # Optional: Allowed Chat IDs (comma-separated)
     chat_ids_env = os.environ.get("CHATDOME_ALLOWED_CHAT_IDS", "")
     if chat_ids_env:

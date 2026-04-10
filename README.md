@@ -67,18 +67,15 @@ pip install -e .
 
 All sensitive parameters are configured via **environment variables** — they are never stored in local files.
 
-**Required environment variables:**
-
 ```bash
+# Required
 export CHATDOME_BOT_TOKEN="your-telegram-bot-token"
 export CHATDOME_AI_API_KEY="your-openai-api-key"
-```
 
-**Optional environment variables:**
-
-```bash
-export CHATDOME_AI_BASE_URL="https://api.openai.com/v1"   # Change for other LLM providers
-export CHATDOME_ALLOWED_CHAT_IDS="123456789,987654321"     # Comma-separated Telegram Chat IDs
+# Optional
+export CHATDOME_ALLOWED_CHAT_IDS="123456789"     # Telegram Chat IDs for access control
+export CHATDOME_AI_BASE_URL="https://api.openai.com/v1"  # LLM API endpoint
+export CHATDOME_AI_MODEL="gpt-4o"                # LLM model name
 ```
 
 Non-sensitive settings (model, timeout, etc.) are in a YAML config file:
@@ -106,16 +103,29 @@ Look for `"chat":{"id": 123456789}` in the response.
 
 ## Configuration
 
-### Environment Variables (Sensitive / Required)
+### Environment Variables
 
-Sensitive parameters **must** be set via environment variables. They are never read from config files.
+All sensitive parameters are configured via environment variables. They are never read from config files.
+
+**Telegram:**
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `CHATDOME_BOT_TOKEN` | ✅ | Telegram Bot token |
+| `CHATDOME_ALLOWED_CHAT_IDS` | ❌ | Comma-separated Chat IDs for access control |
+
+**LLM:**
+
+| Variable | Required | Description |
+|----------|----------|-------------|
 | `CHATDOME_AI_API_KEY` | ✅ | OpenAI-compatible API key |
-| `CHATDOME_AI_BASE_URL` | ❌ | LLM API base URL (default: `https://api.openai.com/v1`) |
-| `CHATDOME_ALLOWED_CHAT_IDS` | ❌ | Comma-separated Telegram Chat IDs for access control |
+| `CHATDOME_AI_BASE_URL` | ❌ | API base URL (default: `https://api.openai.com/v1`) |
+| `CHATDOME_AI_MODEL` | ❌ | Model name (default: `gpt-4o`) |
+
+**General:**
+
+| Variable | Required | Description |
+|----------|----------|-------------|
 | `CHATDOME_CONFIG` | ❌ | Path to config.yaml (default: `./config.yaml`) |
 
 > ⚠️ **Security**: Never commit tokens or API keys to version control. Use environment variables, `.env` files (with `.gitignore`), or a secrets manager.

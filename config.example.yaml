@@ -10,6 +10,7 @@
 #
 # Optional environment variables:
 #   CHATDOME_AI_BASE_URL      — LLM API base URL (default: https://api.openai.com/v1)
+#   CHATDOME_AI_MODEL         — LLM model name (default: gpt-4o)
 #   CHATDOME_ALLOWED_CHAT_IDS — Comma-separated Telegram Chat IDs (e.g. "123,456")
 
 chatdome:

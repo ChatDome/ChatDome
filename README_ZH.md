@@ -55,7 +55,7 @@ ChatDome:  已执行 ssh_bruteforce 检查...
 
 ```bash
 # 克隆
-git clone https://github.com/your-username/ChatDome.git
+git clone https://github.com/ChatDome/ChatDome.git
 cd ChatDome
 
 # 安装
@@ -67,18 +67,15 @@ pip install -e .
 
 所有敏感参数通过**环境变量**配置，不会存储在本地文件中。
 
-**必需的环境变量：**
-
 ```bash
+# 必需
 export CHATDOME_BOT_TOKEN="your-telegram-bot-token"
 export CHATDOME_AI_API_KEY="your-openai-api-key"
-```
 
-**可选的环境变量：**
-
-```bash
-export CHATDOME_AI_BASE_URL="https://api.openai.com/v1"   # 使用其他 LLM 提供商时修改
-export CHATDOME_ALLOWED_CHAT_IDS="123456789,987654321"     # 逗号分隔的 Telegram Chat ID
+# 可选
+export CHATDOME_ALLOWED_CHAT_IDS="123456789"     # Telegram Chat ID 访问控制
+export CHATDOME_AI_BASE_URL="https://api.openai.com/v1"  # LLM API 地址
+export CHATDOME_AI_MODEL="gpt-4o"                # LLM 模型名称
 ```
 
 非敏感的调优参数在 YAML 配置文件中：
@@ -106,16 +103,29 @@ https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 
 ## 配置
 
-### 环境变量（敏感参数）
+### 环境变量
 
-敏感参数**必须**通过环境变量配置，不会从配置文件中读取。
+所有敏感参数通过环境变量配置，不会从配置文件中读取。
+
+**Telegram：**
 
 | 变量名 | 必需 | 说明 |
 |--------|------|------|
 | `CHATDOME_BOT_TOKEN` | ✅ | Telegram Bot Token |
+| `CHATDOME_ALLOWED_CHAT_IDS` | ❌ | 逗号分隔的 Chat ID，用于访问控制 |
+
+**LLM：**
+
+| 变量名 | 必需 | 说明 |
+|--------|------|------|
 | `CHATDOME_AI_API_KEY` | ✅ | OpenAI 兼容的 API Key |
-| `CHATDOME_AI_BASE_URL` | ❌ | LLM API 地址（默认: `https://api.openai.com/v1`） |
-| `CHATDOME_ALLOWED_CHAT_IDS` | ❌ | 逗号分隔的 Telegram Chat ID，用于访问控制 |
+| `CHATDOME_AI_BASE_URL` | ❌ | API 地址（默认: `https://api.openai.com/v1`） |
+| `CHATDOME_AI_MODEL` | ❌ | 模型名称（默认: `gpt-4o`） |
+
+**通用：**
+
+| 变量名 | 必需 | 说明 |
+|--------|------|------|
 | `CHATDOME_CONFIG` | ❌ | 配置文件路径（默认: `./config.yaml`） |
 
 > ⚠️ **安全提醒**：切勿将 Token 或 API Key 提交到版本控制。请使用环境变量、`.env` 文件（并添加到 `.gitignore`）或密钥管理器。
