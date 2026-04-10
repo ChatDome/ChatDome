@@ -6,7 +6,6 @@ build-backend = "setuptools.build_meta"
 name = "chatdome"
 version = "0.1.0"
 description = "AI-powered host security assistant, delivered through Telegram."
-readme = "../README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.9"
 dependencies = [
