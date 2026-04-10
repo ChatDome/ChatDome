@@ -56,12 +56,12 @@ ChatDome:  已执行 ssh_bruteforce 检查...
 ```bash
 # 克隆
 git clone https://github.com/ChatDome/ChatDome.git
-cd ChatDome
+cd ChatDome/controlplane
 
-# 安装
-cd controlplane
-pip install -e .
+# 安装依赖
+python3 -m pip install -r requirements.txt
 ```
+*（可选开发方式：使用 `python3 -m pip install -e .` 安装会注册 `chatdome` 命令行工具）*
 
 ### 配置
 
@@ -88,8 +88,9 @@ cp config.example.yaml config.yaml
 ### 运行
 
 ```bash
-chatdome
+python3 -m chatdome.main
 ```
+*（如果你使用了 `pip install -e .` 方式安装，可以直接运行 `chatdome`）*
 
 打开 Telegram，给你的 Bot 发一条消息，搞定。
 
