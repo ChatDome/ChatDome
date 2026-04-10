@@ -1,17 +1,25 @@
-# ChatDome Configuration Template
-# Copy to config.yaml and fill in your values.
-# Sensitive fields support environment variable references: ${VAR_NAME}
+# ChatDome Configuration
+#
+# This file contains NON-SENSITIVE settings only.
+# All sensitive parameters (tokens, API keys) MUST be configured
+# via environment variables — see README for details.
+#
+# Required environment variables:
+#   CHATDOME_BOT_TOKEN        — Telegram Bot token
+#   CHATDOME_AI_API_KEY       — LLM API key
+#
+# Optional environment variables:
+#   CHATDOME_AI_BASE_URL      — LLM API base URL (default: https://api.openai.com/v1)
+#   CHATDOME_ALLOWED_CHAT_IDS — Comma-separated Telegram Chat IDs (e.g. "123,456")
 
 chatdome:
   telegram:
-    bot_token: "${CHATDOME_BOT_TOKEN}"
-    allowed_chat_ids: []
-    # - 123456789
+    # allowed_chat_ids: set via CHATDOME_ALLOWED_CHAT_IDS env var
     max_message_length: 4000
 
   ai:
-    base_url: "https://api.openai.com/v1"
-    api_key: "${CHATDOME_AI_API_KEY}"
+    # base_url: set via CHATDOME_AI_BASE_URL env var, or override here
+    # base_url: "https://api.openai.com/v1"
     model: "gpt-4o"
     temperature: 0.1
     max_tokens: 2000

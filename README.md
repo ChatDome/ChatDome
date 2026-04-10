@@ -46,7 +46,7 @@ ChatDome: Ran ssh_bruteforce check...
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.9+
 - A Linux server to monitor
 - A [Telegram Bot Token](https://core.telegram.org/bots/tutorial)
 - An OpenAI-compatible API key
@@ -65,30 +65,32 @@ pip install -e .
 
 ### Configure
 
+All sensitive parameters are configured via **environment variables** — they are never stored in local files.
+
+**Required environment variables:**
+
 ```bash
-cp config.example.yaml config.yaml
+export CHATDOME_BOT_TOKEN="your-telegram-bot-token"
+export CHATDOME_AI_API_KEY="your-openai-api-key"
 ```
 
-Edit `config.yaml` — you only need to fill in 3 fields to get started:
+**Optional environment variables:**
 
-```yaml
-chatdome:
-  telegram:
-    bot_token: "${CHATDOME_BOT_TOKEN}"       # or paste directly
-    allowed_chat_ids:
-      - 123456789                             # your Telegram chat ID
-  ai:
-    api_key: "${CHATDOME_AI_API_KEY}"        # or paste directly
+```bash
+export CHATDOME_AI_BASE_URL="https://api.openai.com/v1"   # Change for other LLM providers
+export CHATDOME_ALLOWED_CHAT_IDS="123456789,987654321"     # Comma-separated Telegram Chat IDs
+```
+
+Non-sensitive settings (model, timeout, etc.) are in a YAML config file:
+
+```bash
+cp config.example.yaml config.yaml
+# Edit config.yaml to tune non-sensitive parameters (optional)
 ```
 
 ### Run
 
 ```bash
-# Set environment variables (or hardcode in config.yaml)
-export CHATDOME_BOT_TOKEN="your-telegram-bot-token"
-export CHATDOME_AI_API_KEY="your-openai-api-key"
-
-# Start
 chatdome
 ```
 
@@ -104,17 +106,30 @@ Look for `"chat":{"id": 123456789}` in the response.
 
 ## Configuration
 
+### Environment Variables (Sensitive / Required)
+
+Sensitive parameters **must** be set via environment variables. They are never read from config files.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `CHATDOME_BOT_TOKEN` | ✅ | Telegram Bot token |
+| `CHATDOME_AI_API_KEY` | ✅ | OpenAI-compatible API key |
+| `CHATDOME_AI_BASE_URL` | ❌ | LLM API base URL (default: `https://api.openai.com/v1`) |
+| `CHATDOME_ALLOWED_CHAT_IDS` | ❌ | Comma-separated Telegram Chat IDs for access control |
+| `CHATDOME_CONFIG` | ❌ | Path to config.yaml (default: `./config.yaml`) |
+
+> ⚠️ **Security**: Never commit tokens or API keys to version control. Use environment variables, `.env` files (with `.gitignore`), or a secrets manager.
+
+### Config File (Non-Sensitive / Optional)
+
+`config.yaml` contains only non-sensitive tuning parameters:
+
 ```yaml
 chatdome:
   telegram:
-    bot_token: "${CHATDOME_BOT_TOKEN}"
-    allowed_chat_ids:
-      - 123456789
     max_message_length: 4000
 
   ai:
-    base_url: "https://api.openai.com/v1"    # Change for other providers
-    api_key: "${CHATDOME_AI_API_KEY}"
     model: "gpt-4o"
     temperature: 0.1
     max_tokens: 2000
@@ -126,8 +141,6 @@ chatdome:
     command_timeout: 10                       # seconds before a command is killed
     max_output_chars: 4000                    # truncate command output beyond this
 ```
-
-Sensitive fields support environment variable references (`${VAR_NAME}`).
 
 ## How It Works
 

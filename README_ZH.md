@@ -46,7 +46,7 @@ ChatDome:  已执行 ssh_bruteforce 检查...
 
 ### 前置要求
 
-- Python 3.11+
+- Python 3.9+
 - 一台 Linux 服务器
 - [Telegram Bot Token](https://core.telegram.org/bots/tutorial)
 - OpenAI 兼容的 API Key
@@ -65,30 +65,32 @@ pip install -e .
 
 ### 配置
 
+所有敏感参数通过**环境变量**配置，不会存储在本地文件中。
+
+**必需的环境变量：**
+
 ```bash
-cp config.example.yaml config.yaml
+export CHATDOME_BOT_TOKEN="your-telegram-bot-token"
+export CHATDOME_AI_API_KEY="your-openai-api-key"
 ```
 
-编辑 `config.yaml`——只需填写 3 个字段即可启动：
+**可选的环境变量：**
 
-```yaml
-chatdome:
-  telegram:
-    bot_token: "${CHATDOME_BOT_TOKEN}"       # 或直接粘贴
-    allowed_chat_ids:
-      - 123456789                             # 你的 Telegram Chat ID
-  ai:
-    api_key: "${CHATDOME_AI_API_KEY}"        # 或直接粘贴
+```bash
+export CHATDOME_AI_BASE_URL="https://api.openai.com/v1"   # 使用其他 LLM 提供商时修改
+export CHATDOME_ALLOWED_CHAT_IDS="123456789,987654321"     # 逗号分隔的 Telegram Chat ID
+```
+
+非敏感的调优参数在 YAML 配置文件中：
+
+```bash
+cp config.example.yaml config.yaml
+# 可选：编辑 config.yaml 调整非敏感参数
 ```
 
 ### 运行
 
 ```bash
-# 设置环境变量（或直接写在 config.yaml 中）
-export CHATDOME_BOT_TOKEN="your-telegram-bot-token"
-export CHATDOME_AI_API_KEY="your-openai-api-key"
-
-# 启动
 chatdome
 ```
 
@@ -104,17 +106,30 @@ https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 
 ## 配置
 
+### 环境变量（敏感参数）
+
+敏感参数**必须**通过环境变量配置，不会从配置文件中读取。
+
+| 变量名 | 必需 | 说明 |
+|--------|------|------|
+| `CHATDOME_BOT_TOKEN` | ✅ | Telegram Bot Token |
+| `CHATDOME_AI_API_KEY` | ✅ | OpenAI 兼容的 API Key |
+| `CHATDOME_AI_BASE_URL` | ❌ | LLM API 地址（默认: `https://api.openai.com/v1`） |
+| `CHATDOME_ALLOWED_CHAT_IDS` | ❌ | 逗号分隔的 Telegram Chat ID，用于访问控制 |
+| `CHATDOME_CONFIG` | ❌ | 配置文件路径（默认: `./config.yaml`） |
+
+> ⚠️ **安全提醒**：切勿将 Token 或 API Key 提交到版本控制。请使用环境变量、`.env` 文件（并添加到 `.gitignore`）或密钥管理器。
+
+### 配置文件（非敏感参数）
+
+`config.yaml` 仅包含非敏感的调优参数：
+
 ```yaml
 chatdome:
   telegram:
-    bot_token: "${CHATDOME_BOT_TOKEN}"
-    allowed_chat_ids:
-      - 123456789
     max_message_length: 4000
 
   ai:
-    base_url: "https://api.openai.com/v1"    # 其他提供商请修改此处
-    api_key: "${CHATDOME_AI_API_KEY}"
     model: "gpt-4o"
     temperature: 0.1
     max_tokens: 2000
@@ -126,8 +141,6 @@ chatdome:
     command_timeout: 10                       # 命令执行超时（秒）
     max_output_chars: 4000                    # 命令输出超过此长度会被截断
 ```
-
-敏感字段支持环境变量引用（`${VAR_NAME}`）。
 
 ## 工作原理
 

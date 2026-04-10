@@ -1,17 +1,24 @@
 """
-YAML configuration loader with environment variable substitution.
+Configuration loader.
 
-Config lookup order:
-  1. --config CLI argument
-  2. CHATDOME_CONFIG environment variable
-  3. ./config.yaml (current working directory)
+Sensitive parameters (bot_token, api_key) are loaded EXCLUSIVELY from
+environment variables — they must never be stored in local files.
+
+Non-sensitive parameters (model, timeout, etc.) are loaded from a YAML
+config file with optional environment variable override support.
+
+Environment variables:
+  CHATDOME_BOT_TOKEN        — Telegram Bot token  (required)
+  CHATDOME_AI_API_KEY       — LLM API key         (required)
+  CHATDOME_AI_BASE_URL      — LLM API base URL    (optional)
+  CHATDOME_ALLOWED_CHAT_IDS — Comma-separated chat IDs (optional)
+  CHATDOME_CONFIG           — Path to config.yaml (optional)
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,29 +26,6 @@ from typing import Any
 import yaml
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Pattern to match ${ENV_VAR} references in config values
-# ---------------------------------------------------------------------------
-_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
-
-
-def _resolve_env_vars(value: Any) -> Any:
-    """Recursively resolve ${VAR} references in config values."""
-    if isinstance(value, str):
-        def _replacer(match: re.Match) -> str:
-            var_name = match.group(1)
-            env_val = os.environ.get(var_name)
-            if env_val is None:
-                logger.warning("Environment variable %s is not set", var_name)
-                return match.group(0)  # leave as-is
-            return env_val
-        return _ENV_VAR_PATTERN.sub(_replacer, value)
-    if isinstance(value, dict):
-        return {k: _resolve_env_vars(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_resolve_env_vars(item) for item in value]
-    return value
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +70,7 @@ class ChatDomeConfig:
 
 
 # ---------------------------------------------------------------------------
-# Loader
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _dict_to_dataclass(cls, data: dict) -> Any:
@@ -98,52 +82,101 @@ def _dict_to_dataclass(cls, data: dict) -> Any:
     return cls(**filtered)
 
 
+def _parse_chat_ids(raw: str) -> list[int]:
+    """Parse a comma-separated string of chat IDs into a list of ints."""
+    ids = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part:
+            try:
+                ids.append(int(part))
+            except ValueError:
+                logger.warning("Invalid chat ID ignored: %s", part)
+    return ids
+
+
+# ---------------------------------------------------------------------------
+# Loader
+# ---------------------------------------------------------------------------
+
 def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     """
-    Load ChatDome configuration from a YAML file.
+    Load ChatDome configuration.
 
-    Lookup order:
+    Sensitive parameters are read from environment variables ONLY.
+    Non-sensitive parameters are read from a YAML config file.
+
+    Config file lookup order:
       1. Explicit ``config_path`` argument
       2. ``CHATDOME_CONFIG`` environment variable
       3. ``./config.yaml`` in the current working directory
+
+    If no config file is found, default values are used for all
+    non-sensitive parameters.
     """
+
+    # ── Load YAML config (non-sensitive settings) ──
     if config_path is None:
         config_path = os.environ.get("CHATDOME_CONFIG", "config.yaml")
 
     path = Path(config_path)
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"Configuration file not found: {path.resolve()}\n"
-            "Create one by copying config.example.yaml → config.yaml"
+    yaml_data: dict = {}
+
+    if path.is_file():
+        logger.info("Loading configuration from %s", path.resolve())
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+        if raw and "chatdome" in raw:
+            yaml_data = raw["chatdome"]
+    else:
+        logger.info(
+            "No config file found at %s, using defaults + environment variables",
+            path.resolve(),
         )
 
-    logger.info("Loading configuration from %s", path.resolve())
-
-    with open(path, "r", encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh)
-
-    if not raw or "chatdome" not in raw:
-        raise ValueError("Invalid configuration: missing top-level 'chatdome' key")
-
-    # Resolve environment variable references
-    resolved = _resolve_env_vars(raw["chatdome"])
-
+    # Build config from YAML (non-sensitive fields only)
     config = ChatDomeConfig(
-        telegram=_dict_to_dataclass(TelegramConfig, resolved.get("telegram")),
-        ai=_dict_to_dataclass(AIConfig, resolved.get("ai")),
-        agent=_dict_to_dataclass(AgentConfig, resolved.get("agent")),
+        telegram=_dict_to_dataclass(TelegramConfig, yaml_data.get("telegram")),
+        ai=_dict_to_dataclass(AIConfig, yaml_data.get("ai")),
+        agent=_dict_to_dataclass(AgentConfig, yaml_data.get("agent")),
     )
 
-    # Validation
-    if not config.telegram.bot_token or config.telegram.bot_token.startswith("${"):
+    # ── Override with environment variables (sensitive + optional) ──
+
+    # Required: Telegram Bot Token
+    bot_token = os.environ.get("CHATDOME_BOT_TOKEN", "")
+    if bot_token:
+        config.telegram.bot_token = bot_token
+
+    # Required: AI API Key
+    api_key = os.environ.get("CHATDOME_AI_API_KEY", "")
+    if api_key:
+        config.ai.api_key = api_key
+
+    # Optional: AI Base URL
+    base_url = os.environ.get("CHATDOME_AI_BASE_URL", "")
+    if base_url:
+        config.ai.base_url = base_url
+
+    # Optional: Allowed Chat IDs (comma-separated)
+    chat_ids_env = os.environ.get("CHATDOME_ALLOWED_CHAT_IDS", "")
+    if chat_ids_env:
+        config.telegram.allowed_chat_ids = _parse_chat_ids(chat_ids_env)
+
+    # ── Validation ──
+
+    if not config.telegram.bot_token:
         raise ValueError(
-            "Telegram bot_token is not configured. "
-            "Set CHATDOME_BOT_TOKEN or edit config.yaml."
+            "Telegram Bot Token is not configured.\n"
+            "Set the CHATDOME_BOT_TOKEN environment variable:\n"
+            "  export CHATDOME_BOT_TOKEN=\"your-telegram-bot-token\""
         )
-    if not config.ai.api_key or config.ai.api_key.startswith("${"):
+
+    if not config.ai.api_key:
         raise ValueError(
-            "AI api_key is not configured. "
-            "Set CHATDOME_AI_API_KEY or edit config.yaml."
+            "AI API Key is not configured.\n"
+            "Set the CHATDOME_AI_API_KEY environment variable:\n"
+            "  export CHATDOME_AI_API_KEY=\"your-api-key\""
         )
 
     logger.info("Configuration loaded: model=%s, allowed_chats=%s",
