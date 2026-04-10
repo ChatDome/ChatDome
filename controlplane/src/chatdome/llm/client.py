@@ -79,6 +79,7 @@ class LLMClient:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        response_format: dict[str, str] | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request to the LLM.
@@ -86,6 +87,7 @@ class LLMClient:
         Args:
             messages: OpenAI-format message history.
             tools: Optional tool/function definitions.
+            response_format: Optional dict for JSON output format.
 
         Returns:
             Normalized LLMResponse.
@@ -102,6 +104,8 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+        if response_format:
+            kwargs["response_format"] = response_format
 
         last_error: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
@@ -143,6 +147,46 @@ class LLMClient:
         raise RuntimeError(
             f"LLM API call failed after {self.max_retries} attempts: {last_error}"
         )
+
+    async def evaluate_command_safety(
+        self, command: str, system_prompt: str
+    ) -> dict[str, str]:
+        """
+        Use the LLM to evaluate the safety and impact of a shell command.
+        Forces JSON output format.
+        """
+        import json
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"请分析以下命令：\n{command}"}
+        ]
+        
+        # Force low temperature to ensure deterministic safety output
+        original_temp = self.temperature
+        self.temperature = 0.0
+        
+        try:
+            # Note: json_object format is supported by OpenAI and many compatible providers.
+            response = await self.chat_completion(
+                messages=messages,
+                response_format={"type": "json_object"}
+            )
+            content = response.content or "{}"
+            result = json.loads(content)
+            
+            # Ensure required fields exist
+            return {
+                "safety_status": result.get("safety_status", "UNSAFE").strip().upper(),
+                "impact_analysis": result.get("impact_analysis", "无法解析安全分析结果").strip()
+            }
+        except Exception as e:
+            logger.error("Error evaluating command safety: %s", e)
+            return {
+                "safety_status": "UNSAFE",
+                "impact_analysis": f"安全审查机制执行失败，拒绝放行 ({str(e)})"
+            }
+        finally:
+            self.temperature = original_temp
 
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse the raw OpenAI response into our normalized format."""

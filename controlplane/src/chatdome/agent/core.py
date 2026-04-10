@@ -36,7 +36,7 @@ class Agent:
     ):
         self.llm = llm
         self.config = config
-        self.tool_dispatcher = ToolDispatcher(sandbox)
+        self.tool_dispatcher = ToolDispatcher(sandbox, llm=llm)
         self.session_manager = SessionManager(
             session_timeout=config.session_timeout,
             max_history_tokens=config.max_history_tokens,
@@ -44,23 +44,54 @@ class Agent:
         )
 
     async def handle_message(self, chat_id: int, user_message: str) -> str:
-        """
-        Process a user message through the full ReAct loop.
-
-        Args:
-            chat_id: Telegram chat ID (used as session key).
-            user_message: The user's text message.
-
-        Returns:
-            The final text response to send back to the user.
-        """
+        """Process a user message through the full ReAct loop."""
         session = self.session_manager.get_or_create(chat_id)
+        
+        # If there is a pending request, we cannot accept a new message
+        if session.pending_approval:
+            return "⚠️ 上一个命令仍在等待你的确认，请先处理（使用键盘或 /confirm）。"
+            
         session.add_user_message(user_message)
 
         # Trim history if needed
         session.trim_history(self.config.max_history_tokens)
 
-        for round_num in range(1, self.config.max_rounds_per_turn + 1):
+        return await self._run_loop(chat_id, session)
+
+    async def resume_session(self, chat_id: int, action: str) -> str:
+        """Resume a suspended session after user approval/rejection."""
+        session = self.session_manager.get_or_create(chat_id)
+        if not session.pending_approval or not session.pending_tool_call_id:
+            return "ℹ️ 当前没有等待确认的命令。"
+            
+        tool_call_id = session.pending_tool_call_id
+        command = session.pending_command
+        
+        # Clear pending state
+        session.pending_approval = False
+        session.pending_tool_call_id = None
+        session.pending_command = None
+        
+        if action == "REJECT":
+            logger.info("User rejected command: %s", command)
+            session.add_tool_result(tool_call_id, "由于存在安全风险，用户已拒绝执行该命令。请提供其他解决方案或向用户解释。")
+        else:
+            logger.info("User approved command: %s", command)
+            try:
+                # Bypass Reviewer, go straight to sandbox
+                res = await self.tool_dispatcher.sandbox.execute_shell_command(command, "User Approved")
+                result = self.tool_dispatcher._format_command_result(res)
+            except Exception as e:
+                result = f"执行过程中发生异常: {e}"
+                
+            session.add_tool_result(tool_call_id, result)
+            
+        return await self._run_loop(chat_id, session)
+
+    async def _run_loop(self, chat_id: int, session: Any) -> str:
+        """Drive the ReAct loop forward."""
+
+        for round_num in range(session.round_count + 1, self.config.max_rounds_per_turn + 1):
             logger.info(
                 "Agent loop round %d/%d for chat_id=%d",
                 round_num, self.config.max_rounds_per_turn, chat_id,
@@ -99,15 +130,21 @@ class Agent:
                 session.add_assistant_tool_calls(tool_calls_for_session)
 
                 # Execute each tool call
+                from chatdome.agent.tools import PendingApprovalError
+                import json
+                
                 for tc in response.tool_calls:
-                    logger.info(
-                        "Executing tool: %s (id=%s)", tc.name, tc.id,
-                    )
-                    result = await self.tool_dispatcher.dispatch(
-                        tc.name, tc.arguments,
-                    )
-                    session.add_tool_result(tc.id, result)
-                    logger.debug("Tool result for %s: %s", tc.id, result[:200])
+                    logger.info("Executing tool: %s (id=%s)", tc.name, tc.id)
+                    try:
+                        result = await self.tool_dispatcher.dispatch(tc.name, tc.arguments, tc.id)
+                        session.add_tool_result(tc.id, result)
+                        logger.debug("Tool result for %s: %s", tc.id, result[:200])
+                    except PendingApprovalError as e:
+                        logger.info("Execution suspended for user approval: %s", tc.id)
+                        session.pending_approval = True
+                        session.pending_tool_call_id = e.tool_call_id
+                        session.pending_command = e.command
+                        return f"__PENDING_APPROVAL__:{json.dumps({'command': e.command, 'safety_status': e.safety_status, 'impact_analysis': e.impact_analysis})}"
 
                 # Continue the loop — send results back to LLM
                 continue

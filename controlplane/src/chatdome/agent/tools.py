@@ -20,14 +20,25 @@ from chatdome.executor.sandbox import CommandSandbox, CommandResult
 logger = logging.getLogger(__name__)
 
 
+class PendingApprovalError(Exception):
+    """Raised when a tool call requires user confirmation before execution."""
+    def __init__(self, command: str, safety_status: str, impact_analysis: str, tool_call_id: str):
+        self.command = command
+        self.safety_status = safety_status
+        self.impact_analysis = impact_analysis
+        self.tool_call_id = tool_call_id
+        super().__init__(f"Command requires approval: {command}")
+
+
 class ToolDispatcher:
     """
     Routes tool calls from the LLM to the appropriate handler
     and formats results as strings for the conversation.
     """
 
-    def __init__(self, sandbox: CommandSandbox):
+    def __init__(self, sandbox: CommandSandbox, llm: Any = None):
         self.sandbox = sandbox
+        self.llm = llm
         self._http_client: httpx.AsyncClient | None = None
 
     async def _get_http_client(self) -> httpx.AsyncClient:
@@ -41,13 +52,15 @@ class ToolDispatcher:
         if self._http_client and not self._http_client.is_closed:
             await self._http_client.aclose()
 
-    async def dispatch(self, tool_name: str, arguments_json: str) -> str:
+    async def dispatch(self, tool_name: str, arguments_json: str, tool_call_id: str = "") -> str:
         """
         Dispatch a tool call and return the formatted result string.
+        Raises PendingApprovalError if the command needs human confirmation.
 
         Args:
             tool_name: The function name from the LLM tool_call.
             arguments_json: The raw JSON arguments string.
+            tool_call_id: The ID of this tool call.
 
         Returns:
             Formatted result string to feed back to the LLM.
@@ -67,7 +80,11 @@ class ToolDispatcher:
             return f"未知工具: {tool_name}"
 
         try:
+            if tool_name == "run_shell_command":
+                return await self._handle_shell_command(args, tool_call_id)
             return await handler(args)
+        except PendingApprovalError:
+            raise
         except Exception as e:
             logger.error("Tool execution failed: %s — %s", tool_name, e)
             return f"工具执行异常: {e}"
@@ -82,12 +99,26 @@ class ToolDispatcher:
         result = await self.sandbox.execute_security_check(check_id, check_args)
         return self._format_command_result(result)
 
-    async def _handle_shell_command(self, args: dict[str, Any]) -> str:
-        """Execute an AI-generated shell command."""
+    async def _handle_shell_command(self, args: dict[str, Any], tool_call_id: str) -> str:
+        """Evaluate and suspend an AI-generated shell command for user approval."""
         command = args.get("command", "")
-        reason = args.get("reason", "")
+        
+        if not command:
+            return "缺少 command 参数"
 
-        result = await self.sandbox.execute_shell_command(command, reason)
+        # 1. AI Reviewer Analysis
+        if self.llm:
+            from chatdome.agent.prompts import REVIEWER_SYSTEM_PROMPT
+            logger.info("Running AI Reviewer for shell command: %s", command)
+            review = await self.llm.evaluate_command_safety(command, REVIEWER_SYSTEM_PROMPT)
+            safety_status = review.get("safety_status", "UNSAFE")
+            impact_analysis = review.get("impact_analysis", "分析失败")
+            
+            # Suspend loop and wait for human confirmation
+            raise PendingApprovalError(command, safety_status, impact_analysis, tool_call_id)
+        
+        # 2. Fallback (should not be reached normally)
+        result = await self.sandbox.execute_shell_command(command, "LLM Generated")
         return self._format_command_result(result)
 
     async def _handle_whois_lookup(self, args: dict[str, Any]) -> str:

@@ -43,6 +43,19 @@ SYSTEM_PROMPT = """\
 - kernel_errors: 内核错误
 """
 
+REVIEWER_SYSTEM_PROMPT = """\
+你是一个极度严谨的 Linux 安全分析师。你的任务是分析即将在服务器中执行的 shell 命令。
+
+你必须且只能以 JSON 格式输出，包含以下字段：
+1. "safety_status": 如果命令是纯粹的读取/查询操作，判定为 "SAFE"。如果包含任何写操作、修改、删除、破坏性操作或大量网络下载，判定为 "UNSAFE"。
+2. "impact_analysis": 客观、具体地描述该命令的执行影响。
+   - 不好的例子："删除日志"
+   - 好的例子："将使用 rm 命令删除 /var/log/ 目录下所有后缀为 .log 的文件，例如 /var/log/syslog 等，属于高危不可逆操作。"
+   如果命令是 SAFE 查询命令，也请说明用途：
+   - 好的例子："使用 find 命令查找 / 目录下大于 100M 的文件，仅为读取查询，不修改系统状态。"
+   
+你的分析必须基于客观事实，给出实际可能的推测。描述控制在 100 字内。
+"""
 
 # ---------------------------------------------------------------------------
 # Tool Definitions (OpenAI Function Calling format)
@@ -93,12 +106,8 @@ TOOLS = [
                         "type": "string",
                         "description": "要执行的 shell 命令（只读）",
                     },
-                    "reason": {
-                        "type": "string",
-                        "description": "执行此命令的理由",
-                    },
                 },
-                "required": ["command", "reason"],
+                "required": ["command"],
             },
         },
     },

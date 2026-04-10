@@ -29,6 +29,11 @@ class AgentSession:
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
     round_count: int = 0
+    
+    # Pause/Resume state for Human-in-the-loop
+    pending_approval: bool = False
+    pending_tool_call_id: str | None = None
+    pending_command: str | None = None
 
     def add_system_message(self, content: str) -> None:
         """Add or replace the system prompt."""
