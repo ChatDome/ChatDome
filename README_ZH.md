@@ -157,6 +157,7 @@ https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 | 变量名 | 必需 | 说明 |
 |--------|------|------|
 | `CHATDOME_CONFIG` | ❌ | 配置文件路径（默认: `./config.yaml`） |
+| `CHATDOME_ALLOW_GENERATED_COMMANDS` | ❌ | 全局一键开启“动态命令无限可能”模式 (`true`/`false`) |
 
 > ⚠️ **安全提醒**：切勿将 Token 或 API Key 提交到版本控制。请使用环境变量、`.env` 文件（并添加到 `.gitignore`）或密钥管理器。
 

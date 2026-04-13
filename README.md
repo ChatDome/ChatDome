@@ -157,6 +157,7 @@ All sensitive parameters are configured via environment variables. They are neve
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `CHATDOME_CONFIG` | ❌ | Path to config.yaml (default: `./config.yaml`) |
+| `CHATDOME_ALLOW_GENERATED_COMMANDS` | ❌ | Enable Infinite Possibilities Mode (`true`/`false`) |
 
 > ⚠️ **Security**: Never commit tokens or API keys to version control. Use environment variables, `.env` files (with `.gitignore`), or a secrets manager.
 

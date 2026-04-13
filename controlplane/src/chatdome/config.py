@@ -167,6 +167,11 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     chat_ids_env = os.environ.get("CHATDOME_ALLOWED_CHAT_IDS", "")
     if chat_ids_env:
         config.telegram.allowed_chat_ids = _parse_chat_ids(chat_ids_env)
+        
+    # Optional: Allow Generated Commands
+    allow_gen_env = os.environ.get("CHATDOME_ALLOW_GENERATED_COMMANDS", "")
+    if allow_gen_env:
+        config.agent.allow_generated_commands = allow_gen_env.lower() in ("true", "1", "yes", "on")
 
     # ── Validation ──
 

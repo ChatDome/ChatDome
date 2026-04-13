@@ -253,7 +253,7 @@ class TelegramBot:
         
         reply_markup = None
         if safety == "SAFE":
-            text += "🟢 *拦截状态*: 安全，等待确认"
+            text += "🟢 *风险定级*: 已评估为安全操作，等待您的最终确认。"
             keyboard = [
                 [
                     InlineKeyboardButton("✅ 批准并执行", callback_data="approve_cmd"),
@@ -263,8 +263,8 @@ class TelegramBot:
             reply_markup = InlineKeyboardMarkup(keyboard)
         else:
             text += (
-                "🔴 *拦截状态*: 高危！等待确认。\n"
-                "为防止误触，请点击下方拒绝。若执意执行，请回复指令： `/confirm`"
+                "🔴 *风险定级*: 高危操作！等待确认。\n"
+                "为防止误触，请点击下方拒绝。若您明确后果并执意执行，请回复指令： `/confirm`"
             )
             keyboard = [
                 [InlineKeyboardButton("❌ 拒绝", callback_data="reject_cmd")]
