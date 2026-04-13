@@ -149,7 +149,7 @@ class LLMClient:
         )
 
     async def evaluate_command_safety(
-        self, command: str, system_prompt: str
+        self, command: str, system_prompt: str, chat_id: int = 0
     ) -> dict[str, str]:
         """
         Use the LLM to evaluate the safety and impact of a shell command.
@@ -173,6 +173,17 @@ class LLMClient:
             )
             content = response.content or "{}"
             result = json.loads(content)
+            
+            if chat_id > 0:
+                from chatdome.agent.tracker import TokenTracker
+                TokenTracker.record_usage(
+                    chat_id=chat_id,
+                    model=self.model,
+                    action="ai_reviewer",
+                    prompt_tokens=response.prompt_tokens,
+                    completion_tokens=response.completion_tokens,
+                    total_tokens=response.total_tokens
+                )
             
             # Ensure required fields exist
             return {

@@ -113,6 +113,16 @@ class Agent:
                 len(response.tool_calls),
                 response.total_tokens,
             )
+            
+            from chatdome.agent.tracker import TokenTracker
+            TokenTracker.record_usage(
+                chat_id=chat_id,
+                model=self.config.model if hasattr(self.config, 'model') else self.llm.model,
+                action="react_loop",
+                prompt_tokens=response.prompt_tokens,
+                completion_tokens=response.completion_tokens,
+                total_tokens=response.total_tokens
+            )
 
             if response.tool_calls:
                 # Build the assistant message with tool_calls for the session
@@ -136,7 +146,7 @@ class Agent:
                 for tc in response.tool_calls:
                     logger.info("Executing tool: %s (id=%s)", tc.name, tc.id)
                     try:
-                        result = await self.tool_dispatcher.dispatch(tc.name, tc.arguments, tc.id)
+                        result = await self.tool_dispatcher.dispatch(tc.name, tc.arguments, tc.id, chat_id)
                         session.add_tool_result(tc.id, result)
                         logger.debug("Tool result for %s: %s", tc.id, result[:200])
                     except PendingApprovalError as e:

@@ -46,7 +46,8 @@ HELP_TEXT = """\
 *命令：*
 /help \\- 显示帮助
 /clear \\- 清除对话上下文
-/cmd\\-echo \\- 开关命令回显模式（显示底层执行的具体步骤）
+/token \\- 查看当前账号的 Token 资源流水与花费汇总
+/cmd\\_echo \\- 开关命令回显模式（显示底层执行的具体步骤）
 
 _直接发送你的问题即可，无需命令前缀。_
 """
@@ -71,6 +72,29 @@ class TelegramBot:
     async def post_init(self, app: Application) -> None:
         """Called by the Telegram application after initialization, inside the event loop."""
         self.agent.start()
+        
+        # Send startup notifications
+        for chat_id in self.config.telegram.allowed_chat_ids:
+            try:
+                await app.bot.send_message(
+                    chat_id=chat_id, 
+                    text="🚀 *ChatDome 已上线*\n安全探针与大模型推理引擎已就绪，随时听候指令！", 
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error("Failed to send startup message to %s: %s", chat_id, e)
+
+    async def post_stop(self, app: Application) -> None:
+        """Called when the application stops."""
+        for chat_id in self.config.telegram.allowed_chat_ids:
+            try:
+                await app.bot.send_message(
+                    chat_id=chat_id, 
+                    text="💤 *ChatDome 已下线*\n主控进程已退出，暂停安全接管服务。", 
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error("Failed to send shutdown message to %s: %s", chat_id, e)
 
     def build(self) -> Application:
         """Build and configure the Telegram Application."""
@@ -78,6 +102,7 @@ class TelegramBot:
             Application.builder()
             .token(self.config.telegram.bot_token)
             .post_init(self.post_init)
+            .post_stop(self.post_stop)
             .build()
         )
 
@@ -86,7 +111,8 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("start", self._handle_help))
         self._app.add_handler(CommandHandler("clear", self._handle_clear))
         self._app.add_handler(CommandHandler("confirm", self._handle_confirm))
-        self._app.add_handler(CommandHandler("cmd-echo", self._handle_cmd_echo))
+        self._app.add_handler(CommandHandler("cmd_echo", self._handle_cmd_echo))
+        self._app.add_handler(CommandHandler("token", self._handle_token))
         self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
@@ -143,6 +169,26 @@ class TelegramBot:
         else:
             msg = "🔍 *Command Echo (命令回显模式) 已关闭* 🔴\n\n对话展示将恢复为干净清爽的安全专家总结模式。"
             
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _handle_token(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /token command — query local token usage statistics."""
+        if not self._check_auth(update):
+            return
+
+        chat_id = update.effective_chat.id
+        from chatdome.agent.tracker import TokenTracker
+        stats = TokenTracker.get_user_stats(chat_id)
+        
+        msg = (
+            "📊 *Token 资源消耗统计*\n\n"
+            f"👤 用户 ID: `{chat_id}`\n"
+            f"⬆️ 上行总花费 (Prompt): {stats['prompt_tokens']:,.0f} Tokens\n"
+            f"⬇️ 下行总花费 (Completion): {stats['completion_tokens']:,.0f} Tokens\n"
+            f"🔢 累计调用账单: {stats['total_tokens']:,.0f} Tokens"
+        )
         await update.message.reply_text(msg, parse_mode="Markdown")
 
     # ----- Message handler -----

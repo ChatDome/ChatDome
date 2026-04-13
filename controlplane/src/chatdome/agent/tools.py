@@ -52,7 +52,7 @@ class ToolDispatcher:
         if self._http_client and not self._http_client.is_closed:
             await self._http_client.aclose()
 
-    async def dispatch(self, tool_name: str, arguments_json: str, tool_call_id: str = "") -> str:
+    async def dispatch(self, tool_name: str, arguments_json: str, tool_call_id: str = "", chat_id: int = 0) -> str:
         """
         Dispatch a tool call and return the formatted result string.
         Raises PendingApprovalError if the command needs human confirmation.
@@ -61,6 +61,7 @@ class ToolDispatcher:
             tool_name: The function name from the LLM tool_call.
             arguments_json: The raw JSON arguments string.
             tool_call_id: The ID of this tool call.
+            chat_id: The ID of the chat context.
 
         Returns:
             Formatted result string to feed back to the LLM.
@@ -70,19 +71,15 @@ class ToolDispatcher:
         except json.JSONDecodeError as e:
             return f"参数解析失败: {e}"
 
-        handler = {
-            "run_security_check": self._handle_security_check,
-            "run_shell_command": self._handle_shell_command,
-            "whois_lookup": self._handle_whois_lookup,
-        }.get(tool_name)
-
-        if handler is None:
-            return f"未知工具: {tool_name}"
-
         try:
-            if tool_name == "run_shell_command":
-                return await self._handle_shell_command(args, tool_call_id)
-            return await handler(args)
+            if tool_name == "run_security_check":
+                return await self._handle_security_check(args)
+            elif tool_name == "run_shell_command":
+                return await self._handle_shell_command(args, tool_call_id, chat_id)
+            elif tool_name == "whois_lookup":
+                return await self._handle_whois_lookup(args)
+            else:
+                return f"未知工具: {tool_name}"
         except PendingApprovalError:
             raise
         except Exception as e:
@@ -99,7 +96,7 @@ class ToolDispatcher:
         result = await self.sandbox.execute_security_check(check_id, check_args)
         return self._format_command_result(result)
 
-    async def _handle_shell_command(self, args: dict[str, Any], tool_call_id: str) -> str:
+    async def _handle_shell_command(self, args: dict[str, Any], tool_call_id: str, chat_id: int = 0) -> str:
         """Evaluate and suspend an AI-generated shell command for user approval."""
         command = args.get("command", "")
         
@@ -110,7 +107,7 @@ class ToolDispatcher:
         if self.llm:
             from chatdome.agent.prompts import REVIEWER_SYSTEM_PROMPT
             logger.info("Running AI Reviewer for shell command: %s", command)
-            review = await self.llm.evaluate_command_safety(command, REVIEWER_SYSTEM_PROMPT)
+            review = await self.llm.evaluate_command_safety(command, REVIEWER_SYSTEM_PROMPT, chat_id=chat_id)
             safety_status = review.get("safety_status", "UNSAFE")
             impact_analysis = review.get("impact_analysis", "分析失败")
             
