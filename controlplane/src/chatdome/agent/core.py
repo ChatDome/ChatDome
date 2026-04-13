@@ -58,11 +58,11 @@ class Agent:
 
         return await self._run_loop(chat_id, session)
 
-    async def resume_session(self, chat_id: int, action: str) -> str:
-        """Resume a suspended session after user approval/rejection."""
+    async def resume_session(self, chat_id: int, action: str) -> tuple[str, str]:
+        """Resume a suspended session after user approval/rejection. Returns (raw_result, llm_response)."""
         session = self.session_manager.get_or_create(chat_id)
         if not session.pending_approval or not session.pending_tool_call_id:
-            return "ℹ️ 当前没有等待确认的命令。"
+            return "", "ℹ️ 当前没有等待确认的命令。"
             
         tool_call_id = session.pending_tool_call_id
         command = session.pending_command
@@ -74,7 +74,8 @@ class Agent:
         
         if action == "REJECT":
             logger.info("User rejected command: %s", command)
-            session.add_tool_result(tool_call_id, "由于存在安全风险，用户已拒绝执行该命令。请提供其他解决方案或向用户解释。")
+            result = "由于存在安全风险，用户已拒绝执行该命令。请提供其他解决方案或向用户解释。"
+            session.add_tool_result(tool_call_id, result)
         else:
             logger.info("User approved command: %s", command)
             try:
@@ -86,7 +87,8 @@ class Agent:
                 
             session.add_tool_result(tool_call_id, result)
             
-        return await self._run_loop(chat_id, session)
+        final_answer = await self._run_loop(chat_id, session)
+        return result, final_answer
 
     async def _run_loop(self, chat_id: int, session: Any) -> str:
         """Drive the ReAct loop forward."""
@@ -154,7 +156,13 @@ class Agent:
                         session.pending_approval = True
                         session.pending_tool_call_id = e.tool_call_id
                         session.pending_command = e.command
-                        return f"__PENDING_APPROVAL__:{json.dumps({'command': e.command, 'safety_status': e.safety_status, 'impact_analysis': e.impact_analysis})}"
+                        payload = {
+                            "command": e.command, 
+                            "safety_status": e.safety_status, 
+                            "impact_analysis": e.impact_analysis,
+                            "reason": getattr(e, 'reason', '')
+                        }
+                        return f"__PENDING_APPROVAL__:{json.dumps(payload)}"
 
                 # Continue the loop — send results back to LLM
                 continue

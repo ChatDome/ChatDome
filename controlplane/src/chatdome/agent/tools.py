@@ -22,11 +22,12 @@ logger = logging.getLogger(__name__)
 
 class PendingApprovalError(Exception):
     """Raised when a tool call requires user confirmation before execution."""
-    def __init__(self, command: str, safety_status: str, impact_analysis: str, tool_call_id: str):
+    def __init__(self, command: str, safety_status: str, impact_analysis: str, tool_call_id: str, reason: str = ""):
         self.command = command
         self.safety_status = safety_status
         self.impact_analysis = impact_analysis
         self.tool_call_id = tool_call_id
+        self.reason = reason
         super().__init__(f"Command requires approval: {command}")
 
 
@@ -99,6 +100,7 @@ class ToolDispatcher:
     async def _handle_shell_command(self, args: dict[str, Any], tool_call_id: str, chat_id: int = 0) -> str:
         """Evaluate and suspend an AI-generated shell command for user approval."""
         command = args.get("command", "")
+        reason = args.get("reason", "无说明")
         
         if not command:
             return "缺少 command 参数"
@@ -112,7 +114,7 @@ class ToolDispatcher:
             impact_analysis = review.get("impact_analysis", "分析失败")
             
             # Suspend loop and wait for human confirmation
-            raise PendingApprovalError(command, safety_status, impact_analysis, tool_call_id)
+            raise PendingApprovalError(command, safety_status, impact_analysis, tool_call_id, reason)
         
         # 2. Fallback (should not be reached normally)
         result = await self.sandbox.execute_shell_command(command, "LLM Generated")

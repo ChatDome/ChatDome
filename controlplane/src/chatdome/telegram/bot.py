@@ -239,13 +239,15 @@ class TelegramBot:
     # ----- Interactive Approval -----
 
     async def _send_approval_request(self, message, data: dict) -> None:
-        command = data["command"]
-        safety = data["safety_status"]
-        impact = data["impact_analysis"]
+        command = data.get("command", "")
+        safety = data.get("safety_status", "UNSAFE")
+        impact = data.get("impact_analysis", "")
+        reason = data.get("reason", "未提供原因说明")
         
         text = (
             f"⚠️ *AI 尝试执行动态命令*\n"
             f"`{command}`\n\n"
+            f"🧠 *AI 思维链 (为什么这么做？)*\n_{reason}_\n\n"
             f"🤖 *影响审查*\n{impact}\n\n"
         )
         
@@ -287,17 +289,20 @@ class TelegramBot:
         
         thinking_msg = await query.message.reply_text("🤔 处理中...")
         try:
-            response = await self.agent.resume_session(chat_id, action)
+            raw_result, final_response = await self.agent.resume_session(chat_id, action)
             try:
                 await thinking_msg.delete()
             except Exception:
                 pass
                 
-            if response.startswith("__PENDING_APPROVAL__:"):
-                data = json.loads(response.split(":", 1)[1])
+            if action == "APPROVE" and raw_result:
+                await self._send_long_message(query.message, f"⚙️ *真实沙箱执行结果*:\n```text\n{raw_result}\n```")
+                
+            if final_response.startswith("__PENDING_APPROVAL__:"):
+                data = json.loads(final_response.split(":", 1)[1])
                 await self._send_approval_request(query.message, data)
             else:
-                await self._send_long_message(query.message, response)
+                await self._send_long_message(query.message, final_response)
         except Exception as e:
             await query.message.reply_text(f"⚠️ 恢复会话异常: {e}")
 
@@ -309,17 +314,20 @@ class TelegramBot:
         chat_id = update.effective_chat.id
         thinking_msg = await update.message.reply_text("🤔 强制批准执行中...")
         try:
-            response = await self.agent.resume_session(chat_id, "APPROVE")
+            raw_result, final_response = await self.agent.resume_session(chat_id, "APPROVE")
             try:
                 await thinking_msg.delete()
             except Exception:
                 pass
                 
-            if response.startswith("__PENDING_APPROVAL__:"):
-                data = json.loads(response.split(":", 1)[1])
+            if raw_result:
+                await self._send_long_message(update.message, f"⚙️ *真实沙箱执行结果*:\n```text\n{raw_result}\n```")
+                
+            if final_response.startswith("__PENDING_APPROVAL__:"):
+                data = json.loads(final_response.split(":", 1)[1])
                 await self._send_approval_request(update.message, data)
             else:
-                await self._send_long_message(update.message, response)
+                await self._send_long_message(update.message, final_response)
         except Exception as e:
             await update.message.reply_text(f"⚠️ 恢复会话异常: {e}")
 
