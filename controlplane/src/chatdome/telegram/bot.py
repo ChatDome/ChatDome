@@ -247,8 +247,9 @@ class TelegramBot:
         text = (
             f"⚠️ *AI 尝试执行动态命令*\n"
             f"`{command}`\n\n"
-            f"🧠 *AI 思维链 (为什么这么做？)*\n_{reason}_\n\n"
-            f"🤖 *影响审查*\n{impact}\n\n"
+            f"📋 *执行评估*\n"
+            f"• *意图*: {reason}\n"
+            f"• *影响*: {impact}\n\n"
         )
         
         reply_markup = None
