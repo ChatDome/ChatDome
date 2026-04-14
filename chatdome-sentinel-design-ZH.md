@@ -21,6 +21,9 @@
 | **混合命令模型** | 模板命令优先（零 token）+ AI 动态生成兜底（灵活性），兼顾效率与覆盖面 |
 | **分级告警** | 借鉴 Wazuh level 体系，告警按严重度分级响应 |
 | **告警抑制** | 相同告警在冷却窗口内不重复推送，防止消息风暴 |
+| **威胁态势感知** | 双层架构：结构化索引（Counter 多维信封，零 token 匹配）+ AI 自然语言叙事（理解与演化），统一了攻击链关联与威胁状态机 |
+| **交互式白名单** | 用户通过自然语言管理白名单（"这个 IP 是跳板机"），AI 自动解析并持久化 |
+| **哨兵记忆库** | 独立于会话上下文的持久化记忆，记住主机画像、已知服务、历史处置，避免乌龙误报 |
 | **AI 闭环** | 借鉴 CrowdStrike，异常 → AI 分析 → 处置建议 → 用户确认 → 执行修复 |
 | **最大复用** | 复用现有 `CommandSandbox`、`LLMClient`、Telegram 推送 |
 
@@ -1227,9 +1230,1340 @@ ENRICHMENT_MAP = {
 
 ---
 
-## 7. 调度器设计
+## 7. 威胁态势感知（Threat Situational Awareness）
 
-### 7.1 Scheduler 核心逻辑
+> 本章将"攻击链关联"与"威胁状态机"两个概念统一为同一套机制。
+> 核心产出是 **威胁信封（Threat Envelope）**——一个结构化索引 + 自然语言叙事的双层容器，
+> 它既是对历史告警的实时压缩，又是判断新告警关联性的匹配引擎。
+
+### 7.1 设计动机
+
+传统主机安全产品在"告警关联"上有两个极端：
+
+| 方案 | 做法 | 缺陷 |
+|------|------|------|
+| 预设攻击链模板 | YAML 定义固定步骤序列，按模式匹配 | 攻击者不按剧本走，预设模板覆盖面有限 |
+| 逐条 AI 分析 | 每条告警发给 LLM 判断关联性 | token 消耗不可控，延迟大 |
+
+ChatDome Sentinel 选择第三条路：**零成本结构化预判 + 按需 AI 深度分析**。
+
+- **结构化索引**（信封）用于高速判断"新告警跟已有状态有没有关系"——纯集合运算、零 token
+- **自然语言叙事**（AI 生成）用于理解"到底发生了什么"——仅在确认关联后调用
+
+这是在 **穷举枚举** 与 **纯自然语言** 之间的折中：
+
+```
+穷举枚举                     威胁信封                        纯自然语言
+under_ssh_brute_force       结构化索引 + 自然语言叙事         "主机好像在被攻击..."
+│                           │                               │
+├ 能精确匹配                ├ 能精确匹配（索引层）             ├ 不能精确匹配
+├ 不能表达未知场景           ├ 能表达任意场景（叙事层）         ├ 能表达任意场景
+├ 不需要 AI                ├ 索引层不需要 AI                 ├ 每次都要 AI
+├ 无法演化                  ├ 索引自动增长，叙事 AI 演化       ├ 能演化但成本高
+└ 覆盖有限                  └ 覆盖无限                       └ 覆盖无限
+```
+
+> **核心理念**：把一个威胁状态拆成两层职责——
+> **索引层** 回答"跟我有没有关系"（检索问题，不该浪费推理能力）；
+> **叙事层** 回答"到底发生了什么"（理解问题，需要 AI）。
+> 每一层只做自己擅长的事，互不越界。
+
+**信封结构化示意**：
+
+```
+┌─────────────────────── ThreatEnvelope ───────────────────────┐
+│                                                              │
+│  ┌─── 元数据 ──────────────────────────────────────────────┐  │
+│  │ envelope_id : "env-a3f7"                                │  │
+│  │ created_at  : 2026-04-14T14:21:00Z                      │  │
+│  │ last_updated: 2026-04-14T15:38:00Z                      │  │
+│  │ alert_count : 52                                        │  │
+│  │ severity    : critical                                  │  │
+│  │ status      : active                                    │  │
+│  │ ttl         : 3600 (动态计算, 见 7.9)                    │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                                                              │
+│  ┌─── 索引层 (dict[str, Counter]) ─── 零 token 匹配 ──────┐  │
+│  │                                                         │  │
+│  │  ip:       { 45.xx.xx.12: 47,  103.xx.xx.5: 2 }        │  │
+│  │  tactic:   { credential_access: 47,                     │  │
+│  │              initial_access: 1,  persistence: 1 }       │  │
+│  │  user:     { root: 3,  backup_svc: 1 }                 │  │
+│  │  check_id: { ssh_bruteforce: 47,                        │  │
+│  │              ssh_success_login: 1,                       │  │
+│  │              ssh_authorized_keys: 1 }                   │  │
+│  │  port:     { 22: 48 }                                   │  │
+│  │  file:     { /root/.ssh/authorized_keys: 1 }            │  │
+│  │                                                         │  │
+│  │  ▲ Counter 值 = 出现次数 → 高频值自动获得高权重          │  │
+│  │  ▲ 维度由 extract_facets() 自动提取 + AI 按需扩展        │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                                                              │
+│  ┌─── 叙事层 (str) ─── AI 生成，仅强关联时更新 ────────────┐  │
+│  │                                                         │  │
+│  │  "主机正在遭受来自 45.xx.xx.12 (俄罗斯) 的 SSH 暴力      │  │
+│  │   破解。14:35 root 从该 IP 登录成功，14:37 新增用户      │  │
+│  │   backup_svc，14:38 authorized_keys 被修改。攻击者       │  │
+│  │   已完成 SSH 公钥持久化。"                               │  │
+│  │                                                         │  │
+│  │  ▲ 由 NARRATIVE_UPDATE_PROMPT 驱动更新                   │  │
+│  │  ▲ 保持 ≤200 字，时间线连贯                              │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                                                              │
+│  ┌─── 生命周期 ─── 四态模型 (见 7.9) ─────────────────────┐  │
+│  │                                                         │  │
+│  │  active ──TTL内无新告警──▶ decaying ──TTL到期──▶         │  │
+│  │    ▲  ◀──新告警命中──┘       │                          │  │
+│  │    │                         └──新告警命中──▶ active     │  │
+│  │    │                                                    │  │
+│  │  hibernating ──HIBERNATION_MAX到期──▶ expired            │  │
+│  │    ▲  ◀──新告警命中索引──┘              │               │  │
+│  │    │                              归档+记忆库+恢复通知    │  │
+│  │    └── decaying TTL 到期时转入                            │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 7.2 威胁信封数据结构
+
+```python
+@dataclass
+class ThreatEnvelope:
+    """
+    威胁信封 — 结构化索引 + 自然语言叙事的双层容器。
+    
+    索引层（Counter dict）: 用于零成本匹配新告警的关联性。
+        每个维度是一个 Counter，key 是具体值，value 是出现次数。
+        高频值自然获得高权重，无需人工设定。
+    
+    叙事层（AI 生成的自然语言）: 对"到底发生了什么"的实时压缩描述。
+        由 AI 在关联告警被吸收时动态更新和演化。
+    """
+
+    # ── 元数据 ──
+    envelope_id: str                       # 唯一 ID
+    created_at: datetime                   # 创建时间
+    last_updated: datetime                 # 最后更新时间
+    alert_count: int                       # 已吸收的告警总数
+    severity: str                          # 当前严重程度 (info/warning/high/critical)
+
+    # ── 索引层: 多维 Counter 索引 ──
+    # 每个维度是一个 Counter[str, int]
+    # 维度由代码自动提取 + AI 按需扩展
+    envelope: dict[str, Counter]
+    # 示例:
+    # {
+    #     "ip":       Counter({"45.xx.xx.12": 47, "103.xx.xx.5": 2}),
+    #     "tactic":   Counter({"credential_access": 47, "initial_access": 1, "persistence": 1}),
+    #     "user":     Counter({"root": 3, "backup_svc": 1}),
+    #     "check_id": Counter({"ssh_bruteforce": 47, "ssh_success_login": 1}),
+    #     "port":     Counter({"22": 48}),
+    #     "file":     Counter({"/root/.ssh/authorized_keys": 1}),
+    # }
+
+    # ── 叙事层: AI 生成的自然语言 ──
+    narrative: str
+    # 示例:
+    # "主机正在遭受来自 45.xx.xx.12 (俄罗斯) 的 SSH 暴力破解，
+    #  已持续 30 分钟，累计 2341 次尝试。14:35 root 从该 IP 登录成功，
+    #  14:38 authorized_keys 被修改，攻击者已完成 SSH 公钥持久化。"
+
+    # ── 生命周期（四态模型） ──
+    status: str                            # "active" | "decaying" | "hibernating" | "expired"
+    base_severity: str                     # 创建时的 severity，用于计算 base_ttl
+
+    # ── 休眠态专用 ──
+    hibernated_at: datetime | None = None  # 进入休眠的时间
+    compressed_narrative: str = ""         # 休眠时叙事压缩为一行摘要
+
+    # ── 动态 TTL 计算 ──
+    @property
+    def stage_count(self) -> int:
+        """ATT&CK 战术阶段覆盖数 — 从索引层零成本读取"""
+        return len(self.envelope.get("tactic", Counter()))
+
+    @property
+    def ttl(self) -> int:
+        """
+        动态 TTL = base_ttl × 阶段覆盖倍率，上限 72h。
+        阶段越多 → 攻击链越长 → APT 可能性越大 → 信封存活越久。
+        """
+        BASE_TTL = {"warning": 900, "high": 1800, "critical": 3600}  # 15m / 30m / 60m
+        STAGE_MULTIPLIER = {1: 1, 2: 4, 3: 24}                      # ×1 / ×4 / ×24
+        MAX_TTL = 259200  # 72h
+
+        base = BASE_TTL.get(self.severity, 1800)
+        multiplier = STAGE_MULTIPLIER.get(self.stage_count, 72)      # 4+ stages → ×72
+        return min(base * multiplier, MAX_TTL)
+
+    @property
+    def is_expired(self) -> bool:
+        if self.status == "hibernating":
+            if self.hibernated_at is None:
+                return False
+            return (datetime.utcnow() - self.hibernated_at).total_seconds() > HIBERNATION_MAX
+        return (datetime.utcnow() - self.last_updated).total_seconds() > self.ttl
+
+    @property
+    def ttl_remaining(self) -> int:
+        if self.status == "hibernating":
+            if self.hibernated_at is None:
+                return HIBERNATION_MAX
+            elapsed = (datetime.utcnow() - self.hibernated_at).total_seconds()
+            return max(0, int(HIBERNATION_MAX - elapsed))
+        elapsed = (datetime.utcnow() - self.last_updated).total_seconds()
+        return max(0, int(self.ttl - elapsed))
+
+    def hibernate(self):
+        """TTL 到期 → 转入休眠态：丢弃叙事全文，只保留索引和一行摘要"""
+        self.compressed_narrative = self.narrative[:80] + "..."
+        self.narrative = ""
+        self.status = "hibernating"
+        self.hibernated_at = datetime.utcnow()
+
+    def reawaken(self):
+        """休眠态被新告警命中 → 恢复为活跃态"""
+        self.status = "active"
+        self.narrative = self.compressed_narrative  # 临时恢复摘要，等 AI 重新生成
+        self.compressed_narrative = ""
+        self.hibernated_at = None
+        self.last_updated = datetime.utcnow()
+
+
+HIBERNATION_MAX = 604800  # 7 天 — 休眠态最大存活时间
+```
+
+### 7.3 ATT&CK 战术标签体系
+
+每个 Pack 命令的 `tags` 字段中增加 ATT&CK 战术阶段标签，用于零成本判断告警的战术属性：
+
+```yaml
+# Pack YAML 中的 tags 扩展示例
+ssh_bruteforce:     tags: [ssh, credential_access]       # 凭证获取
+ssh_success_login:  tags: [ssh, initial_access]           # 初始访问
+passwd_changes:     tags: [user, persistence]              # 持久化
+ssh_authorized_keys: tags: [ssh, persistence]              # 持久化
+open_ports:         tags: [network, command_and_control]   # 命令控制
+suspicious_processes: tags: [process, execution]           # 执行
+deleted_but_running: tags: [process, defense_evasion]      # 防御规避
+crontab_list:       tags: [process, persistence]           # 持久化
+webshell_scan:      tags: [file_integrity, initial_access] # 初始访问
+```
+
+**ChatDome 采用的 ATT&CK 战术阶段集**（精简适配主机安全场景）:
+
+```python
+ATTCK_TACTICS = {
+    "reconnaissance",       # 侦察
+    "initial_access",       # 初始访问
+    "execution",            # 执行
+    "persistence",          # 持久化
+    "privilege_escalation", # 提权
+    "defense_evasion",      # 防御规避
+    "credential_access",    # 凭证获取
+    "discovery",            # 发现（内网探测）
+    "lateral_movement",     # 横向移动
+    "collection",           # 数据收集
+    "command_and_control",  # 命令控制
+    "exfiltration",         # 数据外传
+    "impact",               # 影响（破坏/加密）
+}
+```
+
+### 7.4 告警特征提取（零 token）
+
+每条告警到达时，自动从已有的结构化字段中提取匹配维度，不需要 AI 参与：
+
+```python
+def extract_facets(alert: dict, command_tags: list[str]) -> dict[str, set]:
+    """
+    从告警的结构化字段中提取匹配维度 — 纯字段映射，零 token。
+    返回的 facets 用于与现有信封的索引层做集合匹配。
+    """
+    facets = {}
+
+    # 从命令 tags 中提取 ATT&CK 战术标签
+    tactics = set(command_tags) & ATTCK_TACTICS
+    if tactics:
+        facets["tactic"] = tactics
+
+    # 从告警上下文中提取实体
+    ctx = alert.get("context", {})
+    if ctx.get("source_ip"):    facets["ip"] = {ctx["source_ip"]}
+    if ctx.get("port"):         facets["port"] = {str(ctx["port"])}
+    if ctx.get("user"):         facets["user"] = {ctx["user"]}
+    if ctx.get("file"):         facets["file"] = {ctx["file"]}
+    if ctx.get("process"):      facets["process"] = {ctx["process"]}
+    if ctx.get("pid"):          facets["pid"] = {str(ctx["pid"])}
+
+    # check_id 始终作为一个维度
+    facets["check_id"] = {alert["check_id"]}
+
+    return facets
+```
+
+### 7.5 信封匹配算法
+
+```python
+def match_score(envelope: dict[str, Counter], alert_facets: dict[str, set]) -> float:
+    """
+    通用匹配：计算新告警与信封索引的关联分数。
+    
+    逻辑：遍历告警的每个维度，若该维度的值存在于信封的 Counter 中，
+    则累加该值的 Counter 计数作为分数。
+    
+    效果：高频出现的值（如频繁攻击的 IP）自然获得更高权重，
+    无需人工设定任何权重参数。
+    """
+    score = 0.0
+    for dim, values in alert_facets.items():
+        if dim in envelope:
+            for v in values:
+                if v in envelope[dim]:
+                    score += envelope[dim][v]
+    return score
+```
+
+**匹配结果决策**：
+
+```python
+# 阈值可配置，默认值：
+STRONG_MATCH_THRESHOLD = 2      # 匹配分 ≥ 2 → 强关联
+WEAK_MATCH_THRESHOLD = 1        # 匹配分 ≥ 1 → 弱关联
+
+score = match_score(envelope.envelope, facets)
+
+if score >= STRONG_MATCH_THRESHOLD:
+    # 强关联 → 立即吸收 + 调 AI 更新叙事
+    action = "absorb_and_update"
+elif score >= WEAK_MATCH_THRESHOLD:
+    # 弱关联 → 先吸收索引（计数），暂不调 AI
+    # 累计弱关联 ≥ 3 次后触发一次 AI 更新
+    action = "absorb_silent"
+else:
+    # 无关联 → 进入孤立告警缓冲区
+    action = "isolate"
+```
+
+### 7.6 信封吸收逻辑
+
+```python
+def absorb_alert(envelope: ThreatEnvelope, facets: dict[str, set]):
+    """
+    将告警的 facets 吸收进信封索引层。
+    纯 Counter 累加，零 token。
+    每次吸收都会重置 TTL 计时器（攻击还在继续 → 信封不过期）。
+    """
+    for dim, values in facets.items():
+        envelope.envelope.setdefault(dim, Counter())
+        for v in values:
+            envelope.envelope[dim][v] += 1
+
+    envelope.alert_count += 1
+    envelope.last_updated = datetime.utcnow()
+    # 吸收即续命：只要攻击还在继续，信封就不会过期
+```
+
+### 7.7 AI 叙事更新
+
+仅在 **强关联吸收** 或 **弱关联累积触发** 时调用 AI 更新叙事：
+
+```python
+NARRATIVE_UPDATE_PROMPT = """你是 ChatDome Sentinel 威胁分析引擎。
+
+当前威胁状态叙事：
+```
+{current_narrative}
+```
+
+信封索引摘要（高频维度 top-5）：
+{envelope_summary}
+
+新吸收的告警：
+- 检查项: {check_name} ({check_id})
+- 严重级别: {severity}
+- 时间: {timestamp}
+- 原始输出:
+```
+{raw_output}
+```
+
+请完成以下任务：
+1. 更新威胁叙事：将新告警融入已有叙事，保持时间线连贯，描述攻击演进
+2. 判断 severity 是否需要升级
+3. 判断是否存在 ATT&CK 攻击阶段跃迁（如从"凭证获取"进入"持久化"阶段）
+4. 指定需要添加到信封索引的新维度和值
+
+输出 JSON：
+{{
+    "narrative": "更新后的完整叙事（保持简洁，不超过 200 字）",
+    "severity": "当前严重级别 (info/warning/high/critical)",
+    "stage_transition": true/false,
+    "should_notify_user": true/false,
+    "notify_reason": "如需推送，简述原因（如：攻击进入持久化阶段）",
+    "envelope_add": {{
+        "维度名": ["值1", "值2"]
+    }},
+    "envelope_remove": {{
+        "维度名": ["值1"]
+    }}
+}}
+"""
+
+
+async def update_narrative(envelope: ThreatEnvelope, alert: dict, llm: LLMClient) -> dict:
+    """
+    调用 AI 更新信封叙事层。
+    同时根据 AI 返回的 envelope_add/remove 更新索引层。
+    """
+    response = await llm.chat_completion(
+        messages=[
+            {"role": "system", "content": NARRATIVE_UPDATE_PROMPT.format(
+                current_narrative=envelope.narrative,
+                envelope_summary=format_envelope_summary(envelope.envelope),
+                check_name=alert["check_name"],
+                check_id=alert["check_id"],
+                severity=alert["severity"],
+                timestamp=alert["timestamp"],
+                raw_output=alert.get("raw_output", ""),
+            )}
+        ]
+    )
+    result = json.loads(response.content)
+
+    # 更新叙事层
+    envelope.narrative = result["narrative"]
+    envelope.severity = result["severity"]
+
+    # 更新索引层（AI 指定的增量）
+    for dim, values in result.get("envelope_add", {}).items():
+        envelope.envelope.setdefault(dim, Counter())
+        for v in values:
+            if v not in envelope.envelope[dim]:
+                envelope.envelope[dim][v] = 1  # AI 新增的维度初始计数为 1
+
+    for dim, values in result.get("envelope_remove", {}).items():
+        if dim in envelope.envelope:
+            for v in values:
+                envelope.envelope[dim].pop(v, None)
+
+    return result
+
+
+def format_envelope_summary(envelope: dict[str, Counter]) -> str:
+    """将索引层格式化为人类可读摘要，供 AI prompt 使用"""
+    lines = []
+    for dim, counter in envelope.items():
+        top5 = counter.most_common(5)
+        values_str = ", ".join(f"{v}({c}次)" for v, c in top5)
+        lines.append(f"  {dim}: {values_str}")
+    return "\n".join(lines)
+```
+
+### 7.8 信封创建：两条路径
+
+```
+新告警到达 → 遍历所有活跃信封求匹配分
+    │
+    ├─ 匹配到现有信封 → 吸收（7.6 + 7.7）
+    │
+    └─ 所有信封都不匹配 → 进入「孤立告警缓冲区」
+                          │
+                          ├─ 路径 A：单条重磅告警
+                          │   severity = critical
+                          │   → 立即调 AI 创建新信封
+                          │   → AI 生成初始叙事 + 初始索引维度
+                          │   → 推送告警给用户
+                          │
+                          └─ 路径 B：孤立告警积累
+                              定期扫描缓冲区（每 60s），按以下逻辑聚类：
+                              │
+                              ├─ 聚类维度: 同源 IP / 同目标用户 / 时间窗口内
+                              │
+                              ├─ 对每个聚类，提取覆盖的 ATT&CK 战术阶段集合
+                              │
+                              ├─ 触发条件:
+                              │   某个聚类覆盖了 ≥2 个不同的 ATT&CK 战术阶段
+                              │   AND 包含 ≥1 条 severity ≥ high
+                              │
+                              ├─ 不触发的情况:
+                              │   磁盘满 + 内存高 + CPU 高
+                              │   → 全部无战术标签 → 不触发（纯系统问题）
+                              │   6 条 SSH 暴力破解
+                              │   → 全是 credential_access → 同一个阶段 → 不触发
+                              │
+                              └─ 触发的情况:
+                                  SSH 暴力破解(credential_access) + 登录成功(initial_access)
+                                  → 2 个阶段 → 打包调 AI 创建新信封
+```
+
+```python
+class IsolatedAlertBuffer:
+    """孤立告警缓冲区"""
+
+    def __init__(self, window: int = 3600):
+        self._buffer: deque[dict] = deque()       # 未归属任何信封的告警
+        self._window = window                      # 缓冲窗口（秒）
+
+    def add(self, alert: dict, facets: dict[str, set]):
+        self._buffer.append({"alert": alert, "facets": facets, "time": datetime.utcnow()})
+        self._evict_expired()
+
+    def scan_for_clusters(self) -> list[list[dict]] | None:
+        """
+        扫描缓冲区，尝试发现可关联的告警聚类。
+        聚类条件：≥2 个不同 ATT&CK 战术阶段 + ≥1 条 high/critical。
+        """
+        self._evict_expired()
+
+        # Step 1: 按 IP 聚类（同一攻击源的行为更可能关联）
+        ip_clusters: dict[str, list[dict]] = {}
+        no_ip: list[dict] = []
+        for item in self._buffer:
+            ips = item["facets"].get("ip", set())
+            if ips:
+                for ip in ips:
+                    ip_clusters.setdefault(ip, []).append(item)
+            else:
+                no_ip.append(item)
+
+        # Step 2: 对每个聚类检查战术阶段覆盖
+        results = []
+        for ip, items in ip_clusters.items():
+            all_tactics = set()
+            has_high = False
+            for item in items:
+                all_tactics |= item["facets"].get("tactic", set())
+                if item["alert"]["severity"] in ("high", "critical"):
+                    has_high = True
+
+            if len(all_tactics) >= 2 and has_high:
+                results.append(items)
+                # 从缓冲区中移除已聚类的告警
+                for item in items:
+                    if item in self._buffer:
+                        self._buffer.remove(item)
+
+        # Step 3: 对无 IP 的告警，按时间密度聚类（5 分钟内）
+        # ...（类似逻辑，此处省略）
+
+        return results if results else None
+
+    def _evict_expired(self):
+        cutoff = datetime.utcnow() - timedelta(seconds=self._window)
+        while self._buffer and self._buffer[0]["time"] < cutoff:
+            self._buffer.popleft()
+```
+
+### 7.9 信封生命周期（四态模型）
+
+传统安全系统使用固定 TTL，无法应对 APT 长周期攻击（中位驻留 21 天）。ChatDome 采用 **四态生命周期** + **动态 TTL** 双重机制：
+
+#### 7.9.1 四态流转
+
+```
+                    ┌────────────────────────────────────────────────────┐
+                    │              信封生命周期（四态模型）                │
+                    │                                                    │
+  创建 ─────────────┤                                                    │
+  (AI 生成初始叙事)  │   ┌──────────┐                                     │
+                    │   │  活跃期   │ ◄─── 新告警匹配命中                  │
+                    │   │ (active)  │      → 吸收: Counter++              │
+                    │   │          │      → 若强关联: AI 更新叙事          │
+                    │   │          │      → 重置 TTL 计时器               │
+                    │   │          │                                      │
+                    │   │          │   每次吸收都续命                      │
+                    │   │          │   只要攻击还在继续                    │
+                    │   │          │   信封就不会过期                      │
+                    │   └────┬─────┘                                      │
+                    │        │                                            │
+                    │        │ 动态 TTL 时间内无新告警命中                  │
+                    │        ▼                                            │
+                    │   ┌──────────┐                                      │
+                    │   │  衰减期   │  最后一次更新后开始倒计时              │
+                    │   │(decaying)│  期间仍可被新告警激活                  │
+                    │   │          │  → 激活则回到活跃期                   │
+                    │   └────┬─────┘                                      │
+                    │        │                                            │
+                    │        │ 动态 TTL 到期                               │
+                    │        ▼                                            │
+                    │   ┌──────────┐                                      │
+                    │   │  休眠期   │  不立即归档，转入低成本休眠            │
+                    │   │(hiberna- │  → 叙事压缩为一行摘要                 │
+                    │   │  ting)   │  → 仅保留 Counter 索引（~200B）       │
+                    │   │          │  → 持久化到 SQLite                   │
+                    │   │          │  → 新告警仍可匹配索引（零 token）      │
+                    │   │          │  → 命中则 reawaken → 回到活跃期       │
+                    │   │          │  → HIBERNATION_MAX = 7 天             │
+                    │   └────┬─────┘                                      │
+                    │        │                                            │
+                    │        │ 休眠超过 7 天，且未被唤醒                     │
+                    │        ▼                                            │
+                    │   ┌──────────┐                                      │
+                    │   │  过期     │                                      │
+                    │   │(expired) │  → 推送恢复通知给用户                  │
+                    │   │          │  → 完整叙事写入历史存档                │
+                    │   │          │  → 写入哨兵记忆库                     │
+                    │   │          │  → 从活跃/休眠列表移除                 │
+                    │   └──────────┘                                      │
+                    └────────────────────────────────────────────────────┘
+```
+
+#### 7.9.2 动态 TTL 策略
+
+固定 TTL 无法兼顾"噪音快过期"和"APT 长追踪"两个需求。动态 TTL 基于 ATT&CK 阶段覆盖度自动升档——阶段越多，说明攻击链越长，APT 可能性越大，信封自动获得更长的存活时间。
+
+```
+动态 TTL = min(base_ttl × stage_multiplier, MAX_TTL)
+
+base_ttl（按当前 severity）:
+  severity = warning   → 15min  (900s)
+  severity = high      → 30min  (1800s)
+  severity = critical  → 60min  (3600s)
+
+stage_multiplier（按 ATT&CK 战术覆盖数，零 token，读 Counter 即可）:
+  1 stage    → ×1      单阶段噪音，正常过期 (15min-1h)
+  2 stages   → ×4      攻击链初现，延长至 (1h-4h)
+  3 stages   → ×24     多阶段入侵确认 (6h-24h)
+  4+ stages  → ×72     APT 级持久威胁 (1.5d-3d)
+
+MAX_TTL = 72h          绝对上限
+
+被用户主动关闭 /sentinel close <id>  → 立即归档（跳过休眠）
+```
+
+**效果示例**：
+
+| 场景 | 阶段 | severity | 动态 TTL |
+|------|------|----------|---------|
+| 单次 SSH 暴力破解 | credential_access (1) | warning | 15min × 1 = **15min** |
+| SSH 爆破 + 登录成功 | credential_access + initial_access (2) | high | 30min × 4 = **2h** |
+| 爆破 + 登录 + 植入公钥 | 上 + persistence (3) | critical | 60min × 24 = **24h** |
+| 完整 APT 链 | 4+ stages | critical | 60min × 72 = **72h** → 休眠 **7天** |
+
+> **关键特性**：信封在活跃期每吸收一条告警就重置 TTL 计时器。如果一次 APT 攻击持续活跃了 3 天（不断有新告警命中），信封会一直处于活跃态——动态 TTL 只在攻击"暂停"后的沉默期才起作用。
+
+#### 7.9.3 休眠态机制
+
+休眠态是四态模型的核心创新，解决了传统系统"要么占内存，要么丢状态"的两难困境：
+
+| 维度 | 活跃/衰减期 | 休眠期 |
+|------|------------|--------|
+| 内存占用 | 完整（索引+叙事） | 仅索引 (~200B) |
+| 叙事层 | 完整自然语言 | 压缩为 ≤80 字符摘要 |
+| 匹配参与 | 优先匹配 | 回退匹配（活跃信封无命中后再查） |
+| 最大存续 | 动态 TTL (15min-72h) | HIBERNATION_MAX = 7 天 |
+| 存储位置 | 内存（活跃列表） | SQLite（持久化） |
+
+**休眠匹配流程**：
+
+```
+新告警 → extract_facets()
+    │
+    ├─ Step 1: 遍历活跃信封 match_score()
+    │   → 命中 → 吸收（正常流程）
+    │
+    └─ Step 2: 活跃信封全部未命中
+        → 遍历休眠信封索引 match_score()  ← 仍是 Counter 交叉，零 token
+            │
+            ├─ 命中 (score ≥ STRONG_MATCH_THRESHOLD)
+            │   → reawaken()：恢复为活跃态
+            │   → AI 生成"间隔性叙事更新"
+            │      （告知距上次活动已过 N 小时/天）
+            │   → 推送通知用户："休眠威胁被重新激活"
+            │
+            └─ 未命中 → 进入孤立告警缓冲区（正常流程）
+```
+
+**唤醒叙事 Prompt**（追加到 NARRATIVE_UPDATE_PROMPT 的上下文中）:
+
+```python
+REAWAKEN_CONTEXT = """
+⚠️ 这是一个从休眠态被重新激活的信封。
+上次活跃时间: {last_updated}
+休眠时长: {hibernation_duration}
+休眠前的摘要: {compressed_narrative}
+
+请在叙事中体现时间间隔，例如"沉寂 N 小时后，攻击者再次现身"。
+这种间隔性活动是 APT 的典型特征。
+"""
+```
+
+#### 7.9.4 四态生命周期管理代码
+
+```python
+async def manage_envelope_lifecycle(envelopes: list[ThreatEnvelope],
+                                     hibernating: list[ThreatEnvelope],
+                                     db: SQLiteStore,
+                                     alerter: TelegramAlerter,
+                                     memory_vault: SentinelMemoryVault):
+    """
+    定期调用（每 60s），管理所有信封的状态流转。
+    """
+    now = datetime.utcnow()
+
+    # 1. 活跃/衰减 → 休眠
+    for env in list(envelopes):
+        if env.is_expired and env.status in ("active", "decaying"):
+            env.hibernate()
+            envelopes.remove(env)
+            hibernating.append(env)
+            await db.save_hibernating_envelope(env)
+            # 不推送通知 — 休眠是静默的，用户不需要知道
+
+    # 2. 休眠 → 过期（真正归档）
+    for env in list(hibernating):
+        if env.is_expired:
+            hibernating.remove(env)
+            await db.archive_envelope(env)
+            await memory_vault.learn_from_envelope(env)
+            await alerter.send_recovery_notification(env)
+            await db.delete_hibernating_envelope(env.envelope_id)
+```
+
+### 7.10 信封数量的自然收敛
+
+无需人为限制信封数量。匹配机制本身就是收敛力量——攻击链上的所有告警会因为 IP / 用户 / 进程等维度交叉而被吸进同一个信封。
+
+| 场景 | 活跃信封数 |
+|------|-----------|
+| 平安无事 | 0 |
+| 日常噪音（偶发 SSH 爆破） | 0-1 |
+| 一次完整入侵（同一攻击源） | 1（所有阶段的告警被同一个信封吸收） |
+| 同时被两拨不同源 IP 攻击 | 2（IP 不交叉，各自成信封） |
+| 极端情况 | 3-5（硬上限兜底，超出则淘汰最旧的低 severity 信封） |
+
+```python
+MAX_ACTIVE_ENVELOPES = 10   # 硬上限，防止资源泄漏
+```
+
+### 7.11 与告警流程的集成
+
+```
+告警到达
+    │
+    ├─ Step 1: 特征提取
+    │   extract_facets(alert, command_tags) → facets
+    │
+    ├─ Step 2: 白名单检查（Section 9）
+    │   WhitelistManager.is_whitelisted() → 命中则跳过
+    │
+    ├─ Step 3: 信封匹配
+    │   遍历所有活跃信封，计算 match_score
+    │   │
+    │   ├─ 强关联 (score ≥ 2)
+    │   │   → absorb_alert() 吸收索引
+    │   │   → AI update_narrative() 更新叙事
+    │   │   → AI 返回 should_notify_user?
+    │   │       ├─ true (阶段跃迁) → 推送升级告警
+    │   │       └─ false → 静默吸收（已在此状态中）
+    │   │
+    │   ├─ 弱关联 (score ≥ 1)
+    │   │   → absorb_alert() 静默吸收
+    │   │   → 累计弱关联 ≥ 3 次 → 触发 AI 更新
+    │   │
+    │   └─ 无关联
+    │       → 进入 Step 3.5
+    │
+    ├─ Step 3.5: 休眠信封匹配（回退）
+    │   遍历休眠信封索引，计算 match_score
+    │   │
+    │   ├─ 强关联 → reawaken() 唤醒信封
+    │   │   → AI 生成间隔性叙事（含休眠时长）
+    │   │   → 推送 "⚠️ 休眠威胁被重新激活"
+    │   │
+    │   └─ 无关联
+    │       → 进入孤立告警缓冲区
+    │       → 单条 critical → 立即创建新信封
+    │       → 否则等待缓冲区聚类扫描
+    │
+    ├─ Step 4: 缓冲区定期扫描 (每 60s)
+    │   scan_for_clusters()
+    │   → 发现聚类 → 打包调 AI 创建新信封
+    │
+    └─ Step 5: 信封生命周期管理 (每 60s)
+        manage_envelope_lifecycle()
+        → 活跃/衰减信封 TTL 到期 → 转入休眠态（静默）
+        → 休眠信封超过 7 天 → 推送恢复通知 → 归档 → 写入记忆库
+
+    ※ 常规 Suppressor 抑制仍作为兜底（处理未进入信封的孤立告警）
+```
+
+### 7.12 威胁态势面板
+
+用户可通过 `/sentinel status` 查看当前所有活跃信封的状态概览：
+
+```
+🛡️ ChatDome Sentinel — 威胁态势
+
+🔴 信封 #1: SSH 暴力破解 → 持久化入侵
+   叙事: 45.xx.xx.12 暴力破解 SSH 后成功登入 root，
+         已植入 SSH 公钥完成持久化
+   持续: 77 分钟 | 吸收告警: 52 条
+   战术阶段: credential_access → initial_access → persistence
+   关键实体: IP 45.xx.xx.12 (47次), user root (3次)
+   状态: 🔴 critical | 动态 TTL: 24h (3阶段×24) | 剩余: 22h43m
+
+🟡 信封 #2: 系统资源异常
+   叙事: CPU 持续 90%+ 并伴随可疑高 CPU 进程 python3
+   持续: 12 分钟 | 吸收告警: 4 条
+   战术阶段: execution
+   关键实体: process python3 (4次), pid 2847 (4次)
+   状态: 🟡 high | 动态 TTL: 30m (1阶段×1) | 剩余: 18m
+
+💤 休眠信封: 1 个
+   #3: 可疑端口扫描 (休眠 2天3小时, 剩余 4天21小时)
+
+🟢 无其他活跃威胁
+
+📊 孤立告警缓冲区: 2 条 (均为 warning，无关联迹象)
+```
+
+### 7.13 恢复通知
+
+信封过期时，推送恢复通知并附带完整叙事：
+
+```
+✅ 威胁已解除 — SSH 暴力破解 → 持久化入侵
+
+━━ 完整叙事 ━━
+14:21  来自 45.xx.xx.12 (俄罗斯) 的 SSH 暴力破解开始
+14:35  root 账户从该 IP 登录成功（暴力破解成功）
+14:37  新增用户 backup_svc
+14:38  /root/.ssh/authorized_keys 被修改，植入 SSH 公钥
+
+━━ 统计 ━━
+持续时间: 77 分钟
+吸收告警: 52 条
+攻击阶段: credential_access → initial_access → persistence
+主力攻击源: 45.xx.xx.12 (47 次命中)
+
+此叙事已归档并写入哨兵记忆库。
+```
+
+### 7.14 成本分析
+
+| 场景 | AI 调用 | 估算频率 |
+|------|---------|---------|
+| 低风险告警，无关联 | 不调 | 大部分时间 |
+| 新告警与信封强关联 | 更新叙事 ~1k tokens | 攻击期间每条新线索 |
+| 孤立告警积累触发新信封 | 创建叙事 ~2k tokens | 偶发 |
+| 信封过期恢复 | 不调 | TTL 到期自动清理 |
+| 动态 TTL 计算 | 不调（读 Counter 长度） | 每次匹配 |
+| 休眠信封索引匹配 | 不调（Counter 交叉） | 活跃信封未命中时 |
+| 休眠信封被唤醒 | 间隔性叙事更新 ~1.5k tokens | 极低频（APT 场景） |
+
+**正常日均：0-3 次 AI 调用，~$0.01/天。**
+
+### 7.15 完整示例
+
+```
+14:21  告警: ssh_bruteforce (high, ip=45.x.x.12, tactic=credential_access)
+       → 无活跃信封 → severity=high，不够 critical → 进入孤立缓冲区
+
+14:35  告警: ssh_success_login (high, ip=45.x.x.12, tactic=initial_access)
+       → 孤立缓冲区扫描:
+         聚类 {45.x.x.12}: credential_access + initial_access = 2 个战术阶段 ✅
+         包含 high 级别 ✅
+       → 触发 AI 创建信封 #1
+       → AI 生成初始叙事:
+         "45.x.x.12 在 14:21 开始 SSH 暴力破解，14:35 root 登录成功"
+       → 初始索引: {ip: {45.x.x.12: 2}, tactic: {credential_access: 1, initial_access: 1}, ...}
+       → 动态 TTL: 2 stages × high = 30min × 4 = 2h
+       → 推送告警给用户
+
+14:37  告警: passwd_changes (warning, user=backup_svc, tactic=persistence)
+       → 匹配信封 #1: ip 维度无交集, check_id 无交集
+         但时间窗口内同一主机 → score=0 → 弱关联不够
+       → 进入孤立缓冲区
+
+14:38  告警: ssh_authorized_keys (high, ip=45.x.x.12, tactic=persistence,
+             file=/root/.ssh/authorized_keys)
+       → 匹配信封 #1: ip 命中 (Counter=2, score += 2) → 强关联 ✅
+       → absorb_alert(): ip[45.x.x.12] → 3, tactic += persistence, ...
+       → AI update_narrative():
+         叙事更新: "...14:38 authorized_keys 被修改，攻击者已完成 SSH 公钥持久化"
+         AI 返回: severity → critical, stage_transition → true, should_notify → true
+         AI 返回: envelope_add → {file: ["/root/.ssh/authorized_keys"]}
+       → 动态 TTL 自动升档: 3 stages × critical = 60min × 24 = 24h
+       → 推送升级告警: "⚠️ 攻击进入新阶段: 持久化"
+
+       → 缓冲区中 14:37 的 passwd_changes 被重新评估:
+         信封 #1 现在有 tactic=persistence
+         passwd_changes 的 tactic=persistence → tactic 维度命中 (Counter=1, score=1)
+         → 弱关联 → 静默吸收
+
+次日 14:38  动态 TTL 24h 到期，期间无新告警
+       → 信封 #1 转入休眠态
+       → 叙事压缩: "45.x.x.12 SSH爆破→root登录→公钥持久化，52条告警..."
+       → Counter 索引持久化到 SQLite（~200B）
+       → 不推送通知（休眠是静默的）
+
+次日 20:15  告警: suspicious_outbound (high, ip=45.x.x.12, tactic=command_and_control)
+       → 活跃信封: 无匹配
+       → 回退查询休眠信封: 信封 #1 索引命中 ip=45.x.x.12 (Counter=3, score=3) → 强关联 ✅
+       → reawaken(): 信封 #1 恢复为活跃态
+       → AI 间隔性叙事更新:
+         "沉寂约 30 小时后，攻击者再次现身。45.x.x.12 发起可疑外联，
+          疑似建立 C2 通道。此间隔性行为符合 APT 特征。"
+       → 动态 TTL: 4 stages × critical = 60min × 72 = 72h
+       → 推送: "⚠️ 休眠威胁被重新激活 — 可能的 APT 行为"
+
+第 8 天  休眠超过 HIBERNATION_MAX = 7 天，最终未被唤醒
+       → 推送恢复通知: "✅ 来自 45.x.x.12 的入侵活动已停止"
+       → 归档完整叙事到 sentinel_alerts.jsonl
+       → 写入记忆库: "45.x.x.12 曾于 2026-04-14 入侵本机并植入 SSH 公钥，
+         次日疑似建立 C2 通道，展示 APT 级间隔性行为"
+```
+
+---
+
+## 8. 交互式白名单（Interactive Whitelist）
+
+### 8.1 设计思想
+
+传统安全产品的白名单维护是运维人员的噩梦——要么需要登录控制台手动编辑配置文件，要么需要填写复杂的表单。这导致了两个极端：白名单几乎不维护（误报越来越多），或者白名单过度放行（安全漏洞）。
+
+ChatDome 的独特优势在于 **Telegram 对话即管理界面**。用户可以直接用自然语言告诉 ChatDome：
+
+> "这个 IP 是我的跳板机，忽略它的 SSH 登录"
+> "8080 端口是我的业务应用，不用报警"
+> "/tmp/deploy.sh 是我自己放的部署脚本，标记为安全"
+
+AI 理解用户意图后，自动生成白名单规则并持久化存储，从此相关检查自动跳过或降级。
+
+### 8.2 白名单规则结构
+
+```python
+@dataclass
+class WhitelistRule:
+    """白名单规则"""
+    rule_id: str                       # 唯一 ID (自动生成)
+    created_at: datetime               # 创建时间
+    created_by: int                    # Telegram chat_id（谁创建的）
+    source: str                        # 创建来源："natural_language" | "alert_dismiss" | "manual"
+
+    # 匹配条件
+    check_ids: list[str]               # 适用的检查项（空 = 全部）
+    match_type: str                    # "ip" | "port" | "process" | "file" | "user" | "custom"
+    match_pattern: str                 # 匹配模式（IP 地址、端口号、正则等）
+
+    # 动作
+    action: str                        # "suppress" (不再告警) | "downgrade" (降级为 info)
+    reason: str                        # 用户说明的原因（原始自然语言）
+    expires_at: datetime | None        # 过期时间（None = 永久）
+
+    # 审计
+    hit_count: int = 0                 # 命中次数
+    last_hit: datetime | None = None   # 最后命中时间
+```
+
+### 8.3 自然语言白名单解析
+
+```python
+WHITELIST_PARSE_PROMPT = """你是 ChatDome 白名单管理助手。
+
+用户通过自然语言描述了一条白名单规则，请解析为结构化的 JSON。
+
+用户原文: "{user_input}"
+
+请输出 JSON:
+{{
+    "check_ids": ["关联的检查项 ID 列表，如 ssh_bruteforce, open_ports 等"],
+    "match_type": "ip|port|process|file|user|custom",
+    "match_pattern": "具体的匹配值或正则",
+    "action": "suppress|downgrade",
+    "reason": "一句话摘要",
+    "permanent": true/false,
+    "confidence": 0.0-1.0
+}}
+
+注意：
+- 如果用户说"忽略"/"不用报警"→ action = "suppress"
+- 如果用户说"降低级别"/"标记为低风险" → action = "downgrade"
+- confidence < 0.7 时应追问确认
+"""
+
+
+class WhitelistManager:
+    """交互式白名单管理器"""
+
+    def __init__(self, storage_path: Path, llm: LLMClient):
+        self._storage_path = storage_path
+        self._llm = llm
+        self._rules: list[WhitelistRule] = self._load()
+
+    async def add_from_natural_language(self, user_input: str, chat_id: int) -> dict:
+        """
+        从自然语言解析并添加白名单规则。
+        返回解析结果供用户确认。
+        """
+        response = await self._llm.chat_completion(
+            messages=[
+                {"role": "system", "content": WHITELIST_PARSE_PROMPT.format(user_input=user_input)},
+            ]
+        )
+        parsed = json.loads(response.content)
+
+        if parsed["confidence"] < 0.7:
+            return {
+                "status": "need_clarification",
+                "message": f"我理解你想将 {parsed['match_pattern']} 加入白名单，"
+                           f"适用于 {', '.join(parsed['check_ids'])} 检查。"
+                           f"请确认是否正确？",
+                "parsed": parsed,
+            }
+
+        rule = WhitelistRule(
+            rule_id=self._generate_id(),
+            created_at=datetime.utcnow(),
+            created_by=chat_id,
+            source="natural_language",
+            check_ids=parsed["check_ids"],
+            match_type=parsed["match_type"],
+            match_pattern=parsed["match_pattern"],
+            action=parsed["action"],
+            reason=parsed["reason"],
+            expires_at=None if parsed["permanent"] else datetime.utcnow() + timedelta(days=30),
+        )
+
+        return {
+            "status": "confirm",
+            "message": f"✅ 即将添加白名单规则:\n"
+                       f"• 类型: {rule.match_type}\n"
+                       f"• 匹配: {rule.match_pattern}\n"
+                       f"• 适用: {', '.join(rule.check_ids) or '所有检查'}\n"
+                       f"• 动作: {'静默' if rule.action == 'suppress' else '降级'}\n"
+                       f"• 原因: {rule.reason}\n"
+                       f"• 有效期: {'永久' if not rule.expires_at else rule.expires_at.strftime('%Y-%m-%d')}\n\n"
+                       f"回复「确认」以生效。",
+            "pending_rule": rule,
+        }
+
+    def confirm_rule(self, rule: WhitelistRule):
+        """用户确认后正式添加规则"""
+        self._rules.append(rule)
+        self._save()
+
+    def is_whitelisted(self, check_id: str, context: dict) -> WhitelistRule | None:
+        """
+        检查本次告警是否命中白名单。
+        在 Evaluator 判定异常 → Suppressor 抑制之前调用。
+        """
+        for rule in self._rules:
+            if rule.expires_at and datetime.utcnow() > rule.expires_at:
+                continue
+            if rule.check_ids and check_id not in rule.check_ids:
+                continue
+            if self._match(rule, context):
+                rule.hit_count += 1
+                rule.last_hit = datetime.utcnow()
+                self._save()
+                return rule
+        return None
+
+    def list_rules(self) -> str:
+        """格式化输出所有白名单规则（供 /sentinel whitelist 命令使用）"""
+        if not self._rules:
+            return "📋 白名单为空"
+        lines = ["📋 当前白名单规则:\n"]
+        for i, rule in enumerate(self._rules, 1):
+            status = "🟢" if not rule.expires_at or datetime.utcnow() < rule.expires_at else "⚫"
+            lines.append(
+                f"{status} {i}. [{rule.match_type}] {rule.match_pattern}\n"
+                f"   适用: {', '.join(rule.check_ids) or '全部'} | "
+                f"命中: {rule.hit_count} 次 | 原因: {rule.reason}"
+            )
+        return "\n".join(lines)
+
+    def remove_rule(self, rule_id: str) -> bool:
+        """移除规则"""
+        self._rules = [r for r in self._rules if r.rule_id != rule_id]
+        self._save()
+        return True
+```
+
+### 8.4 白名单触发场景
+
+除了主动对话添加，白名单还可在以下场景自动触发：
+
+```
+┌─────────────────────────────────────────────────┐
+│            白名单添加路径                         │
+│                                                  │
+│  路径 1: 主动对话                                 │
+│  用户: "10.0.0.5 是我的跳板机，忽略它"             │
+│  → AI 解析 → 确认 → 生效                         │
+│                                                  │
+│  路径 2: 告警处置                                 │
+│  告警推送 → 用户点击 [❌ 忽略]                     │
+│  → ChatDome 追问: "是否将此加入白名单？"           │
+│  → 用户确认 → 自动生成 suppress 规则              │
+│                                                  │
+│  路径 3: Memory Vault 联动                        │
+│  ChatDome 从记忆库中发现用户曾说过                 │
+│  "xx 是正常的" → 主动建议添加白名单               │
+│                                                  │
+│  路径 4: 首次部署问询                              │
+│  Sentinel 首次启动时主动询问:                      │
+│  "你的服务器上有哪些已知服务？"                     │
+│  → 用户回答 → 批量生成白名单                      │
+└─────────────────────────────────────────────────┘
+```
+
+### 8.5 与检查流程的集成
+
+```
+检查执行 → Evaluator 判定异常
+    │
+    ├─ WhitelistManager.is_whitelisted()
+    │   ├─ 命中 suppress → 跳过告警（仅记录日志）
+    │   ├─ 命中 downgrade → 告警降级为 info
+    │   └─ 未命中 → 继续正常告警流程
+    │
+    └─ ThreatStateMachine → Suppressor → Alerter
+```
+
+---
+
+## 9. 哨兵记忆库（Sentinel Memory Vault）
+
+### 9.1 设计思想
+
+ChatDome 现有的 Memory Vault 是基于会话上下文的压缩记忆，设计目标是压缩历史对话以节省 token。但 Sentinel 守卫模式对记忆有更强的要求：
+
+1. **独立于上下文**：记忆不应随会话过期而丢失，需要独立持久化
+2. **主动获取**：Sentinel 应在首次启动时主动向用户提问，了解主机环境
+3. **避免乌龙**：知道"这台服务器是 Web 服务器，8080 是正常业务端口"后，就不会把 8080 当异常端口告警
+4. **持续学习**：用户的每次 dismiss、白名单操作、告警处置都应被记忆
+
+> **核心理念**：一个好的安全助手，必须"了解"它所守护的服务器。不了解环境的安全监控，只会制造噪音。
+
+### 9.2 记忆分类
+
+```python
+class MemoryCategory(Enum):
+    """记忆分类"""
+    HOST_PROFILE = "host_profile"          # 主机画像：OS、角色、业务用途
+    KNOWN_SERVICES = "known_services"      # 已知服务：端口、进程、定时任务
+    USER_PREFERENCES = "user_preferences"  # 用户偏好：告警阈值、关注重点
+    THREAT_HISTORY = "threat_history"      # 威胁历史：过去的告警及处置结果
+    ENVIRONMENT_FACTS = "environment_facts"# 环境事实：IP 段、网络拓扑、团队成员
+
+
+@dataclass
+class MemoryEntry:
+    """记忆条目"""
+    entry_id: str
+    category: MemoryCategory
+    content: str                           # 自然语言描述
+    structured_data: dict | None           # 结构化数据（可选）
+    source: str                            # "user_told" | "proactive_ask" | "alert_learning" | "auto_discovered"
+    created_at: datetime
+    confidence: float                      # 置信度
+    referenced_count: int = 0              # 被 AI 引用次数
+    last_referenced: datetime | None = None
+```
+
+### 9.3 主动问询机制
+
+Sentinel 首次启动（或发现记忆库为空时），会主动向用户发起问询：
+
+```python
+PROACTIVE_QUESTIONS = [
+    {
+        "category": "host_profile",
+        "question": "🛡️ Sentinel 首次启动！为了更精准的安全监控，请告诉我：\n\n"
+                    "1. 这台服务器的主要用途是什么？（如 Web 服务器、数据库、CI/CD、开发机等）\n"
+                    "2. 是否有跳板机或固定运维 IP？\n"
+                    "3. 有没有其他需要我知道的事情？\n\n"
+                    "你可以现在回答，也可以稍后通过对话随时补充。",
+        "parse_prompt": "从用户的回答中提取主机画像信息...",
+    },
+    {
+        "category": "known_services",
+        "condition": "host_profile exists",  # 仅在首轮问答后触发
+        "question": "感谢！还有两个问题有助于减少误报：\n\n"
+                    "1. 服务器上运行了哪些业务服务？（端口号、进程名）\n"
+                    "2. 有没有定期执行的 cron 任务或脚本？\n\n"
+                    "了解这些后，这类活动不会被误报为异常。",
+        "parse_prompt": "从用户的回答中提取已知服务信息...",
+    },
+]
+
+
+class SentinelMemoryVault:
+    """哨兵记忆库 — 独立于会话上下文的持久化记忆"""
+
+    def __init__(self, storage_path: Path, llm: LLMClient):
+        self._storage_path = storage_path
+        self._llm = llm
+        self._entries: list[MemoryEntry] = self._load()
+
+    async def process_user_input(self, user_input: str, chat_id: int) -> list[MemoryEntry]:
+        """
+        从用户输入中提取可记忆的信息。
+        在 Agent 对话和主动问询回答中调用。
+        """
+        response = await self._llm.chat_completion(
+            messages=[
+                {"role": "system", "content": MEMORY_EXTRACT_PROMPT},
+                {"role": "user", "content": user_input},
+            ]
+        )
+        extracted = json.loads(response.content)
+        new_entries = []
+        for item in extracted.get("memories", []):
+            entry = MemoryEntry(
+                entry_id=self._generate_id(),
+                category=MemoryCategory(item["category"]),
+                content=item["content"],
+                structured_data=item.get("structured_data"),
+                source="user_told",
+                created_at=datetime.utcnow(),
+                confidence=item.get("confidence", 0.9),
+            )
+            new_entries.append(entry)
+            self._entries.append(entry)
+
+        if new_entries:
+            self._save()
+        return new_entries
+
+    def learn_from_alert(self, alert: dict, user_action: str):
+        """
+        从告警处置中学习。
+        用户 dismiss/whitelist 某个告警时自动记忆。
+        """
+        entry = MemoryEntry(
+            entry_id=self._generate_id(),
+            category=MemoryCategory.THREAT_HISTORY,
+            content=f"用户将 {alert['check_name']} 告警标记为 {user_action}. "
+                    f"原因: {alert.get('dismiss_reason', '未说明')}",
+            structured_data={
+                "check_id": alert["check_id"],
+                "action": user_action,
+                "context": alert.get("context", {}),
+            },
+            source="alert_learning",
+            created_at=datetime.utcnow(),
+            confidence=1.0,
+        )
+        self._entries.append(entry)
+        self._save()
+
+    def get_context_for_analysis(self, check_id: str) -> str:
+        """
+        为 AI 分析提供记忆上下文。
+        根据 check_id 检索相关记忆，避免产生误判。
+        """
+        relevant = []
+        for entry in self._entries:
+            # 按关联度筛选
+            if entry.category == MemoryCategory.THREAT_HISTORY:
+                if entry.structured_data and entry.structured_data.get("check_id") == check_id:
+                    relevant.append(entry)
+            elif entry.category in (MemoryCategory.KNOWN_SERVICES, MemoryCategory.HOST_PROFILE):
+                relevant.append(entry)  # 主机画像和已知服务始终提供
+
+        if not relevant:
+            return "（无历史记忆）"
+
+        lines = ["=== 哨兵记忆 ==="]
+        for entry in relevant[-10:]:  # 最多取最近 10 条
+            entry.referenced_count += 1
+            entry.last_referenced = datetime.utcnow()
+            lines.append(f"[{entry.category.value}] {entry.content}")
+
+        self._save()
+        return "\n".join(lines)
+
+    def get_summary(self) -> str:
+        """生成记忆库摘要（用于每日报告或 /sentinel memory 命令）"""
+        by_category = {}
+        for entry in self._entries:
+            by_category.setdefault(entry.category.value, []).append(entry)
+
+        lines = ["🧠 哨兵记忆库摘要:\n"]
+        for cat, entries in by_category.items():
+            lines.append(f"📁 {cat}: {len(entries)} 条")
+            for e in entries[-3:]:  # 每类展示最近 3 条
+                lines.append(f"   • {e.content[:60]}...")
+        return "\n".join(lines)
+
+    def needs_onboarding(self) -> bool:
+        """判断是否需要执行首次问询"""
+        return not any(
+            e.category == MemoryCategory.HOST_PROFILE for e in self._entries
+        )
+```
+
+### 9.4 记忆与告警分析的联动
+
+```
+告警分析流程（融入记忆）
+    │
+    ├─ 触发: ssh_bruteforce → source_ip = 10.0.0.5
+    │
+    ├─ MemoryVault.get_context_for_analysis("ssh_bruteforce")
+    │   → [host_profile] "这是一台 Web 服务器"
+    │   → [known_services] "10.0.0.5 是运维跳板机"
+    │   → [threat_history] "10.0.0.5 上次触发告警后用户标记为白名单"
+    │
+    ├─ AI 分析时将记忆上下文注入 prompt
+    │   → AI: "来源 IP 10.0.0.5 在记忆库中标记为运维跳板机，
+    │          且用户曾将其加入白名单。本次为正常运维访问，
+    │          建议自动降级为 info。"
+    │
+    └─ 避免了一次误报（乌龙）
+```
+
+### 9.5 持久化存储
+
+```json
+// chat_data/sentinel_memory.json
+{
+    "version": 1,
+    "entries": [
+        {
+            "entry_id": "mem_001",
+            "category": "host_profile",
+            "content": "这是一台 Ubuntu 22.04 Web 服务器，运行 Nginx + Python Flask 应用",
+            "structured_data": {
+                "os": "Ubuntu 22.04",
+                "role": "web_server",
+                "services": ["nginx", "flask"]
+            },
+            "source": "proactive_ask",
+            "created_at": "2026-04-14T10:00:00Z",
+            "confidence": 0.95,
+            "referenced_count": 23,
+            "last_referenced": "2026-04-20T15:30:00Z"
+        },
+        {
+            "entry_id": "mem_002",
+            "category": "known_services",
+            "content": "8080 端口是 Flask 业务应用，10.0.0.5 是运维跳板机 IP",
+            "structured_data": {
+                "known_ports": [8080],
+                "known_ips": ["10.0.0.5"]
+            },
+            "source": "user_told",
+            "created_at": "2026-04-14T10:05:00Z",
+            "confidence": 1.0,
+            "referenced_count": 15,
+            "last_referenced": "2026-04-20T14:00:00Z"
+        }
+    ]
+}
+```
+
+---
+
+## 10. 调度器设计
+
+### 10.1 Scheduler 核心逻辑
 
 ```python
 class SentinelScheduler:
@@ -1354,7 +2688,7 @@ class SentinelScheduler:
         return combined_output
 ```
 
-### 7.2 规则引擎
+### 10.2 规则引擎
 
 ```python
 class RuleEvaluator:
@@ -1426,13 +2760,13 @@ CUSTOM_PARSERS = {
 
 ---
 
-## 8. 每日巡检报告
+## 11. 每日巡检报告
 
-### 8.1 设计
+### 11.1 设计
 
 每天定时推送一份汇总报告，让用户知道 Sentinel 在正常工作，同时提供系统健康概览。
 
-### 8.2 报告格式
+### 11.2 报告格式
 
 ```
 📋 ChatDome Sentinel 每日巡检报告
@@ -1459,7 +2793,7 @@ CUSTOM_PARSERS = {
 💡 回复任意消息可进入 AI 对话模式。
 ```
 
-### 8.3 实现
+### 11.3 实现
 
 ```python
 async def generate_daily_report(self) -> str:
@@ -1484,22 +2818,24 @@ async def generate_daily_report(self) -> str:
 
 ---
 
-## 9. 持久化与日志
+## 12. 持久化与日志
 
-### 9.1 文件结构
+### 12.1 文件结构
 
 ```
 chat_data/
 ├── sentinel_alerts.jsonl        # 告警事件流水（JSONL 格式，可审计）
 ├── sentinel_actions.jsonl       # 用户处置操作记录
 ├── sentinel_baselines.json      # Differential 模式的基线快照
+├── sentinel_whitelist.json      # ★ 交互式白名单规则
+├── sentinel_memory.json         # ★ 哨兵记忆库（独立于会话上下文）
 ├── sentinel_daily/              # 每日报告归档
 │   ├── 2026-04-13.md
 │   └── 2026-04-14.md
-└── {chat_id}_memory.json        # 现有 memory vault，追加 sentinel 上下文
+└── {chat_id}_memory.json        # 现有 memory vault（会话级压缩记忆）
 ```
 
-### 9.2 告警事件格式
+### 12.2 告警事件格式
 
 ```json
 {
@@ -1518,7 +2854,7 @@ chat_data/
 
 ---
 
-## 10. 模块结构
+## 13. 模块结构
 
 ```
 ChatDome/
@@ -1544,6 +2880,9 @@ ChatDome/
     │   ├── evaluator.py                 #   规则引擎
     │   ├── diff.py                      #   Differential 差异追踪
     │   ├── suppressor.py                #   告警抑制（Cooldown + Dedup + Aggregation）
+    │   ├── envelope.py                  #   ★ 威胁信封（双层架构：索引层 + 叙事层）
+    │   ├── whitelist.py                 #   ★ 交互式白名单管理
+    │   ├── memory_vault.py              #   ★ 哨兵记忆库（独立持久化）
     │   ├── alerter.py                   #   告警消息格式化 + AI 分析 + Telegram 推送
     │   ├── enrichment.py                #   上下文富化（关联检查）
     │   ├── report.py                    #   每日巡检报告
@@ -1556,7 +2895,7 @@ ChatDome/
 
 ---
 
-## 11. 配置扩展
+## 14. 配置扩展
 
 在现有 `config.example.yaml` 中追加 `sentinel` 段，**命令定义与检查策略分离**：
 
@@ -1638,7 +2977,7 @@ chatdome:
 
 ---
 
-## 12. 启动集成
+## 15. 启动集成
 
 Sentinel 作为 Bot 的子任务启动，与 Telegram polling 共享同一个 asyncio 事件循环：
 
@@ -1704,9 +3043,9 @@ async def post_shutdown(application):
 
 ---
 
-## 13. 成本分析
+## 16. 成本分析
 
-### 13.1 LLM Token 消耗
+### 16.1 LLM Token 消耗
 
 | 场景 | 频率 | 每次消耗 | 日均消耗 |
 |------|------|----------|----------|
@@ -1719,7 +3058,7 @@ async def post_shutdown(application):
 
 以 GPT-4o 价格估算：约 **$0.02-0.05/天**，几乎可忽略。
 
-### 13.2 系统资源
+### 16.2 系统资源
 
 - **CPU**：每次检查 = 一次 shell 命令执行，消耗极低
 - **内存**：Scheduler + DiffTracker + Suppressor 状态，估计 < 10MB
@@ -1728,7 +3067,7 @@ async def post_shutdown(application):
 
 ---
 
-## 14. 实现分期
+## 17. 实现分期
 
 ### Phase 1：基础巡检（MVP）
 
@@ -1759,6 +3098,23 @@ async def post_shutdown(application):
 - [ ] 告警事件持久化 + 历史统计
 - [ ] Cooldown 自动升级机制
 - [ ] 聚合窗口批量推送
-- [ ] Memory Vault 集成（AI 参考历史告警）
-- [ ] AI 兆底模式（goal 字段驱动）
+- [ ] AI 兜底模式（goal 字段驱动）
 - [ ] `/sentinel` 命令（查看状态、手动触发巡检、列出已加载 pack）
+
+### Phase 4：威胁态势感知与记忆（ChatDome 独有）
+
+- [ ] `sentinel/envelope.py` — 威胁信封核心（ThreatEnvelope 双层架构）
+- [ ] 告警特征提取（extract_facets）+ ATT&CK 战术标签扩展
+- [ ] Counter 多维索引匹配（match_score）+ 信封吸收（absorb_alert）
+- [ ] AI 叙事更新（update_narrative）+ 信封索引增量管理
+- [ ] 孤立告警缓冲区 + 聚类扫描（ATT&CK 阶段覆盖度触发）
+- [ ] 信封生命周期管理（活跃 → 衰减 → 过期 → 归档）
+- [ ] 恢复通知推送 + 完整叙事归档
+- [ ] `/sentinel status` — 威胁态势面板
+- [ ] `sentinel/whitelist.py` — 交互式白名单管理
+- [ ] 自然语言白名单规则解析 + 用户确认流程
+- [ ] 告警处置时自动建议添加白名单
+- [ ] `sentinel/memory_vault.py` — 哨兵记忆库
+- [ ] 首次启动主动问询（主机画像 + 已知服务）
+- [ ] 从告警处置中自动学习
+- [ ] AI 分析时注入记忆上下文（防乌龙误报）

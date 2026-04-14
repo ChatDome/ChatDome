@@ -46,6 +46,15 @@ ChatDome: Ran ssh_bruteforce check...
 - **OpenAI-Compatible** — Works with any LLM API that supports the OpenAI function calling format (OpenAI, Claude, local models via LiteLLM, etc.).
 - **Zero Infrastructure & Low Intrusion** — Single Python process, no database, no agent installation on target filespaces, requiring just a Telegram bot token and an LLM API key.
 
+### 🛡️ Sentinel — 7×24 Autonomous Guardian (Planned)
+
+ChatDome is evolving beyond a reactive assistant into an **always-on security guardian**. The upcoming Sentinel module introduces proactive monitoring capabilities that set it apart from traditional host security tools:
+
+- **Threat Envelope — Dual-Layer Situational Awareness** — A novel architecture that unifies attack chain correlation and threat state modeling into a single mechanism. The **index layer** (multi-dimensional Counter) performs zero-token set-intersection matching to determine if a new alert relates to an existing threat. The **narrative layer** (AI-generated natural language) dynamically evolves a compressed story of "what is actually happening." No preset attack patterns—ATT&CK tactical stage coverage triggers AI analysis only when genuinely needed.
+- **Threat State as Compressed Narrative** — Instead of firing the same alert every 5 minutes during an ongoing attack, threats are modeled as living envelopes that absorb new evidence, auto-escalate severity on stage transitions, and push recovery notifications when the threat subsides.
+- **Interactive Whitelist via Natural Language** — Tell ChatDome *"10.0.0.5 is my jump server, ignore its SSH logins"* in plain language. The AI parses your intent, generates a whitelist rule, asks for confirmation, and persists it. No config files to edit, no consoles to log into.
+- **Sentinel Memory Vault** — A persistent, session-independent memory system. Sentinel proactively asks about your server's role, known services, and trusted IPs on first launch—then remembers everything to **prevent false alarms**. Every alert dismissal and whitelist action is learned automatically.
+
 ### 🔓 The "Infinite Possibilities" Mode
 
 ChatDome ships with a robust set of predefined safety checks. However, **the true power of ChatDome is unleashed when you set `allow_generated_commands: true` in your config**.
@@ -305,6 +314,7 @@ ChatDome/
 - [ ] **Phase 2 — Usable**: Multi-turn sessions, more checks, error handling, whois
 - [ ] **Phase 3 — Polished**: Scheduled patrols, auto-alerts, session history
 - [ ] **Phase 4 — Extensible**: Custom command plugins, multi-server, data plane integration
+- [ ] **Phase 5 — Sentinel**: 7×24 proactive monitoring, threat envelope (dual-layer situational awareness), interactive whitelist, AI memory vault
 
 ## Contributing
 
