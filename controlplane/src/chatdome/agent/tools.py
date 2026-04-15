@@ -105,6 +105,41 @@ class ToolDispatcher:
         if not command:
             return "缺少 command 参数"
 
+        # Unrestricted mode: safe commands execute directly, risky ones need approval
+        if self.sandbox.allow_unrestricted_commands:
+            from chatdome.executor.validator import validate_command
+            safety_check = validate_command(command, check_allowlist=False)
+
+            if safety_check.is_safe:
+                # Read-only / safe command → execute immediately, no approval needed
+                logger.info("Unrestricted auto-execute (safe, reason: %s): %s", reason, command)
+                result = await self.sandbox.execute_shell_command(command, reason)
+                return self._format_command_result(result)
+            else:
+                # Dangerous command → still require user approval
+                logger.warning(
+                    "Unrestricted mode: risky command needs approval: %s (matched: %s)",
+                    command, safety_check.reason,
+                )
+                # Check if this is an EXTREME danger command (rm, sudo, reboot, etc.)
+                from chatdome.executor.validator import is_critical_command
+                is_critical = is_critical_command(command)
+
+                if self.llm:
+                    from chatdome.agent.prompts import REVIEWER_SYSTEM_PROMPT
+                    review = await self.llm.evaluate_command_safety(command, REVIEWER_SYSTEM_PROMPT, chat_id=chat_id)
+                    safety_status = review.get("safety_status", "UNSAFE")
+                    impact_analysis = review.get("impact_analysis", safety_check.reason)
+                    # Force critical commands to UNSAFE — only /confirm can approve
+                    if is_critical and safety_status == "SAFE":
+                        safety_status = "CRITICAL"
+                        impact_analysis = f"⛔ 极端高危操作 ({safety_check.reason})，已强制升级为最高风险等级。\n\n{impact_analysis}"
+                        logger.warning("Critical command forced to UNSAFE: %s", command)
+                    raise PendingApprovalError(command, safety_status, impact_analysis, tool_call_id, reason)
+                else:
+                    status = "CRITICAL" if is_critical else "UNSAFE"
+                    raise PendingApprovalError(command, status, safety_check.reason, tool_call_id, reason)
+
         # 1. AI Reviewer Analysis
         if self.llm:
             from chatdome.agent.prompts import REVIEWER_SYSTEM_PROMPT

@@ -69,6 +69,8 @@ def main() -> None:
     logger.info("  Base URL: %s", config.ai.base_url)
     logger.info("  Allowed chats: %s", config.telegram.allowed_chat_ids or "(all)")
     logger.info("  Generated commands: %s", config.agent.allow_generated_commands)
+    if config.agent.allow_unrestricted_commands:
+        logger.warning("  ⚠️  UNRESTRICTED commands: ENABLED — ALL validation bypassed!")
     logger.info("=" * 60)
 
     # ── Initialize components ──
@@ -87,6 +89,7 @@ def main() -> None:
         default_timeout=config.agent.command_timeout,
         max_output_chars=config.agent.max_output_chars,
         allow_generated_commands=config.agent.allow_generated_commands,
+        allow_unrestricted_commands=config.agent.allow_unrestricted_commands,
     )
 
     # AI Agent

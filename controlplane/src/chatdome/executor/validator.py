@@ -15,25 +15,16 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Dangerous command patterns (blocklist)
+# Critical command patterns — EXTREME danger, /confirm ONLY (no button approve)
+# These can cause irreversible data loss or system compromise.
 # ---------------------------------------------------------------------------
 
-DANGEROUS_PATTERNS: list[tuple[re.Pattern, str]] = [
-    # Write / delete / modify
+CRITICAL_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # Destructive file operations
     (re.compile(r"\brm\b"), "rm — 删除文件"),
     (re.compile(r"\bdd\b"), "dd — 磁盘写入"),
     (re.compile(r"\bmkfs\b"), "mkfs — 格式化文件系统"),
     (re.compile(r"\bformat\b"), "format — 格式化"),
-    (re.compile(r"\bchmod\b"), "chmod — 修改权限"),
-    (re.compile(r"\bchown\b"), "chown — 修改所有者"),
-    (re.compile(r"\bchattr\b"), "chattr — 修改文件属性"),
-    (re.compile(r"\bmv\b"), "mv — 移动/重命名"),
-    (re.compile(r"\bcp\b"), "cp — 复制文件"),
-
-    # Process control
-    (re.compile(r"\bkill\b"), "kill — 终止进程"),
-    (re.compile(r"\bkillall\b"), "killall — 终止进程"),
-    (re.compile(r"\bpkill\b"), "pkill — 终止进程"),
 
     # System control
     (re.compile(r"\breboot\b"), "reboot — 重启系统"),
@@ -43,6 +34,35 @@ DANGEROUS_PATTERNS: list[tuple[re.Pattern, str]] = [
     # Privilege escalation
     (re.compile(r"\bsudo\b"), "sudo — 提权"),
     (re.compile(r"\bsu\b"), "su — 切换用户"),
+
+    # Permission / ownership modification
+    (re.compile(r"\bchmod\b"), "chmod — 修改权限"),
+    (re.compile(r"\bchown\b"), "chown — 修改所有者"),
+    (re.compile(r"\bchattr\b"), "chattr — 修改文件属性"),
+
+    # Code execution
+    (re.compile(r"\beval\b"), "eval — 代码执行"),
+    (re.compile(r"\bexec\b"), "exec — 代码执行"),
+    (re.compile(r"\bsource\b"), "source — 加载脚本"),
+
+    # Sensitive file direct access
+    (re.compile(r"/etc/shadow"), "读取 /etc/shadow"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Risky command patterns — moderate danger, button approve OK
+# ---------------------------------------------------------------------------
+
+RISKY_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # Write / move / copy
+    (re.compile(r"\bmv\b"), "mv — 移动/重命名"),
+    (re.compile(r"\bcp\b"), "cp — 复制文件"),
+
+    # Process control
+    (re.compile(r"\bkill\b"), "kill — 终止进程"),
+    (re.compile(r"\bkillall\b"), "killall — 终止进程"),
+    (re.compile(r"\bpkill\b"), "pkill — 终止进程"),
 
     # Network download (curl -I is allowed, blocked below)
     (re.compile(r"\bcurl\b(?!.*-I)"), "curl — 网络请求 (curl -I 除外)"),
@@ -60,15 +80,13 @@ DANGEROUS_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\|.*\bsh\b"), "管道到 sh"),
     (re.compile(r"\|.*\bbash\b"), "管道到 bash"),
 
-    # Code execution
-    (re.compile(r"\beval\b"), "eval — 代码执行"),
-    (re.compile(r"\bexec\b"), "exec — 代码执行"),
-    (re.compile(r"\bsource\b"), "source — 加载脚本"),
-
     # Sensitive file direct access
-    (re.compile(r"/etc/shadow"), "读取 /etc/shadow"),
     (re.compile(r"/etc/passwd"), "读取 /etc/passwd"),
 ]
+
+
+# Combined list for backward compatibility
+DANGEROUS_PATTERNS: list[tuple[re.Pattern, str]] = CRITICAL_PATTERNS + RISKY_PATTERNS
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +116,19 @@ class ValidationResult:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def is_critical_command(command: str) -> bool:
+    """
+    Check if a command matches CRITICAL patterns (extreme danger).
+
+    Critical commands can only be confirmed via /confirm text command,
+    never via inline button, to prevent accidental approval.
+    """
+    for pattern, _ in CRITICAL_PATTERNS:
+        if pattern.search(command):
+            return True
+    return False
+
 
 def validate_command(command: str, check_allowlist: bool = False) -> ValidationResult:
     """

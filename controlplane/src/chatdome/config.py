@@ -54,6 +54,7 @@ class AIConfig:
 class AgentConfig:
     """Agent behavior settings."""
     allow_generated_commands: bool = False
+    allow_unrestricted_commands: bool = False
     session_timeout: int = 600          # seconds
     max_rounds_per_turn: int = 10
     max_history_tokens: int = 16000
@@ -172,6 +173,11 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     allow_gen_env = os.environ.get("CHATDOME_ALLOW_GENERATED_COMMANDS", "")
     if allow_gen_env:
         config.agent.allow_generated_commands = allow_gen_env.lower() in ("true", "1", "yes", "on")
+
+    # Optional: Allow Unrestricted Commands (bypasses ALL validation)
+    allow_unrestricted_env = os.environ.get("CHATDOME_ALLOW_UNRESTRICTED_COMMANDS", "")
+    if allow_unrestricted_env:
+        config.agent.allow_unrestricted_commands = allow_unrestricted_env.lower() in ("true", "1", "yes", "on")
 
     # ── Validation ──
 

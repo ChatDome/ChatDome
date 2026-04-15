@@ -54,10 +54,12 @@ class CommandSandbox:
         default_timeout: int = 10,
         max_output_chars: int = 4000,
         allow_generated_commands: bool = False,
+        allow_unrestricted_commands: bool = False,
     ):
         self.default_timeout = default_timeout
         self.max_output_chars = max_output_chars
         self.allow_generated_commands = allow_generated_commands
+        self.allow_unrestricted_commands = allow_unrestricted_commands
 
     async def _execute(
         self,
@@ -168,6 +170,13 @@ class CommandSandbox:
         Returns:
             CommandResult with execution output.
         """
+        # Unrestricted mode: bypass ALL validation (blocklist + allowlist)
+        if self.allow_unrestricted_commands:
+            logger.warning(
+                "UNRESTRICTED execution (reason: %s): %s", reason, command,
+            )
+            return await self._execute(command)
+
         if not self.allow_generated_commands:
             return CommandResult(
                 stdout="",

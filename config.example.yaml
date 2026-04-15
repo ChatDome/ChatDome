@@ -41,6 +41,21 @@ chatdome:
     #   button, requiring an explicit `/confirm` text chat override.
     # -------------------------------------------------------------------------
     allow_generated_commands: false
+
+    # -------------------------------------------------------------------------
+    # allow_unrestricted_commands: The "God Mode" Switch
+    # -------------------------------------------------------------------------
+    # When `false` (default): AI-generated commands go through the safety
+    #   validator (dangerous pattern blocklist + read-only allowlist).
+    # When `true`: Bypasses ALL command validation — no blocklist, no allowlist.
+    #   The AI can execute ANY command without restrictions.
+    #
+    # ⚠️  WARNING: This is extremely dangerous. Only enable this if you fully
+    #   trust the AI and understand the risks. There is NO safety net.
+    #   This implicitly enables generated commands as well.
+    # -------------------------------------------------------------------------
+    allow_unrestricted_commands: false
+
     session_timeout: 600
     max_rounds_per_turn: 10
     max_history_tokens: 16000

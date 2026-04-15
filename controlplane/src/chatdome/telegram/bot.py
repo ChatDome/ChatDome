@@ -262,6 +262,15 @@ class TelegramBot:
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
+        elif safety == "CRITICAL":
+            text += (
+                "⛔ *风险定级*: 极端高危！此操作可能导致不可逆的数据丢失或系统损坏。\n"
+                "按钮已禁用，如您明确了解后果并执意执行，请回复指令： `/confirm`"
+            )
+            keyboard = [
+                [InlineKeyboardButton("❌ 拒绝", callback_data="reject_cmd")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
         else:
             text += (
                 "🔴 *风险定级*: 高危操作！等待确认。\n"
