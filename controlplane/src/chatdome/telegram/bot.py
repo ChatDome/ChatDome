@@ -238,18 +238,30 @@ class TelegramBot:
 
     # ----- Interactive Approval -----
 
+    @staticmethod
+    def _escape_markdown(text: str) -> str:
+        """Escape special characters for Telegram Markdown (v1) parse mode."""
+        # Markdown v1 special chars: _ * ` [
+        for ch in ('\\', '`', '*', '_', '[', ']'):
+            text = text.replace(ch, f'\\{ch}')
+        return text
+
     async def _send_approval_request(self, message, data: dict) -> None:
         command = data.get("command", "")
         safety = data.get("safety_status", "UNSAFE")
         impact = data.get("impact_analysis", "")
         reason = data.get("reason", "未提供原因说明")
         
+        # Escape dynamic content to prevent Markdown parse errors
+        escaped_reason = self._escape_markdown(reason)
+        escaped_impact = self._escape_markdown(impact)
+        
         text = (
             f"⚠️ *AI 尝试执行动态命令*\n"
             f"`{command}`\n\n"
             f"📋 *执行评估*\n"
-            f"• *意图*: {reason}\n"
-            f"• *影响*: {impact}\n\n"
+            f"• *意图*: {escaped_reason}\n"
+            f"• *影响*: {escaped_impact}\n\n"
         )
         
         reply_markup = None
@@ -281,7 +293,13 @@ class TelegramBot:
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-        await message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+        try:
+            await message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+        except Exception as e:
+            # Fallback: send without Markdown if parsing fails
+            logger.warning("Markdown parse failed, falling back to plain text: %s", e)
+            plain_text = text.replace('*', '').replace('`', '').replace('\\', '')
+            await message.reply_text(plain_text, reply_markup=reply_markup)
 
     async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline keyboard button clicks."""
