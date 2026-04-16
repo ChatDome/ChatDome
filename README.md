@@ -6,6 +6,8 @@
   </p>
   <p align="center">
     <a href="#features">Features</a> •
+    <a href="#what-pain-does-it-solve">Pain Points</a> •
+    <a href="#why-sub-agent-instead-of-another-main-agent">Why Sub-Agent</a> •
     <a href="#quick-start">Quick Start</a> •
     <a href="#configuration">Configuration</a> •
     <a href="#how-it-works">How It Works</a> •
@@ -34,6 +36,25 @@ ChatDome: Ran ssh_bruteforce check...
           Recommendation: Consider banning these IPs via firewall.
 ```
 
+## What Pain Does It Solve?
+
+| Real pain | How ChatDome addresses it |
+|-----------|---------------------------|
+| No dedicated security engineer; unclear where to start | Ask in natural language, and let the agent choose investigation steps |
+| Security tooling is too heavy for small teams | Single Python process, no database, no extra host agent |
+| Fear of breaking production with ad-hoc commands | AI review, human confirmation, sandbox timeout and truncation controls |
+| Alert fatigue makes continuous monitoring unsustainable | Sentinel roadmap focuses on suppression, aggregation, and long-term context |
+| General-purpose AI can overreach in sensitive environments | ChatDome stays focused on host security with auditable, risk-aware workflows |
+
+## Why Sub-Agent Instead of Another Main-Agent?
+
+ChatDome is positioned as a **host-security sub-agent**, not a generic main-agent:
+
+- **Coexists with main-agents**: main-agents orchestrate; ChatDome executes security-specialized workflows
+- **Optimized for depth**: effort goes into risk control, approvals, evidence chain, and false-positive reduction
+- **Open integration direction**: Telegram-first today, evolving toward standardized interfaces for external agent calls
+- **Out-of-the-box value**: users get a usable security capability quickly, without building an entire automation stack first
+
 ## Features
 
 - **Dynamic Command Generation & Dual-Confirmation** — When unlocked, the AI can dynamically generate commands to answer arbitrary questions. These commands are processed by an AI Reviewer for impact analysis and require explicit interactive confirmation (or a mandatory `/confirm` for high-risk actions) before execution.
@@ -45,6 +66,7 @@ ChatDome: Ran ssh_bruteforce check...
 - **Telegram-Native** — Manage your server from your phone, anywhere.
 - **OpenAI-Compatible** — Works with any LLM API that supports the OpenAI function calling format (OpenAI, Claude, local models via LiteLLM, etc.).
 - **Zero Infrastructure & Low Intrusion** — Single Python process, no database, no agent installation on target filespaces, requiring just a Telegram bot token and an LLM API key.
+- **Sub-Agent Direction** — Evolving into a security module that main-agents can call, orchestrate, and audit.
 
 ### 🛡️ Sentinel — 7×24 Autonomous Guardian (Planned)
 
@@ -226,7 +248,7 @@ The AI uses **function calling** (tool use) to interact with the host. It can:
 | Tool | Description |
 |------|-------------|
 | `run_security_check` | Execute a pre-defined security audit command by ID |
-| `run_shell_command` | Execute a read-only shell command (when enabled) |
+| `run_shell_command` | Execute shell commands (read-only by default; maintenance write operations when `allow_unrestricted_commands=true`) |
 | `whois_lookup` | Look up IP geolocation and ownership |
 
 ### Built-in Security Checks
@@ -273,10 +295,10 @@ No rigid command syntax — just talk to it.
 ChatDome executes commands on your server — security is taken seriously:
 
 1. **Telegram Auth** — Only messages from whitelisted Chat IDs are processed. All others are silently dropped.
-2. **Pre-defined Commands** — By default, AI can only pick from a curated list of read-only audit commands. Templates are not user-modifiable at runtime.
-3. **Dangerous Command Blocking** — When `allow_generated_commands` is enabled, a regex blacklist blocks destructive patterns (`rm`, `dd`, `chmod`, `sudo`, shell redirects, etc.).
-4. **Execution Sandbox** — All commands run with enforced timeouts, output truncation, and no shell expansion.
-5. **No Write Operations** — The AI is instructed to never execute commands that modify the system. The sandbox enforces this as a second layer.
+2. **Safe-by-Default Mode** — By default, AI sticks to curated audit commands with immutable templates.
+3. **Generated Command Review** — With `allow_generated_commands`, generated commands go through review and confirmation flow.
+4. **Unrestricted Mode Warning** — `allow_unrestricted_commands` bypasses command validation; high-risk commands still go through explicit human confirmation and `/confirm` for critical actions.
+5. **Execution Sandbox** — Command execution still has timeout and output-bound controls to reduce blast radius.
 
 > ⚠️ **Recommendation**: Run ChatDome under a dedicated low-privilege user account that has read access to log files but no sudo privileges.
 

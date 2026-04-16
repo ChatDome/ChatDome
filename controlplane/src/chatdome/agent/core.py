@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from chatdome.agent.prompts import SYSTEM_PROMPT, TOOLS
+from chatdome.agent.prompts import build_system_prompt, build_tools
 from chatdome.agent.session import SessionManager
 from chatdome.agent.tools import ToolDispatcher
 from chatdome.config import AgentConfig
@@ -33,14 +33,21 @@ class Agent:
         llm: LLMClient,
         sandbox: CommandSandbox,
         config: AgentConfig,
+        runtime_environment_context: str = "",
     ):
         self.llm = llm
         self.config = config
+        self.tools = build_tools(
+            allow_unrestricted_commands=config.allow_unrestricted_commands,
+        )
         self.tool_dispatcher = ToolDispatcher(sandbox, llm=llm)
         self.session_manager = SessionManager(
             session_timeout=config.session_timeout,
             max_history_tokens=config.max_history_tokens,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=build_system_prompt(
+                allow_unrestricted_commands=config.allow_unrestricted_commands,
+                runtime_environment_context=runtime_environment_context,
+            ),
         )
 
     async def handle_message(self, chat_id: int, user_message: str) -> str:
@@ -102,7 +109,7 @@ class Agent:
             try:
                 response = await self.llm.chat_completion(
                     messages=session.messages,
-                    tools=TOOLS,
+                    tools=self.tools,
                 )
             except Exception as e:
                 error_msg = f"LLM 调用失败: {e}"

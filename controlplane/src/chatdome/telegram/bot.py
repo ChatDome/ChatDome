@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -46,6 +47,7 @@ HELP_TEXT = """\
 *命令：*
 /help \\- 显示帮助
 /clear \\- 清除对话上下文
+/env \\- 查看当前运行环境摘要（来自 environment\\_profile\\.md）
 /token \\- 查看当前账号的 Token 资源流水与花费汇总
 /cmd\\_echo \\- 开关命令回显模式（显示底层执行的具体步骤）
 
@@ -68,6 +70,7 @@ class TelegramBot:
         self.auth = Authenticator(config.telegram.allowed_chat_ids)
         self.max_message_length = config.telegram.max_message_length
         self._app: Application | None = None
+        self._environment_profile_path = Path("chat_data/environment_profile.md")
 
     async def post_init(self, app: Application) -> None:
         """Called by the Telegram application after initialization, inside the event loop."""
@@ -112,6 +115,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("clear", self._handle_clear))
         self._app.add_handler(CommandHandler("confirm", self._handle_confirm))
         self._app.add_handler(CommandHandler("cmd_echo", self._handle_cmd_echo))
+        self._app.add_handler(CommandHandler("env", self._handle_env))
         self._app.add_handler(CommandHandler("token", self._handle_token))
         self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self._app.add_handler(
@@ -190,6 +194,16 @@ class TelegramBot:
             f"🔢 累计调用账单: {stats['total_tokens']:,.0f} Tokens"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _handle_env(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /env command — show runtime environment profile summary."""
+        if not self._check_auth(update):
+            return
+
+        summary = self._build_environment_summary()
+        await self._send_long_message(update.message, summary)
 
     # ----- Message handler -----
 
@@ -397,6 +411,60 @@ class TelegramBot:
             if len(chunks) > 1:
                 chunk = f"📄 ({i}/{len(chunks)})\n{chunk}"
             await message.reply_text(chunk)
+
+    @staticmethod
+    def _truncate_csv_items(raw: str, max_items: int = 14) -> str:
+        """Truncate a comma-separated list for Telegram readability."""
+        items = [x.strip() for x in raw.split(",") if x.strip()]
+        if not items or items == ["none"]:
+            return "none"
+
+        if len(items) <= max_items:
+            return ", ".join(items)
+        return f"{', '.join(items[:max_items])} ... (+{len(items) - max_items} more)"
+
+    def _build_environment_summary(self) -> str:
+        """Build a short environment summary from environment_profile.md."""
+        path = self._environment_profile_path
+        if not path.exists():
+            return (
+                "ℹ️ 未找到环境档案。\n"
+                "请先重启 ChatDome，让启动流程自动生成 chat_data/environment_profile.md。"
+            )
+
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as e:
+            return f"⚠️ 读取环境档案失败: {e}"
+
+        fields: dict[str, str] = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("- ") or ": " not in line:
+                continue
+            key, value = line[2:].split(": ", 1)
+            fields[key.strip()] = value.strip()
+
+        available = self._truncate_csv_items(fields.get("Available", "none"))
+        missing = self._truncate_csv_items(fields.get("Missing", "none"))
+
+        return (
+            "🧭 当前运行环境摘要\n\n"
+            f"档案文件: {path.resolve()}\n"
+            f"采集时间(UTC): {fields.get('UTC', 'unknown')}\n\n"
+            "主机信息:\n"
+            f"- OS family: {fields.get('OS family', 'unknown')}\n"
+            f"- OS release: {fields.get('OS release', 'unknown')}\n"
+            f"- OS version: {fields.get('OS version', 'unknown')}\n"
+            f"- Machine: {fields.get('Machine', 'unknown')}\n"
+            f"- Python: {fields.get('Python', 'unknown')}\n"
+            f"- Shell: {fields.get('Shell', 'unknown')}\n"
+            f"- Linux distro: {fields.get('Linux distro', 'N/A')}\n"
+            f"- WSL: {fields.get('WSL', 'unknown')}\n\n"
+            "命令探测(节选):\n"
+            f"- Available: {available}\n"
+            f"- Missing: {missing}"
+        )
 
     async def _handle_error(
         self,

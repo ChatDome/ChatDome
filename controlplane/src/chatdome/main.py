@@ -11,11 +11,13 @@ import argparse
 import asyncio
 import logging
 import sys
+from pathlib import Path
 
 from chatdome.config import load_config
 from chatdome.agent.core import Agent
 from chatdome.executor.sandbox import CommandSandbox
 from chatdome.llm.client import LLMClient
+from chatdome.runtime_environment import collect_and_persist_runtime_environment
 from chatdome.telegram.bot import TelegramBot
 
 
@@ -92,11 +94,25 @@ def main() -> None:
         allow_unrestricted_commands=config.agent.allow_unrestricted_commands,
     )
 
+    # Runtime environment profile (OS/shell/command availability)
+    env_report_path = Path("chat_data/environment_profile.md")
+    env_snapshot, runtime_environment_context = collect_and_persist_runtime_environment(
+        env_report_path,
+    )
+    logger.info(
+        "  Environment: %s %s | shell=%s | report=%s",
+        env_snapshot.os_family,
+        env_snapshot.os_release,
+        env_snapshot.shell,
+        env_report_path.resolve(),
+    )
+
     # AI Agent
     agent = Agent(
         llm=llm,
         sandbox=sandbox,
         config=config.agent,
+        runtime_environment_context=runtime_environment_context,
     )
 
     # Telegram Bot
