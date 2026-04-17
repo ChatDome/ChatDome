@@ -118,6 +118,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("cmd_echo", self._handle_cmd_echo))
         self._app.add_handler(CommandHandler("env", self._handle_env))
         self._app.add_handler(CommandHandler("token", self._handle_token))
+        self._app.add_handler(CommandHandler("audit", self._handle_audit))
         self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
@@ -206,6 +207,45 @@ class TelegramBot:
         summary = self._build_environment_summary()
         await self._send_long_message(update.message, summary)
 
+    async def _handle_audit(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /audit command - show recent command audit events for current chat."""
+        if not self._check_auth(update):
+            return
+
+        chat_id = update.effective_chat.id
+        limit = 10
+        if context.args:
+            try:
+                parsed = int(context.args[0])
+                if parsed > 0:
+                    limit = min(parsed, 30)
+            except (TypeError, ValueError):
+                pass
+
+        from chatdome.agent.audit import CommandAuditTracker
+
+        events = CommandAuditTracker.get_recent_events(chat_id=chat_id, limit=limit)
+        if not events:
+            await update.message.reply_text("No command audit events yet.")
+            return
+
+        lines = [f"Command audit events (latest {len(events)}):"]
+        for event in events:
+            ts = str(event.get("timestamp_iso", "unknown"))
+            event_type = str(event.get("event_type", "unknown"))
+            risk = str(event.get("risk_level", "-"))
+            command = str(event.get("command", "")).replace("\n", " ").strip()
+            if len(command) > 100:
+                command = command[:100] + "..."
+            line = f"- {ts} | {event_type} | risk={risk}"
+            if command:
+                line += f"\n  {command}"
+            lines.append(line)
+
+        await self._send_long_message(update.message, "\n".join(lines))
+
     # ----- Message handler -----
 
     async def _handle_message(
@@ -263,13 +303,26 @@ class TelegramBot:
 
     async def _send_approval_request(self, message, data: dict) -> None:
         command = data.get("command", "")
-        safety = data.get("safety_status", "UNSAFE")
+        safety = str(data.get("safety_status", "UNSAFE")).strip().upper()
         impact = data.get("impact_analysis", "")
+        risk_level = str(data.get("risk_level", "HIGH")).strip().upper()
+        mutation_detected = bool(data.get("mutation_detected", False))
+        deletion_detected = bool(data.get("deletion_detected", False))
         reason = data.get("reason", "未提供原因说明")
         
         # Escape dynamic content to prevent Markdown parse errors
         escaped_reason = self._escape_markdown(reason)
         escaped_impact = self._escape_markdown(impact)
+        if safety not in {"SAFE", "UNSAFE", "CRITICAL"}:
+            safety = "UNSAFE"
+        if risk_level not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+            risk_level = "HIGH"
+        if mutation_detected and safety == "SAFE":
+            safety = "UNSAFE"
+        if deletion_detected and risk_level in {"LOW", "MEDIUM"}:
+            risk_level = "HIGH"
+        if safety == "CRITICAL":
+            risk_level = "CRITICAL"
         
         text = (
             f"⚠️ *AI 尝试执行动态命令*\n"
@@ -279,8 +332,19 @@ class TelegramBot:
             f"• *影响*: {escaped_impact}\n\n"
         )
         
+        text += (
+            f"\n风险等级: {risk_level}"
+            f"\n检测到修改: {'是' if mutation_detected else '否'}"
+            f"\n检测到删除: {'是' if deletion_detected else '否'}\n"
+        )
+
         reply_markup = None
-        if safety == "SAFE":
+        if (
+            safety == "SAFE"
+            and risk_level == "LOW"
+            and not mutation_detected
+            and not deletion_detected
+        ):
             text += "🟢 *风险定级*: 已评估为安全操作，等待您的最终确认。"
             keyboard = [
                 [
@@ -289,7 +353,7 @@ class TelegramBot:
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-        elif safety == "CRITICAL":
+        elif safety == "CRITICAL" or risk_level == "CRITICAL":
             text += (
                 "⛔ *风险定级*: 极端高危！此操作可能导致不可逆的数据丢失或系统损坏。\n"
                 "按钮已禁用，如您明确了解后果并执意执行，请回复指令： `/confirm`"

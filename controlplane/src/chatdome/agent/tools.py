@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from chatdome.agent.audit import CommandAuditTracker
 from chatdome.executor.sandbox import CommandSandbox, CommandResult
 
 logger = logging.getLogger(__name__)
@@ -22,12 +23,25 @@ logger = logging.getLogger(__name__)
 
 class PendingApprovalError(Exception):
     """Raised when a tool call requires user confirmation before execution."""
-    def __init__(self, command: str, safety_status: str, impact_analysis: str, tool_call_id: str, reason: str = ""):
+    def __init__(
+        self,
+        command: str,
+        safety_status: str,
+        impact_analysis: str,
+        tool_call_id: str,
+        reason: str = "",
+        risk_level: str = "HIGH",
+        mutation_detected: bool = False,
+        deletion_detected: bool = False,
+    ):
         self.command = command
         self.safety_status = safety_status
         self.impact_analysis = impact_analysis
         self.tool_call_id = tool_call_id
         self.reason = reason
+        self.risk_level = risk_level
+        self.mutation_detected = mutation_detected
+        self.deletion_detected = deletion_detected
         super().__init__(f"Command requires approval: {command}")
 
 
@@ -74,7 +88,7 @@ class ToolDispatcher:
 
         try:
             if tool_name == "run_security_check":
-                return await self._handle_security_check(args)
+                return await self._handle_security_check(args, tool_call_id, chat_id)
             elif tool_name == "run_shell_command":
                 return await self._handle_shell_command(args, tool_call_id, chat_id)
             elif tool_name == "whois_lookup":
@@ -89,12 +103,22 @@ class ToolDispatcher:
 
     # ----- Handlers -----
 
-    async def _handle_security_check(self, args: dict[str, Any]) -> str:
+    async def _handle_security_check(
+        self,
+        args: dict[str, Any],
+        tool_call_id: str = "",
+        chat_id: int = 0,
+    ) -> str:
         """Execute a pre-defined security check."""
         check_id = args.get("check_id", "")
         check_args = args.get("args")
 
-        result = await self.sandbox.execute_security_check(check_id, check_args)
+        result = await self.sandbox.execute_security_check(
+            check_id,
+            check_args,
+            chat_id=chat_id,
+            tool_call_id=tool_call_id,
+        )
         return self._format_command_result(result)
 
     async def _handle_shell_command(self, args: dict[str, Any], tool_call_id: str, chat_id: int = 0) -> str:
@@ -105,54 +129,166 @@ class ToolDispatcher:
         if not command:
             return "缺少 command 参数"
 
-        # Unrestricted mode: safe commands execute directly, risky ones need approval
-        if self.sandbox.allow_unrestricted_commands:
-            from chatdome.executor.validator import validate_command
-            safety_check = validate_command(command, check_allowlist=False)
+        from chatdome.executor.validator import (
+            has_write_intent,
+            is_critical_command,
+            validate_command,
+        )
 
-            if safety_check.is_safe:
-                # Read-only / safe command → execute immediately, no approval needed
-                logger.info("Unrestricted auto-execute (safe, reason: %s): %s", reason, command)
-                result = await self.sandbox.execute_shell_command(command, reason)
-                return self._format_command_result(result)
-            else:
-                # Dangerous command → still require user approval
-                logger.warning(
-                    "Unrestricted mode: risky command needs approval: %s (matched: %s)",
-                    command, safety_check.reason,
-                )
-                # Check if this is an EXTREME danger command (rm, sudo, reboot, etc.)
-                from chatdome.executor.validator import is_critical_command
-                is_critical = is_critical_command(command)
-
-                if self.llm:
-                    from chatdome.agent.prompts import REVIEWER_SYSTEM_PROMPT
-                    review = await self.llm.evaluate_command_safety(command, REVIEWER_SYSTEM_PROMPT, chat_id=chat_id)
-                    safety_status = review.get("safety_status", "UNSAFE")
-                    impact_analysis = review.get("impact_analysis", safety_check.reason)
-                    # Force critical commands to UNSAFE — only /confirm can approve
-                    if is_critical and safety_status == "SAFE":
-                        safety_status = "CRITICAL"
-                        impact_analysis = f"⛔ 极端高危操作 ({safety_check.reason})，已强制升级为最高风险等级。\n\n{impact_analysis}"
-                        logger.warning("Critical command forced to UNSAFE: %s", command)
-                    raise PendingApprovalError(command, safety_status, impact_analysis, tool_call_id, reason)
-                else:
-                    status = "CRITICAL" if is_critical else "UNSAFE"
-                    raise PendingApprovalError(command, status, safety_check.reason, tool_call_id, reason)
-
-        # 1. AI Reviewer Analysis
+        review_status = "UNSAFE"
+        review_risk_level = "HIGH"
+        review_mutation = True
+        review_deletion = False
+        review_impact = "AI Reviewer unavailable，已按保守策略处理。"
         if self.llm:
             from chatdome.agent.prompts import REVIEWER_SYSTEM_PROMPT
+
             logger.info("Running AI Reviewer for shell command: %s", command)
-            review = await self.llm.evaluate_command_safety(command, REVIEWER_SYSTEM_PROMPT, chat_id=chat_id)
-            safety_status = review.get("safety_status", "UNSAFE")
-            impact_analysis = review.get("impact_analysis", "分析失败")
-            
-            # Suspend loop and wait for human confirmation
-            raise PendingApprovalError(command, safety_status, impact_analysis, tool_call_id, reason)
+            review = await self.llm.evaluate_command_safety(
+                command,
+                REVIEWER_SYSTEM_PROMPT,
+                chat_id=chat_id,
+            )
+            review_status = str(review.get("safety_status", "UNSAFE")).strip().upper() or "UNSAFE"
+            if review_status not in {"SAFE", "UNSAFE", "CRITICAL"}:
+                review_status = "UNSAFE"
+            review_risk_level = str(review.get("risk_level", "HIGH")).strip().upper() or "HIGH"
+            if review_risk_level not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+                review_risk_level = "HIGH"
+            review_mutation = bool(review.get("mutation_detected", review_status != "SAFE"))
+            review_deletion = bool(review.get("deletion_detected", False))
+            review_impact = str(review.get("impact_analysis", "")).strip() or "分析失败"
+
+        static_check = validate_command(command, check_allowlist=False)
+        static_critical = is_critical_command(command)
+        static_write = has_write_intent(command)
+
+        mutation_detected = review_mutation or static_write
+        deletion_detected = review_deletion or ("删除" in (static_check.reason or ""))
+        safety_status = review_status
+        risk_level = review_risk_level
+
+        # LLM-first decision with static fail-safe escalation.
+        if mutation_detected and safety_status == "SAFE":
+            safety_status = "UNSAFE"
+        if deletion_detected and risk_level in {"LOW", "MEDIUM"}:
+            risk_level = "HIGH"
+        if static_critical:
+            safety_status = "CRITICAL"
+            risk_level = "CRITICAL"
+        elif risk_level == "CRITICAL":
+            safety_status = "CRITICAL"
+
+        static_signals: list[str] = []
+        if static_write:
+            static_signals.append("检测到写入/状态变更意图")
+        if not static_check.is_safe and static_check.reason:
+            static_signals.append(static_check.reason)
+        if static_critical:
+            static_signals.append("命令匹配极端高危模式")
+
+        impact_analysis = review_impact
+        if static_signals:
+            impact_analysis = f"{review_impact}\n\n[静态护栏信号]\n- " + "\n- ".join(static_signals)
+
+        CommandAuditTracker.record_event(
+            "command_reviewed",
+            chat_id=chat_id,
+            tool_call_id=tool_call_id,
+            command=command,
+            reason=reason,
+            safety_status=safety_status,
+            risk_level=risk_level,
+            mutation_detected=mutation_detected,
+            deletion_detected=deletion_detected,
+            reviewer_status=review_status,
+            reviewer_risk_level=review_risk_level,
+            static_is_safe=static_check.is_safe,
+            static_reason=static_check.reason,
+            static_write_detected=static_write,
+            static_critical=static_critical,
+            unrestricted_mode=self.sandbox.allow_unrestricted_commands,
+        )
+
+        # Unrestricted mode auto-exec only for clearly low-risk read-only commands.
+        if self.sandbox.allow_unrestricted_commands:
+            can_auto_execute = (
+                safety_status == "SAFE"
+                and risk_level == "LOW"
+                and not mutation_detected
+                and not deletion_detected
+                and static_check.is_safe
+                and not static_critical
+            )
+            if can_auto_execute:
+                logger.info(
+                    "Unrestricted auto-execute (LLM SAFE+LOW, reason: %s): %s",
+                    reason,
+                    command,
+                )
+                result = await self.sandbox.execute_shell_command(
+                    command,
+                    reason,
+                    chat_id=chat_id,
+                    tool_call_id=tool_call_id,
+                )
+                return self._format_command_result(result)
+
+            CommandAuditTracker.record_event(
+                "command_pending_approval",
+                chat_id=chat_id,
+                tool_call_id=tool_call_id,
+                command=command,
+                reason=reason,
+                safety_status=safety_status,
+                risk_level=risk_level,
+                mutation_detected=mutation_detected,
+                deletion_detected=deletion_detected,
+                mode="unrestricted_guardrail",
+            )
+            raise PendingApprovalError(
+                command=command,
+                safety_status=safety_status,
+                impact_analysis=impact_analysis,
+                tool_call_id=tool_call_id,
+                reason=reason,
+                risk_level=risk_level,
+                mutation_detected=mutation_detected,
+                deletion_detected=deletion_detected,
+            )
+
+        # Restricted mode: every generated command requires approval.
+        if self.llm:
+            CommandAuditTracker.record_event(
+                "command_pending_approval",
+                chat_id=chat_id,
+                tool_call_id=tool_call_id,
+                command=command,
+                reason=reason,
+                safety_status=safety_status,
+                risk_level=risk_level,
+                mutation_detected=mutation_detected,
+                deletion_detected=deletion_detected,
+                mode="restricted_default",
+            )
+            raise PendingApprovalError(
+                command=command,
+                safety_status=safety_status,
+                impact_analysis=impact_analysis,
+                tool_call_id=tool_call_id,
+                reason=reason,
+                risk_level=risk_level,
+                mutation_detected=mutation_detected,
+                deletion_detected=deletion_detected,
+            )
         
         # 2. Fallback (should not be reached normally)
-        result = await self.sandbox.execute_shell_command(command, "LLM Generated")
+        result = await self.sandbox.execute_shell_command(
+            command,
+            "LLM Generated",
+            chat_id=chat_id,
+            tool_call_id=tool_call_id,
+        )
         return self._format_command_result(result)
 
     async def _handle_whois_lookup(self, args: dict[str, Any]) -> str:

@@ -11,6 +11,7 @@ import logging
 import time
 from typing import Any
 
+from chatdome.agent.audit import CommandAuditTracker
 from chatdome.agent.prompts import build_system_prompt, build_tools
 from chatdome.agent.session import SessionManager
 from chatdome.agent.tools import ToolDispatcher
@@ -97,6 +98,13 @@ class Agent:
 
         if action == "REJECT":
             logger.info("User rejected command: %s", command)
+            CommandAuditTracker.record_event(
+                "command_rejected",
+                chat_id=chat_id,
+                tool_call_id=tool_call_id,
+                command=command,
+                approval_action="REJECT",
+            )
             tool_result_for_llm = "由于存在安全风险，用户已拒绝执行该命令。请提供其他解决方案或向用户解释。"
             if followup_summary:
                 tool_result_for_llm += (
@@ -107,9 +115,21 @@ class Agent:
             raw_result = "用户已拒绝执行该命令。"
         else:
             logger.info("User approved command: %s", command)
+            CommandAuditTracker.record_event(
+                "command_approved",
+                chat_id=chat_id,
+                tool_call_id=tool_call_id,
+                command=command,
+                approval_action="APPROVE",
+            )
             try:
                 # Bypass Reviewer, go straight to sandbox
-                res = await self.tool_dispatcher.sandbox.execute_shell_command(command, "User Approved")
+                res = await self.tool_dispatcher.sandbox.execute_shell_command(
+                    command,
+                    "User Approved",
+                    chat_id=chat_id,
+                    tool_call_id=tool_call_id,
+                )
                 raw_result = self.tool_dispatcher._format_command_result(res)
             except Exception as e:
                 raw_result = f"执行过程中发生异常: {e}"
@@ -300,7 +320,10 @@ class Agent:
                             "command": e.command, 
                             "safety_status": e.safety_status, 
                             "impact_analysis": e.impact_analysis,
-                            "reason": getattr(e, 'reason', '')
+                            "reason": getattr(e, 'reason', ''),
+                            "risk_level": getattr(e, "risk_level", "HIGH"),
+                            "mutation_detected": bool(getattr(e, "mutation_detected", False)),
+                            "deletion_detected": bool(getattr(e, "deletion_detected", False)),
                         }
                         self._persist_session(session)
                         return f"__PENDING_APPROVAL__:{json.dumps(payload)}"

@@ -1,34 +1,33 @@
 """
 Command execution sandbox.
 
-Provides a secure wrapper around asyncio.subprocess with:
-  - Enforced timeouts
-  - Output truncation
-  - Unified result format
-  - Integration with registry and validator
+Provides a wrapper around asyncio subprocess execution with:
+  - enforced timeouts
+  - output truncation
+  - unified result format
+  - validator integration
+  - command audit events
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import shlex
+import time
 from dataclasses import dataclass
 from typing import Any
 
+from chatdome.agent.audit import CommandAuditTracker
 from chatdome.executor.registry import render_command
 from chatdome.executor.validator import validate_command
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Result type
-# ---------------------------------------------------------------------------
-
 @dataclass
 class CommandResult:
     """Unified command execution result."""
+
     stdout: str
     stderr: str
     return_code: int | None
@@ -36,10 +35,6 @@ class CommandResult:
     truncated: bool = False
     command: str = ""
 
-
-# ---------------------------------------------------------------------------
-# Sandbox
-# ---------------------------------------------------------------------------
 
 class CommandSandbox:
     """
@@ -103,10 +98,12 @@ class CommandSandbox:
             stdout = stdout_bytes.decode("utf-8", errors="replace")
             stderr = stderr_bytes.decode("utf-8", errors="replace")
 
-            # Truncate output
             truncated = False
             if len(stdout) > self.max_output_chars:
-                stdout = stdout[: self.max_output_chars] + f"\n\n... [输出已截断，共 {len(stdout_bytes)} 字符]"
+                stdout = (
+                    stdout[: self.max_output_chars]
+                    + f"\n\n... [输出已截断，原始字节数={len(stdout_bytes)}]"
+                )
                 truncated = True
 
             return CommandResult(
@@ -119,7 +116,7 @@ class CommandSandbox:
             )
 
         except Exception as e:
-            logger.error("Command execution failed: %s — %s", command, e)
+            logger.error("Command execution failed: %s - %s", command, e)
             return CommandResult(
                 stdout="",
                 stderr=f"命令执行异常: {e}",
@@ -127,10 +124,57 @@ class CommandSandbox:
                 command=command,
             )
 
+    @staticmethod
+    def _record_execution_audit(
+        *,
+        event_type: str,
+        chat_id: int,
+        tool_call_id: str,
+        command: str,
+        reason: str,
+        result: CommandResult | None = None,
+        execution_mode: str = "",
+        duration_ms: int = 0,
+        block_reason: str = "",
+        extra_fields: dict[str, Any] | None = None,
+    ) -> None:
+        fields: dict[str, Any] = {
+            "tool_call_id": tool_call_id,
+            "command": command,
+            "reason": reason,
+            "execution_mode": execution_mode,
+            "duration_ms": duration_ms,
+        }
+        if block_reason:
+            fields["block_reason"] = block_reason
+        if extra_fields:
+            fields.update(extra_fields)
+
+        if result is not None:
+            fields.update(
+                {
+                    "return_code": result.return_code,
+                    "timed_out": result.timed_out,
+                    "truncated": result.truncated,
+                    "stdout_bytes": len((result.stdout or "").encode("utf-8", errors="replace")),
+                    "stderr_bytes": len((result.stderr or "").encode("utf-8", errors="replace")),
+                    "stdout_hash": CommandAuditTracker.sha256_text(result.stdout or ""),
+                    "stderr_hash": CommandAuditTracker.sha256_text(result.stderr or ""),
+                }
+            )
+
+        CommandAuditTracker.record_event(
+            event_type,
+            chat_id=chat_id,
+            **fields,
+        )
+
     async def execute_security_check(
         self,
         check_id: str,
         args: dict[str, Any] | None = None,
+        chat_id: int = 0,
+        tool_call_id: str = "",
     ) -> CommandResult:
         """
         Execute a pre-defined security audit command.
@@ -138,6 +182,8 @@ class CommandSandbox:
         Args:
             check_id: Registered command ID (e.g., 'ssh_bruteforce').
             args: Optional parameter overrides.
+            chat_id: Chat context for audit logging.
+            tool_call_id: Optional tool call ID for trace linkage.
 
         Returns:
             CommandResult with execution output.
@@ -145,6 +191,14 @@ class CommandSandbox:
         try:
             rendered = render_command(check_id, args)
         except ValueError as e:
+            self._record_execution_audit(
+                event_type="security_check_invalid",
+                chat_id=chat_id,
+                tool_call_id=tool_call_id,
+                command=f"[check:{check_id}]",
+                reason="security_check_render_failed",
+                block_reason=str(e),
+            )
             return CommandResult(
                 stdout="",
                 stderr=str(e),
@@ -153,12 +207,32 @@ class CommandSandbox:
             )
 
         logger.info("Running security check: %s (%s)", rendered.name, rendered.check_id)
-        return await self._execute(rendered.command, timeout=rendered.timeout)
+        started = time.monotonic()
+        result = await self._execute(rendered.command, timeout=rendered.timeout)
+        duration_ms = int((time.monotonic() - started) * 1000)
+        self._record_execution_audit(
+            event_type="security_check_executed",
+            chat_id=chat_id,
+            tool_call_id=tool_call_id,
+            command=rendered.command,
+            reason=f"security_check:{rendered.check_id}",
+            result=result,
+            execution_mode="registry",
+            duration_ms=duration_ms,
+            extra_fields={
+                "check_id": rendered.check_id,
+                "check_name": rendered.name,
+                "timeout_seconds": rendered.timeout,
+            },
+        )
+        return result
 
     async def execute_shell_command(
         self,
         command: str,
         reason: str = "",
+        chat_id: int = 0,
+        tool_call_id: str = "",
     ) -> CommandResult:
         """
         Execute an AI-generated shell command after safety validation.
@@ -166,38 +240,78 @@ class CommandSandbox:
         Args:
             command: The shell command to execute.
             reason: Why the AI wants to run this command.
+            chat_id: Chat context for audit logging.
+            tool_call_id: Optional tool call ID for trace linkage.
 
         Returns:
             CommandResult with execution output.
         """
-        # Unrestricted mode: bypass ALL validation (blocklist + allowlist)
         if self.allow_unrestricted_commands:
-            logger.warning(
-                "UNRESTRICTED execution (reason: %s): %s", reason, command,
+            logger.warning("UNRESTRICTED execution (reason: %s): %s", reason, command)
+            started = time.monotonic()
+            executed = await self._execute(command)
+            self._record_execution_audit(
+                event_type="command_executed",
+                chat_id=chat_id,
+                tool_call_id=tool_call_id,
+                command=command,
+                reason=reason,
+                result=executed,
+                execution_mode="unrestricted",
+                duration_ms=int((time.monotonic() - started) * 1000),
             )
-            return await self._execute(command)
+            return executed
 
         if not self.allow_generated_commands:
+            self._record_execution_audit(
+                event_type="command_blocked",
+                chat_id=chat_id,
+                tool_call_id=tool_call_id,
+                command=command,
+                reason=reason,
+                block_reason="generated_commands_disabled",
+            )
             return CommandResult(
                 stdout="",
-                stderr="自定义命令执行已禁用。请使用预定义的安全审计命令 (run_security_check)。",
+                stderr="自定义命令执行已禁用。请使用 run_security_check。",
                 return_code=None,
                 command=command,
             )
 
-        # Validate safety
-        result = validate_command(command, check_allowlist=True)
-        if not result.is_safe:
+        validation = validate_command(command, check_allowlist=True)
+        if not validation.is_safe:
             logger.warning(
-                "AI-generated command blocked: %s — reason: %s (AI reason: %s)",
-                command, result.reason, reason,
+                "AI-generated command blocked: %s (validator reason: %s, AI reason: %s)",
+                command,
+                validation.reason,
+                reason,
+            )
+            self._record_execution_audit(
+                event_type="command_blocked",
+                chat_id=chat_id,
+                tool_call_id=tool_call_id,
+                command=command,
+                reason=reason,
+                block_reason=validation.reason,
             )
             return CommandResult(
                 stdout="",
-                stderr=f"命令安全检查未通过: {result.reason}",
+                stderr=f"命令被校验器拦截: {validation.reason}",
                 return_code=None,
                 command=command,
             )
 
         logger.info("Executing AI-generated command (reason: %s): %s", reason, command)
-        return await self._execute(command)
+        started = time.monotonic()
+        executed = await self._execute(command)
+        self._record_execution_audit(
+            event_type="command_executed",
+            chat_id=chat_id,
+            tool_call_id=tool_call_id,
+            command=command,
+            reason=reason,
+            result=executed,
+            execution_mode="validated",
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        return executed

@@ -150,7 +150,7 @@ class LLMClient:
 
     async def evaluate_command_safety(
         self, command: str, system_prompt: str, chat_id: int = 0
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """
         Use the LLM to evaluate the safety and impact of a shell command.
         Forces JSON output format.
@@ -185,16 +185,40 @@ class LLMClient:
                     total_tokens=response.total_tokens
                 )
             
-            # Ensure required fields exist
+            # Normalize and ensure required fields exist
+            safety_status = str(result.get("safety_status", "UNSAFE")).strip().upper()
+            if safety_status not in {"SAFE", "UNSAFE", "CRITICAL"}:
+                safety_status = "UNSAFE"
+
+            risk_level = str(result.get("risk_level", "HIGH")).strip().upper()
+            if risk_level not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+                risk_level = "HIGH"
+
+            mutation_detected = bool(result.get("mutation_detected", safety_status != "SAFE"))
+            deletion_detected = bool(result.get("deletion_detected", False))
+            impact_analysis = str(result.get("impact_analysis", "无法解析安全分析结果")).strip()
+
+            # Safety consistency correction (fail-safe)
+            if mutation_detected and safety_status == "SAFE":
+                safety_status = "UNSAFE"
+            if deletion_detected and risk_level in {"LOW", "MEDIUM"}:
+                risk_level = "HIGH"
+
             return {
-                "safety_status": result.get("safety_status", "UNSAFE").strip().upper(),
-                "impact_analysis": result.get("impact_analysis", "无法解析安全分析结果").strip()
+                "safety_status": safety_status,
+                "risk_level": risk_level,
+                "mutation_detected": mutation_detected,
+                "deletion_detected": deletion_detected,
+                "impact_analysis": impact_analysis,
             }
         except Exception as e:
             logger.error("Error evaluating command safety: %s", e)
             return {
                 "safety_status": "UNSAFE",
-                "impact_analysis": f"安全审查机制执行失败，拒绝放行 ({str(e)})"
+                "risk_level": "HIGH",
+                "mutation_detected": True,
+                "deletion_detected": False,
+                "impact_analysis": f"安全审查机制执行失败，拒绝放行 ({str(e)})",
             }
         finally:
             self.temperature = original_temp

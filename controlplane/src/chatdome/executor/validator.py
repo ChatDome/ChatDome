@@ -103,6 +103,37 @@ READONLY_COMMANDS = {
 
 
 # ---------------------------------------------------------------------------
+# Write-intent detector (fail-safe guardrail)
+# ---------------------------------------------------------------------------
+
+# NOTE:
+# This detector is intentionally conservative and is used as a hard guardrail.
+# Final risk adjudication can still leverage the LLM reviewer, but any hit here
+# should require human approval.
+WRITE_INTENT_PATTERNS: list[re.Pattern] = [
+    # In-place file editing
+    re.compile(r"\bsed\b[^\n\r;|&]*\s-i(?:\s|$)"),
+    re.compile(r"\bperl\b[^\n\r;|&]*\s-pi(?:\s|$)"),
+
+    # Shell write redirection
+    re.compile(r">>"),
+    re.compile(r">\s"),
+
+    # Common file mutation commands
+    re.compile(r"\btouch\b"),
+    re.compile(r"\btruncate\b"),
+    re.compile(r"\btee\b"),
+    re.compile(r"\bmkdir\b"),
+    re.compile(r"\binstall\b"),
+
+    # Service/package/system state changes
+    re.compile(r"\bsystemctl\b\s+(start|stop|restart|reload|enable|disable)\b"),
+    re.compile(r"\b(service|rc-service)\b\s+\S+\s+(start|stop|restart|reload)\b"),
+    re.compile(r"\b(apt|apt-get|yum|dnf|apk|pacman|brew)\b"),
+]
+
+
+# ---------------------------------------------------------------------------
 # Validation result
 # ---------------------------------------------------------------------------
 
@@ -125,6 +156,22 @@ def is_critical_command(command: str) -> bool:
     never via inline button, to prevent accidental approval.
     """
     for pattern, _ in CRITICAL_PATTERNS:
+        if pattern.search(command):
+            return True
+    return False
+
+
+def has_write_intent(command: str) -> bool:
+    """
+    Check whether command likely mutates system state or files.
+
+    This is a conservative lexical detector and should be treated as
+    a hard fail-safe signal for requiring human approval.
+    """
+    if not command or not command.strip():
+        return False
+
+    for pattern in WRITE_INTENT_PATTERNS:
         if pattern.search(command):
             return True
     return False
