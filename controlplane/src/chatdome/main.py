@@ -71,6 +71,12 @@ def main() -> None:
     logger.info("  Base URL: %s", config.ai.base_url)
     logger.info("  Allowed chats: %s", config.telegram.allowed_chat_ids or "(all)")
     logger.info("  Generated commands: %s", config.agent.allow_generated_commands)
+    logger.info(
+        "  Session policy: memory_timeout=%ss, pending_timeout=%ss, persisted_ttl=%ss",
+        config.agent.session_timeout,
+        config.agent.pending_approval_timeout,
+        config.agent.persisted_session_ttl,
+    )
     if config.agent.allow_unrestricted_commands:
         logger.warning("  ⚠️  UNRESTRICTED commands: ENABLED — ALL validation bypassed!")
     logger.info("=" * 60)

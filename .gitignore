@@ -25,5 +25,9 @@ config.yaml
 .DS_Store
 Thumbs.db
 
+# Runtime artifacts
+chat_data/
+controlplane/src/chat_data/
+
 # Internal docs (kept in separate private repo)
 docs/

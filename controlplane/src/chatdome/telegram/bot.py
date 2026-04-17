@@ -114,6 +114,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("start", self._handle_help))
         self._app.add_handler(CommandHandler("clear", self._handle_clear))
         self._app.add_handler(CommandHandler("confirm", self._handle_confirm))
+        self._app.add_handler(CommandHandler("reject", self._handle_reject))
         self._app.add_handler(CommandHandler("cmd_echo", self._handle_cmd_echo))
         self._app.add_handler(CommandHandler("env", self._handle_env))
         self._app.add_handler(CommandHandler("token", self._handle_token))
@@ -365,6 +366,28 @@ class TelegramBot:
             if raw_result:
                 await self._send_long_message(update.message, f"⚙️ *真实沙箱执行结果*:\n```text\n{raw_result}\n```")
                 
+            if final_response.startswith("__PENDING_APPROVAL__:"):
+                data = json.loads(final_response.split(":", 1)[1])
+                await self._send_approval_request(update.message, data)
+            else:
+                await self._send_long_message(update.message, final_response)
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ 恢复会话异常: {e}")
+
+    async def _handle_reject(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /reject command for pending high-risk execution."""
+        if not self._check_auth(update):
+            return
+
+        chat_id = update.effective_chat.id
+        thinking_msg = await update.message.reply_text("🤹 正在拒绝待执行命令...")
+        try:
+            _, final_response = await self.agent.resume_session(chat_id, "REJECT")
+            try:
+                await thinking_msg.delete()
+            except Exception:
+                pass
+
             if final_response.startswith("__PENDING_APPROVAL__:"):
                 data = json.loads(final_response.split(":", 1)[1])
                 await self._send_approval_request(update.message, data)

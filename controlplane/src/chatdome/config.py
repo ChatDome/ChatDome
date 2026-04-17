@@ -10,9 +10,11 @@ config file with optional environment variable override support.
 Environment variables:
   CHATDOME_BOT_TOKEN        — Telegram Bot token  (required)
   CHATDOME_AI_API_KEY       — LLM API key         (required)
-  CHATDOME_AI_BASE_URL      — LLM API base URL    (optional)
-  CHATDOME_ALLOWED_CHAT_IDS — Comma-separated chat IDs (optional)
-  CHATDOME_CONFIG           — Path to config.yaml (optional)
+  CHATDOME_AI_BASE_URL      – LLM API base URL    (optional)
+  CHATDOME_ALLOWED_CHAT_IDS – Comma-separated chat IDs (optional)
+  CHATDOME_PENDING_APPROVAL_TIMEOUT – Pending approval timeout in seconds (optional)
+  CHATDOME_PERSISTED_SESSION_TTL – Persisted session retention in seconds (optional)
+  CHATDOME_CONFIG           – Path to config.yaml (optional)
 """
 
 from __future__ import annotations
@@ -56,6 +58,8 @@ class AgentConfig:
     allow_generated_commands: bool = False
     allow_unrestricted_commands: bool = False
     session_timeout: int = 600          # seconds
+    pending_approval_timeout: int = 86400  # seconds
+    persisted_session_ttl: int = 604800  # seconds (7 days)
     max_rounds_per_turn: int = 10
     max_history_tokens: int = 16000
     command_timeout: int = 10           # seconds
@@ -178,6 +182,30 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     allow_unrestricted_env = os.environ.get("CHATDOME_ALLOW_UNRESTRICTED_COMMANDS", "")
     if allow_unrestricted_env:
         config.agent.allow_unrestricted_commands = allow_unrestricted_env.lower() in ("true", "1", "yes", "on")
+
+    # Optional: Pending Approval Timeout (seconds)
+    pending_timeout_env = os.environ.get("CHATDOME_PENDING_APPROVAL_TIMEOUT", "")
+    if pending_timeout_env:
+        try:
+            parsed_timeout = int(pending_timeout_env)
+            if parsed_timeout > 0:
+                config.agent.pending_approval_timeout = parsed_timeout
+            else:
+                logger.warning("CHATDOME_PENDING_APPROVAL_TIMEOUT must be > 0, ignored: %s", pending_timeout_env)
+        except ValueError:
+            logger.warning("Invalid CHATDOME_PENDING_APPROVAL_TIMEOUT ignored: %s", pending_timeout_env)
+
+    # Optional: Persisted Session TTL (seconds)
+    persisted_ttl_env = os.environ.get("CHATDOME_PERSISTED_SESSION_TTL", "")
+    if persisted_ttl_env:
+        try:
+            parsed_ttl = int(persisted_ttl_env)
+            if parsed_ttl >= 0:
+                config.agent.persisted_session_ttl = parsed_ttl
+            else:
+                logger.warning("CHATDOME_PERSISTED_SESSION_TTL must be >= 0, ignored: %s", persisted_ttl_env)
+        except ValueError:
+            logger.warning("Invalid CHATDOME_PERSISTED_SESSION_TTL ignored: %s", persisted_ttl_env)
 
     # ── Validation ──
 

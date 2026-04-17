@@ -57,6 +57,13 @@ chatdome:
     allow_unrestricted_commands: false
 
     session_timeout: 600
+    # Pending approval stage timeout (seconds). Keep this longer than
+    # session_timeout so users can ask follow-up questions before deciding.
+    pending_approval_timeout: 86400
+    # Persisted session retention TTL (seconds). Memory sessions can expire
+    # quickly, but context snapshots remain restorable until this TTL.
+    # Set 0 to disable TTL cleanup for persisted snapshots.
+    persisted_session_ttl: 604800
     max_rounds_per_turn: 10
     max_history_tokens: 16000
     command_timeout: 10
