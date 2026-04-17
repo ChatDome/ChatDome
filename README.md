@@ -57,6 +57,10 @@ ChatDome is positioned as a **host-security sub-agent**, not a generic main-agen
 
 ## Features
 
+- **LLM-First Risk Review** — Before execution, generated commands are classified with structured fields (`safety_status`, `risk_level`, `mutation_detected`, `deletion_detected`) and then escalated conservatively by static guardrails.
+- **Runtime Environment Profiling** — At startup, ChatDome automatically collects OS/shell/command availability into `chat_data/environment_profile.md`, injects compatibility context into prompts, and exposes a quick `/env` summary in Telegram.
+- **Tamper-Evident Command Audit** — Command review/approval/execution events are written to append-only hash-chained JSONL logs with automatic 30-day retention and Telegram-side inspection via `/audit [N]`.
+
 - **Dynamic Command Generation & Dual-Confirmation** — When unlocked, the AI can dynamically generate commands to answer arbitrary questions. These commands are processed by an AI Reviewer for impact analysis and require explicit interactive confirmation (or a mandatory `/confirm` for high-risk actions) before execution.
 - **Natural Language Interface** — No commands to memorize. Just describe what you want to know.
 - **AI Agent with Tool Use** — Multi-turn reasoning: the AI plans, executes host commands, analyzes output, and iterates until it has a complete answer.
@@ -276,7 +280,13 @@ The AI uses **function calling** (tool use) to interact with the host. It can:
 | Command | Description |
 |---------|-------------|
 | *(any message)* | Talk to the AI agent in natural language |
+| `/confirm` | Force-approve and execute the current pending high-risk command |
+| `/reject` | Reject the current pending command |
 | `/clear` | Clear conversation context, start fresh |
+| `/env` | Show runtime environment summary from `chat_data/environment_profile.md` |
+| `/token` | Show token usage statistics for current chat |
+| `/cmd_echo` | Toggle command echo mode in replies |
+| `/audit [N]` | Show latest command audit events for current chat (default 10, max 30) |
 | `/help` | Show usage guide and example questions |
 
 No rigid command syntax — just talk to it.
@@ -301,6 +311,14 @@ ChatDome executes commands on your server — security is taken seriously:
 5. **Execution Sandbox** — Command execution still has timeout and output-bound controls to reduce blast radius.
 
 > ⚠️ **Recommendation**: Run ChatDome under a dedicated low-privilege user account that has read access to log files but no sudo privileges.
+
+### Security Enhancements (2026-04)
+
+- Risk review now outputs structured fields: `safety_status`, `risk_level`, `mutation_detected`, `deletion_detected`.
+- Even in unrestricted mode, only clearly low-risk read-only commands auto-execute; mutation/deletion risk still requires human confirmation.
+- Command review, approval, rejection, and execution are recorded in tamper-evident hash-chained audit logs.
+- Audit logs are automatically rotated by day and retained for 30 days.
+- Use `/audit [N]` in Telegram to inspect recent audit events for the current chat.
 
 ## Project Structure
 
@@ -329,6 +347,11 @@ ChatDome/
             └── llm/
                 └── client.py        # OpenAI-compatible API client
 ```
+
+Additional implementation modules (current codebase):
+
+- `controlplane/src/chatdome/runtime_environment.py` — startup environment profiling and prompt compatibility context
+- `controlplane/src/chatdome/agent/audit.py` — command audit tracker (hash chain + 30-day retention)
 
 ## Roadmap
 
