@@ -21,21 +21,10 @@ from chatdome.runtime_environment import collect_and_persist_runtime_environment
 from chatdome.sentinel.pack_loader import PackLoader
 from chatdome.sentinel.user_context import UserContextLedger
 from chatdome.telegram.bot import TelegramBot
+from chatdome.logger import setup_logging
 
 
-def setup_logging() -> None:
-    """Configure structured logging."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
-    # Reduce noise from third-party libraries
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("telegram").setLevel(logging.WARNING)
+# setup_logging was removed and replaced by chatdome.logger.setup_logging()
 
 
 def parse_args() -> argparse.Namespace:
