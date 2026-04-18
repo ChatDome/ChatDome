@@ -43,13 +43,8 @@ pip install -e .
 echo "✅ 依赖更新完成"
 cd "$CHATDOME_DIR" || exit
 
-# 5. 自动 source ~/.zshrc 加载环境变量 (Token/API Key)
-echo "[4/5] 正在加载环境变量 (~/.zshrc) ..."
-source ~/.zshrc
-echo "✅ 环境变量已加载"
-
-# 6. 自动启动 ChatDome 服务 (后台运行)
-echo "[5/5] 正在启动 ChatDome 服务..."
+# 5. 自动启动 ChatDome 服务 (后台运行)
+echo "[4/4] 正在启动 ChatDome 服务..."
 # 使用 nohup 后台启动，将日志输出到 chatdome.log
 nohup chatdome > chatdome.log 2>&1 &
 

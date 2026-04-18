@@ -311,7 +311,9 @@ class PackLoader:
 
             resolved_params[param_name] = user_value
 
-        command = resolved.command_template.format(**resolved_params)
+        command = resolved.command_template
+        for k, v in resolved_params.items():
+            command = command.replace(f"{{{k}}}", str(v))
 
         return RenderedCommand(
             check_id=check_id,

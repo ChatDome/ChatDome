@@ -129,14 +129,19 @@ python3 -m pip install -e .
 所有敏感参数通过**环境变量**配置，不会存储在本地文件中。
 
 ```bash
+# == 强烈建议：将以下配置写入 ~/.bashrc 或 ~/.zshrc 以便持久化生效 ==
+
 # 必需
 export CHATDOME_BOT_TOKEN="your-telegram-bot-token"
 export CHATDOME_AI_API_KEY="your-openai-api-key"
 
 # 可选
-export CHATDOME_ALLOWED_CHAT_IDS="123456789"     # Telegram Chat ID 访问控制
-export CHATDOME_AI_BASE_URL="https://api.openai.com/v1"  # LLM API 地址
-export CHATDOME_AI_MODEL="gpt-4o"                # LLM 模型名称
+export CHATDOME_ALLOWED_CHAT_IDS="123456789"                # Telegram Chat ID 访问控制
+export CHATDOME_AI_BASE_URL="https://api.openai.com/v1"     # LLM API 地址
+export CHATDOME_AI_MODEL="gpt-4o"                           # LLM 模型名称
+export CHATDOME_SENTINEL_ENABLED="true"                     # 开启 7×24 哨兵监控模式
+export CHATDOME_ALLOW_GENERATED_COMMANDS="true"             # 允许 AI 自主生成并执行命令
+export CHATDOME_ALLOW_UNRESTRICTED_COMMANDS="true"          # 开启完全开放权限模式（God Mode）
 ```
 
 非敏感的调优参数在 YAML 配置文件中：
@@ -196,10 +201,27 @@ https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 | 变量名 | 必需 | 说明 |
 |--------|------|------|
 | `CHATDOME_CONFIG` | ❌ | 配置文件路径（默认: `./config.yaml`） |
+| `CHATDOME_SENTINEL_ENABLED` | ❌ | 开启 7×24 Sentinel 哨兵主动监控模式 (`true`/`false`) |
 | `CHATDOME_ALLOW_GENERATED_COMMANDS` | ❌ | 全局一键开启“动态命令无限可能”模式 (`true`/`false`) |
 | `CHATDOME_ALLOW_UNRESTRICTED_COMMANDS` | ❌ | 开启 God Mode（绕过所有命令验证）(`true`/`false`) |
 
 > ⚠️ **安全提醒**：切勿将 Token 或 API Key 提交到版本控制。请使用环境变量、`.env` 文件（并添加到 `.gitignore`）或密钥管理器。
+
+### 🎛️ 核心能力控制开关（进阶）
+
+除了基础的 Token 配置外，ChatDome 提供了三个改变核心运行逻辑的进阶能力开关。在使用进阶功能前，强烈建议你了解它们的作用。它们**默认全为关闭状态**，如需开启，请在环境变量中传递 `"true"`：
+
+#### 1. 哨兵主动监控模式 (`CHATDOME_SENTINEL_ENABLED`)
+- **功能说明**：将 ChatDome 从“被动的一问一答助手”升级为“7x24 小时主动巡更的哨兵”。它会在后台静默定期执行系统安全审计，并通过独创的双层态势感知架构对告警进行降噪聚合。
+- **推荐场景**：希望完全不需要主动询问，就能在异常发生的第一时间在 Telegram 被动收到精炼警报通知的所有运维人员。
+
+#### 2. 无限可能模式 (`CHATDOME_ALLOW_GENERATED_COMMANDS`)
+- **功能说明**：解除“仅允许执行出厂预装官方只读命令”的绝对严格限制！开启后，你用自然语言下达的任何复杂、模糊查阅要求，AI 都会结合自带的 Linux 知识库，为你实时现场推敲编写出全新的 Shell 组合查询命令。
+- **内置安全机制**：不用担心 AI 误操，所有的现场动态生成命令依然会受限于“只读读取”规则，任何危险动作都会被沙箱立刻拦截报错。
+
+#### 3. 上帝越狱模式 (`CHATDOME_ALLOW_UNRESTRICTED_COMMANDS`)
+- **功能说明**：**【危险！上帝权限】**开启此项后，沙箱的“仅限只读审查”原生封印将被彻底解除。此时，AI 能够针对诸如“帮我清理所有的冗余日志文件”、“直接在防火墙里封禁那个攻击我的恶劣黑客IP”等运维要求，直接下达具备破坏性质的操作指令（允许执行类似 `rm`、`iptables` 等写操作）。
+- **内置安全机制**：所有被独立分析模块判定为具备高危风险（包含写入、删除、高风险状态变更）的越狱命令，绝不会擅自执行！而是会在执行的最后一刻暂停，并通过卡片推送到你的 Telegram 进行高亮风险警报（即 **Human-in-the-loop** 防线），只有你亲自端详命令无误，点击同意按钮或发送 `/confirm` 后，大模型才会最终扣动扳机。
 
 ### 配置文件（非敏感参数）
 

@@ -125,14 +125,19 @@ python3 -m pip install -e .
 All sensitive parameters are configured via **environment variables** — they are never stored in local files.
 
 ```bash
+# == Highly Recommended: Add these to your ~/.bashrc or ~/.zshrc for persistence ==
+
 # Required
 export CHATDOME_BOT_TOKEN="your-telegram-bot-token"
 export CHATDOME_AI_API_KEY="your-openai-api-key"
 
 # Optional
-export CHATDOME_ALLOWED_CHAT_IDS="123456789"     # Telegram Chat IDs for access control
-export CHATDOME_AI_BASE_URL="https://api.openai.com/v1"  # LLM API endpoint
-export CHATDOME_AI_MODEL="gpt-4o"                # LLM model name
+export CHATDOME_ALLOWED_CHAT_IDS="123456789"                 # Telegram Chat IDs for access control
+export CHATDOME_AI_BASE_URL="https://api.openai.com/v1"      # LLM API endpoint
+export CHATDOME_AI_MODEL="gpt-4o"                            # LLM model name
+export CHATDOME_SENTINEL_ENABLED="true"                      # Enable 7x24 Sentinel monitoring
+export CHATDOME_ALLOW_GENERATED_COMMANDS="true"              # Allow AI to generate and execute own commands
+export CHATDOME_ALLOW_UNRESTRICTED_COMMANDS="true"           # Enable God Mode (full unrestricted execution)
 ```
 
 Non-sensitive settings (model, timeout, etc.) are in a YAML config file:
@@ -192,10 +197,27 @@ All sensitive parameters are configured via environment variables. They are neve
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `CHATDOME_CONFIG` | ❌ | Path to config.yaml (default: `./config.yaml`) |
+| `CHATDOME_SENTINEL_ENABLED` | ❌ | Enable 7x24 Sentinel proactive monitoring mode (`true`/`false`) |
 | `CHATDOME_ALLOW_GENERATED_COMMANDS` | ❌ | Enable Infinite Possibilities Mode (`true`/`false`) |
 | `CHATDOME_ALLOW_UNRESTRICTED_COMMANDS` | ❌ | Enable God Mode (bypass ALL command validation:`true`/`false`) |
 
 > ⚠️ **Security**: Never commit tokens or API keys to version control. Use environment variables, `.env` files (with `.gitignore`), or a secrets manager.
+
+### 🎛️ Core Capability Switches (Advanced)
+
+Beyond basic token configuration, ChatDome offers three advanced privilege switches that alter its core operating logic. It is highly recommended to understand their implications before using them. They are **all disabled by default** and must be explicitly enabled by passing `"true"` in your environment variables:
+
+#### 1. Sentinel Proactive Monitoring Mode (`CHATDOME_SENTINEL_ENABLED`)
+- **What it does**: Upgrades ChatDome from a "passive Q&A assistant" to a "7x24 proactive patrolling sentinel". It quietly performs periodic system security audits in the background and employs an innovative dual-layer situational awareness architecture to aggregate and denoise alerts.
+- **Recommended for**: Administrators who want to receive refined, proactive alert notifications on Telegram the moment an anomaly occurs, without needing to ask manually.
+
+#### 2. Infinite Possibilities Mode (`CHATDOME_ALLOW_GENERATED_COMMANDS`)
+- **What it does**: Removes the strict limitation of "only executing pre-installed official read-only commands"! When enabled, the AI will use its vast Linux knowledge base to dynamically forge and execute entirely new shell composite queries on-the-fly in response to your complex or vague requests.
+- **Security Guarantee**: You don't need to worry about the AI going rogue. All dynamically generated commands at this level remain strictly constrained by "Read-Only" rules, and any mutating actions will be immediately intercepted and blocked by the sandbox.
+
+#### 3. God Mode (`CHATDOME_ALLOW_UNRESTRICTED_COMMANDS`)
+- **What it does**: **[DANGER! GOD PRIVILEGES]** Enabling this completely shatters the sandbox's "Read-Only" seal. The AI is now authorized to issue destructive or state-mutating OS commands (like `rm` or `iptables`) to fulfill operational requests such as "clean up all my redundant log files" or "ban the IP of that hacker in the firewall".
+- **Security Guarantee**: Any jailbroken command independently flagged as high-risk (involving writing, deleting, or high-risk state changes) will **never** execute autonomously! Instead, it pauses at the very last moment and pushes a high-visibility alert card to your Telegram (the **Human-in-the-loop** defense line). The AI will only pull the trigger after you review the command and explicitly tap the approve button or send `/confirm`.
 
 ### Config File (Non-Sensitive / Optional)
 

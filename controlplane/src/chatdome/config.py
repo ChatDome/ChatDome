@@ -231,6 +231,11 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
         except ValueError:
             logger.warning("Invalid CHATDOME_PERSISTED_SESSION_TTL ignored: %s", persisted_ttl_env)
 
+    # Optional: Sentinel Enable Toggle
+    sentinel_enabled_env = os.environ.get("CHATDOME_SENTINEL_ENABLED", "")
+    if sentinel_enabled_env:
+        config.sentinel.enabled = sentinel_enabled_env.lower() in ("true", "1", "yes", "on")
+
     # ── Validation ──
 
     if not config.telegram.bot_token:
