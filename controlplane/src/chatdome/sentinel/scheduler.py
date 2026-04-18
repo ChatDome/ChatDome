@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,6 +82,10 @@ class SentinelScheduler:
         self._task: asyncio.Task | None = None
         self._running = False
         self._round_count = 0
+        # Differential mode baselines: check_key -> normalized output lines
+        self._diff_baselines: dict[str, set[str]] = {}
+        self._baseline_notes: list[str] = []
+        self._baseline_report_sent = False
 
     # -- Public API --------------------------------------------------------
 
@@ -169,8 +174,16 @@ class SentinelScheduler:
 
                     if now >= next_run:
                         try:
-                            await self._run_single_check(check)
+                            result_text = await self._run_single_check(check)
                             checks_executed += 1
+                            if (
+                                self._round_count == 0
+                                and result_text.startswith("ℹ️ ")
+                                and "已建立差异基线" in result_text
+                            ):
+                                note = f"- {result_text[3:]}"
+                                if note not in self._baseline_notes:
+                                    self._baseline_notes.append(note)
                         except Exception:
                             logger.exception("Check failed: %s", check.name)
 
@@ -180,6 +193,8 @@ class SentinelScheduler:
                 if checks_executed > 0 and checks_executed >= len(self._checks):
                     self._round_count += 1
                     self._suppressor.complete_round()
+                    if self._round_count == 1:
+                        await self._send_baseline_summary_if_needed()
 
                 await asyncio.sleep(tick_interval)
 
@@ -189,6 +204,148 @@ class SentinelScheduler:
             logger.exception("Sentinel scheduler crashed")
 
     # -- Single Check Execution --------------------------------------------
+
+    @staticmethod
+    def _canonicalize_diff_line(check_key: str, line: str) -> str:
+        """
+        Canonicalize a differential line to suppress noisy fields.
+
+        - ssh_bruteforce: keep only source IP (drop changing count prefix)
+        - open_ports: keep local listen endpoint (drop queue/process noise)
+        """
+        text = line.strip()
+        if not text:
+            return ""
+
+        if check_key == "ssh_bruteforce":
+            # Example: "123 1.2.3.4" -> "1.2.3.4"
+            m = re.match(r"^\s*\d+\s+(\S+)\s*$", text)
+            if m:
+                return m.group(1)
+            parts = text.split()
+            return parts[-1] if parts else ""
+
+        if check_key == "open_ports":
+            # Extract first host:port-like endpoint (e.g. 0.0.0.0:22 / [::]:443).
+            for token in text.split():
+                if token.endswith(":*"):
+                    continue
+                if re.search(r":\d+$", token):
+                    return token
+            return text
+
+        return text
+
+    def _normalize_lines(self, check_key: str, output: str) -> set[str]:
+        """Normalize output into a unique canonical line set for differential mode."""
+        normalized: set[str] = set()
+        for raw in (output or "").splitlines():
+            line = self._canonicalize_diff_line(check_key, raw)
+            if line:
+                normalized.add(line)
+        return normalized
+
+    def _diff_baseline(
+        self,
+        check_key: str,
+        output: str,
+    ) -> tuple[set[str], set[str], bool, int]:
+        """
+        Compare output against baseline and update baseline.
+
+        Returns:
+            added_lines, removed_lines, baseline_initialized, current_size
+        """
+        current_lines = self._normalize_lines(check_key, output)
+        previous_lines = self._diff_baselines.get(check_key)
+
+        if previous_lines is None:
+            self._diff_baselines[check_key] = current_lines
+            return set(), set(), True, len(current_lines)
+
+        added_lines = current_lines - previous_lines
+        removed_lines = previous_lines - current_lines
+        self._diff_baselines[check_key] = current_lines
+
+        logger.debug(
+            "Differential check %s delta: +%d -%d",
+            check_key,
+            len(added_lines),
+            len(removed_lines),
+        )
+        return added_lines, removed_lines, False, len(current_lines)
+
+    @staticmethod
+    def _build_diff_payload(
+        added_lines: set[str],
+        removed_lines: set[str],
+        max_items: int = 80,
+    ) -> str:
+        """Format differential delta payload for alerts."""
+        added = sorted(added_lines)
+        removed = sorted(removed_lines)
+        lines = [f"变化摘要: 新增 {len(added)}，减少 {len(removed)}"]
+
+        if added:
+            lines.append("")
+            lines.append("新增项:")
+            for item in added[:max_items]:
+                lines.append(f"+ {item}")
+            if len(added) > max_items:
+                lines.append(f"... (+{len(added) - max_items} more)")
+
+        if removed:
+            lines.append("")
+            lines.append("减少项:")
+            for item in removed[:max_items]:
+                lines.append(f"- {item}")
+            if len(removed) > max_items:
+                lines.append(f"... (+{len(removed) - max_items} more)")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_rule_summary(check: CheckDefinition, eval_description: str) -> str:
+        """Generate a user-facing rule summary that is easy to understand."""
+        if check.rule is None:
+            return "无规则"
+
+        if check.mode == "differential" and check.rule.type in {"line_count", "added_count"}:
+            return f"匹配行数 {check.rule.operator} {check.rule.threshold:g}（仅基线变化时告警）"
+
+        if check.rule.type == "line_count":
+            return f"匹配行数 {check.rule.operator} {check.rule.threshold:g}"
+
+        return eval_description
+
+    async def _send_baseline_summary_if_needed(self) -> None:
+        """Send one startup baseline summary after the first full round."""
+        if self._baseline_report_sent or not self._baseline_notes:
+            return
+
+        lines = [
+            "🛡️ Sentinel 基线采集完成",
+            "",
+            "已建立以下差异基线：",
+        ]
+        lines.extend(self._baseline_notes[:20])
+        if len(self._baseline_notes) > 20:
+            lines.append(f"... (+{len(self._baseline_notes) - 20} more)")
+        lines.extend(
+            [
+                "",
+                "后续将仅在与基线相比出现变化时告警，告警只展示变化项。",
+            ]
+        )
+        summary = "\n".join(lines)
+
+        for chat_id in self._alert_chat_ids:
+            try:
+                await self._send_alert(chat_id, summary)
+            except Exception:
+                logger.exception("Failed to send baseline summary to chat %s", chat_id)
+
+        self._baseline_report_sent = True
 
     async def _run_single_check(self, check: CheckDefinition) -> str:
         """Execute a single check through the full pipeline."""
@@ -218,19 +375,43 @@ class SentinelScheduler:
             return f"❌ {check.name}: 执行失败"
 
         output = result.stdout or ""
+        alert_output = output
+        added_lines: set[str] = set()
+        removed_lines: set[str] = set()
+        if check.mode == "differential":
+            added_lines, removed_lines, baseline_initialized, baseline_size = self._diff_baseline(
+                check_key=check_key,
+                output=output,
+            )
+            if baseline_initialized:
+                logger.info(
+                    "Differential baseline initialized for %s (%d entries)",
+                    check.name,
+                    baseline_size,
+                )
+                return f"ℹ️ {check.name}: 已建立差异基线 ({baseline_size} 条)"
 
         # Step 2: Evaluate rule
         if check.rule is None:
             # No rule → informational only
             return f"ℹ️ {check.name}: 已执行 (无规则)"
 
+        # Rule evaluation still reflects the current snapshot; differential mode
+        # only controls whether there is *new* change worth alerting.
         eval_result = evaluate(check.rule, output)
+        rule_summary = self._build_rule_summary(check, eval_result.description)
 
         if not eval_result.triggered:
-            return f"✅ {check.name}: 正常 ({eval_result.description})"
+            return f"✅ {check.name}: 正常 (当前值={eval_result.current_value}, 规则={rule_summary})"
+
+        if check.mode == "differential":
+            if not added_lines and not removed_lines:
+                return f"✅ {check.name}: 异常持续但无变化 (当前值={eval_result.current_value}, 规则={rule_summary})"
+            alert_output = self._build_diff_payload(added_lines, removed_lines)
 
         # Step 2.5: Verify User Context Ledger
-        override_reason = self._ledger.is_exempt(check_key, output)
+        ledger_payload = alert_output or output
+        override_reason = self._ledger.is_exempt(check_key, ledger_payload)
         if override_reason:
             # Re-route the alert into the exact suppression format used for natural suppression
             suppression = SuppressionResult(suppressed=True, reason=f"user_override: {override_reason}")
@@ -251,11 +432,12 @@ class SentinelScheduler:
             timestamp=now_str,
             check_name=check.name,
             check_id=check_key,
+            mode=check.mode,
             severity=check.severity,
             severity_label=label,
-            rule=eval_result.description,
+            rule=rule_summary,
             current_value=eval_result.current_value,
-            raw_output=output[:2000],  # Truncate for storage
+            raw_output=(alert_output or output)[:2000],  # Truncate for storage
             pushed=not suppression.suppressed,
             suppressed=suppression.suppressed,
             suppression_reason=suppression.reason,

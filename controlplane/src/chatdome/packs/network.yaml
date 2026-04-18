@@ -23,10 +23,10 @@ commands:
     name: "监听端口"
     templates:
       - platform: linux
-        command: "ss -tlnp"
+        command: "ss -tlnH"
         requires: [ss]
       - platform: linux
-        command: "netstat -tlnp"
+        command: "netstat -tln"
         requires: [netstat]
     params: {}
     timeout: 10

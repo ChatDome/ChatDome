@@ -33,6 +33,7 @@ class AlertEvent:
     timestamp: str
     check_name: str
     check_id: str
+    mode: str
     severity: int
     severity_label: str
     rule: str
@@ -108,14 +109,22 @@ def format_alert_message(event: AlertEvent) -> str:
     """Format a single alert for Telegram push."""
     emoji = severity_emoji(event.severity)
     label = event.severity_label.upper()
+    mode_label = "差异巡检" if event.mode == "differential" else "快照巡检"
+    if event.current_value is None:
+        current_value_text = "N/A"
+    elif isinstance(event.current_value, float) and event.current_value.is_integer():
+        current_value_text = str(int(event.current_value))
+    else:
+        current_value_text = str(event.current_value)
 
     lines = [
         f"{emoji} [{label}] {event.check_name}",
         "",
         f"检查项: {event.check_id}",
+        f"巡检模式: {mode_label}",
         f"时间: {event.timestamp}",
-        f"规则: {event.rule}",
-        f"当前值: {event.current_value}",
+        f"规则阈值: {event.rule}",
+        f"当前值: {current_value_text}",
     ]
 
     # Truncate raw output for readability

@@ -85,7 +85,7 @@ def _eval_line_count(rule: RuleDefinition, output: str) -> EvalResult:
     return EvalResult(
         triggered=triggered,
         current_value=count,
-        description=f"行数 {count} {rule.operator} {rule.threshold}",
+        description=f"匹配行数 {rule.operator} {rule.threshold}",
     )
 
 
@@ -129,7 +129,7 @@ def _eval_regex_extract(rule: RuleDefinition, output: str) -> EvalResult:
     return EvalResult(
         triggered=triggered,
         current_value=result,
-        description=f"{agg}({len(values)} values) = {result} {rule.operator} {rule.threshold}",
+        description=f"{agg}提取值 {rule.operator} {rule.threshold}",
     )
 
 
@@ -149,5 +149,5 @@ def _eval_regex_match(rule: RuleDefinition, output: str) -> EvalResult:
     return EvalResult(
         triggered=triggered,
         current_value=match_count,
-        description=f"匹配行数 {match_count} {rule.operator} {rule.threshold}",
+        description=f"正则匹配行数 {rule.operator} {rule.threshold}",
     )
