@@ -157,9 +157,16 @@ class LLMClient:
         Use the LLM to evaluate the safety and impact of a shell command.
         Forces JSON output format.
         """
+        review_command = self._format_command_for_review(command)
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"请分析以下命令：\n{command}"}
+            {
+                "role": "user",
+                "content": (
+                    "请分析以下命令（其中 \\n / \\r / \\t 为转义后的可视符号，不是实际换行执行）：\n"
+                    f"{review_command}"
+                ),
+            },
         ]
         
         # Force low temperature to ensure deterministic safety output
@@ -223,6 +230,21 @@ class LLMClient:
             }
         finally:
             self.temperature = original_temp
+
+    @staticmethod
+    def _format_command_for_review(command: str) -> str:
+        """
+        Normalize command text before sending to the reviewer model.
+
+        Rendering control characters as visible escapes reduces the chance
+        that the model echoes raw controls into JSON string values.
+        """
+        text = str(command or "")
+        text = text.replace("\\", "\\\\")
+        text = text.replace("\r", "\\r")
+        text = text.replace("\n", "\\n")
+        text = text.replace("\t", "\\t")
+        return text
 
     @staticmethod
     def _extract_json_object(raw_text: str) -> str:

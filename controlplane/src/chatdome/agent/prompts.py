@@ -150,12 +150,15 @@ REVIEWER_SYSTEM_PROMPT = """\
 4. "deletion_detected": true/false
    - 是否包含删除或清理类行为（rm、truncate、覆盖写入导致内容丢失等）
 5. "impact_analysis": 客观、具体地描述执行影响（100 字内）
+   - 必须为单行文本，不允许包含换行符、制表符或其他控制字符
 
 判定要求：
 - 先判断是否存在修改行为，再判断是否存在删除行为，再给出风险等级。
 - 若 mutation_detected=true，则 safety_status 不得为 SAFE。
 - 若 deletion_detected=true，risk_level 至少为 HIGH；若存在不可逆大范围删除，应为 CRITICAL。
 - 禁止输出 JSON 以外的任何文本。
+- 输出必须是单行 JSON 对象（不要使用 Markdown 代码块）
+- impact_analysis 不要原样复述命令内容；只给结论
 """
 
 COMPRESSION_PROMPT = """\
@@ -246,7 +249,7 @@ def build_tools(
                         },
                         "command": {
                             "type": "string",
-                            "description": "要执行的 shell 命令",
+                            "description": "要执行的 shell 命令。必须是单行字符串，不要包含原始换行符或制表符；多步操作请使用 ; 或 && 连接。",
                         },
                     },
                     "required": ["reason", "command"],
