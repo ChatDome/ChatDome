@@ -9,7 +9,6 @@ Handles:
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -17,6 +16,7 @@ import httpx
 
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.executor.sandbox import CommandSandbox, CommandResult
+from chatdome.llm.client import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +83,15 @@ class ToolDispatcher:
             Formatted result string to feed back to the LLM.
         """
         try:
-            args = json.loads(arguments_json) if arguments_json else {}
-        except json.JSONDecodeError as e:
+            args = LLMClient.parse_json_object(arguments_json) if arguments_json else {}
+        except Exception as e:
+            logger.warning(
+                "Tool argument parse failed for %s (tool_call_id=%s): %s | raw=%r",
+                tool_name,
+                tool_call_id,
+                e,
+                (arguments_json or "")[:200],
+            )
             return f"参数解析失败: {e}"
 
         try:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -241,10 +242,94 @@ class LLMClient:
                 text = "\n".join(lines[1:-1]).strip()
 
         start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            return text[start:end + 1]
-        return text
+        if start == -1:
+            return text
+
+        # Extract the first balanced object to avoid trailing chatter.
+        depth = 0
+        in_string = False
+        escaped = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == "\"":
+                    in_string = False
+                continue
+
+            if ch == "\"":
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:idx + 1]
+
+        return text[start:]
+
+    @staticmethod
+    def _sanitize_json_candidate(candidate: str) -> str:
+        """
+        Repair common JSON issues from non-conformant providers.
+
+        - remove BOM/NUL
+        - escape raw control chars inside JSON strings
+        - remove trailing commas before } or ]
+        """
+        text = (candidate or "").replace("\ufeff", "").replace("\x00", "")
+        if not text:
+            return "{}"
+
+        out: list[str] = []
+        in_string = False
+        escaped = False
+        for ch in text:
+            if in_string:
+                if escaped:
+                    out.append(ch)
+                    escaped = False
+                    continue
+
+                if ch == "\\":
+                    out.append(ch)
+                    escaped = True
+                    continue
+
+                if ch == "\"":
+                    out.append(ch)
+                    in_string = False
+                    continue
+
+                code = ord(ch)
+                if code < 0x20:
+                    if ch == "\n":
+                        out.append("\\n")
+                    elif ch == "\r":
+                        out.append("\\r")
+                    elif ch == "\t":
+                        out.append("\\t")
+                    elif ch == "\b":
+                        out.append("\\b")
+                    elif ch == "\f":
+                        out.append("\\f")
+                    else:
+                        out.append(f"\\u{code:04x}")
+                    continue
+
+                out.append(ch)
+                continue
+
+            out.append(ch)
+            if ch == "\"":
+                in_string = True
+
+        repaired = "".join(out)
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        return repaired.strip()
 
     @staticmethod
     def _parse_json_object(raw_text: str) -> dict[str, Any]:
@@ -255,31 +340,41 @@ class LLMClient:
         returned by some models/providers.
         """
         candidate = LLMClient._extract_json_object(raw_text)
-        parse_error: json.JSONDecodeError | None = None
+        repaired = LLMClient._sanitize_json_candidate(candidate)
+        parse_error: Exception | None = None
 
-        for strict in (True, False):
-            try:
-                parsed = json.loads(candidate, strict=strict)
-                if isinstance(parsed, dict):
-                    if not strict:
-                        logger.warning(
-                            "Command safety JSON parsed with relaxed mode due to invalid control characters."
+        for attempt_text in (candidate, repaired):
+            for strict in (True, False):
+                try:
+                    parsed = json.loads(attempt_text, strict=strict)
+                    if isinstance(parsed, dict):
+                        if attempt_text is repaired:
+                            logger.debug("Command safety JSON parsed after repair normalization.")
+                        elif not strict:
+                            logger.debug(
+                                "Command safety JSON parsed with relaxed mode due to invalid control characters."
+                            )
+                        return parsed
+                    raise ValueError("Reviewer response is not a JSON object")
+                except (json.JSONDecodeError, ValueError) as e:
+                    parse_error = e
+                    if strict:
+                        logger.debug(
+                            "Strict JSON parse failed for command safety response; retrying relaxed mode: %s",
+                            e,
                         )
-                    return parsed
-                raise ValueError("Reviewer response is not a JSON object")
-            except json.JSONDecodeError as e:
-                parse_error = e
-                if strict:
-                    logger.warning(
-                        "Strict JSON parse failed for command safety response, retrying in relaxed mode: %s",
-                        e,
-                    )
+                        continue
+                    # Continue with repaired candidate after relaxed parse fails.
                     continue
-                raise
 
         if parse_error:
             raise parse_error
         raise ValueError("Failed to parse command safety response")
+
+    @staticmethod
+    def parse_json_object(raw_text: str) -> dict[str, Any]:
+        """Public wrapper for robust JSON-object parsing."""
+        return LLMClient._parse_json_object(raw_text)
 
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse the raw OpenAI response into our normalized format."""
