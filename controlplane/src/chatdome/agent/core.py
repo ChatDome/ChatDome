@@ -37,14 +37,17 @@ class Agent:
         config: AgentConfig,
         runtime_environment_context: str = "",
         pack_loader: Any = None,
+        user_context_ledger: Any = None,
+        valid_check_ids: list[str] | None = None,
     ):
         self.llm = llm
         self.config = config
         self.tools = build_tools(
             allow_unrestricted_commands=config.allow_unrestricted_commands,
             pack_loader=pack_loader,
+            valid_check_ids=valid_check_ids,
         )
-        self.tool_dispatcher = ToolDispatcher(sandbox, llm=llm)
+        self.tool_dispatcher = ToolDispatcher(sandbox, llm=llm, user_context_ledger=user_context_ledger)
         self.session_manager = SessionManager(
             session_timeout=config.session_timeout,
             pending_approval_timeout=config.pending_approval_timeout,

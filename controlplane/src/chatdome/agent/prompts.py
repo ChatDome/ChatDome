@@ -187,6 +187,7 @@ def _shell_command_description(allow_unrestricted_commands: bool = False) -> str
 def build_tools(
     allow_unrestricted_commands: bool = False,
     pack_loader: PackLoader | None = None,
+    valid_check_ids: list[str] | None = None,
 ) -> list[dict]:
     """Build OpenAI tool definitions for the configured command mode."""
     # Build dynamic check_id list
@@ -264,6 +265,36 @@ def build_tools(
                         },
                     },
                     "required": ["ip"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "add_user_context",
+                "description": (
+                    "当用户明确告知某个 Sentinel 告警对应的系统变更是其本人操作时使用。"
+                    "将用户提供的信息写入上下文记录单，后续巡检将自动静默匹配的告警。"
+                    "仅在用户主动确认/声明时调用，禁止自行推测。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "check_id": {
+                            "type": "string",
+                            "enum": valid_check_ids or [],
+                            "description": "被覆盖的检查项 ID，必须从最近告警上下文中提取",
+                        },
+                        "pattern": {
+                            "type": "string",
+                            "description": "可选匹配关键词。设置后仅静默输出包含该词的告警。留空则静默该检查项的全部告警",
+                        },
+                        "summary": {
+                            "type": "string",
+                            "description": "用一句话客观记录用户的意图，如'用户确认手动停止了 Xray 代理服务'",
+                        },
+                    },
+                    "required": ["check_id", "summary"],
                 },
             },
         },

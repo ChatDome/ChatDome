@@ -51,9 +51,10 @@ class ToolDispatcher:
     and formats results as strings for the conversation.
     """
 
-    def __init__(self, sandbox: CommandSandbox, llm: Any = None):
+    def __init__(self, sandbox: CommandSandbox, llm: Any = None, user_context_ledger: Any = None):
         self.sandbox = sandbox
         self.llm = llm
+        self.user_context_ledger = user_context_ledger
         self._http_client: httpx.AsyncClient | None = None
 
     async def _get_http_client(self) -> httpx.AsyncClient:
@@ -93,6 +94,8 @@ class ToolDispatcher:
                 return await self._handle_shell_command(args, tool_call_id, chat_id)
             elif tool_name == "whois_lookup":
                 return await self._handle_whois_lookup(args)
+            elif tool_name == "add_user_context":
+                return await self._handle_add_user_context(args)
             else:
                 return f"未知工具: {tool_name}"
         except PendingApprovalError:
@@ -324,6 +327,24 @@ class ToolDispatcher:
         except Exception as e:
             logger.error("Whois lookup failed for %s: %s", ip, e)
             return f"IP 查询异常: {e}"
+
+    async def _handle_add_user_context(self, args: dict[str, Any]) -> str:
+        """Handle adding user context overrides to prevent Sentinel false alarms."""
+        if not self.user_context_ledger:
+            return "内部错误: 暂不支持用户上下文功能，UserContextLedger 未初始化。"
+        
+        check_id = str(args.get("check_id", ""))
+        pattern = str(args.get("pattern", ""))
+        summary = str(args.get("summary", ""))
+
+        if not check_id or not summary:
+            return "参数错误: check_id 和 summary 是必填字段。"
+
+        try:
+            self.user_context_ledger.add_context(check_id, pattern, summary)
+            return f"成功: 已将用户上下文 (check_id={check_id}, pattern='{pattern}') 写入 ledger，后续匹配时将自动静默。\n摘要: {summary}"
+        except Exception as e:
+            return f"写入用户上下文失败: {e}"
 
     # ----- Formatting -----
 

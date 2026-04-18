@@ -22,6 +22,7 @@ from chatdome.sentinel.checks import CheckDefinition, load_checks, severity_labe
 from chatdome.sentinel.evaluator import evaluate
 from chatdome.sentinel.pack_loader import PackLoader
 from chatdome.sentinel.suppressor import Suppressor
+from chatdome.sentinel.user_context import UserContextLedger
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +46,14 @@ class SentinelScheduler:
         sandbox: CommandSandbox,
         send_alert_fn: Callable[[int, str], Coroutine[Any, Any, None]],
         alert_chat_ids: list[int] | None = None,
+        user_context_ledger: UserContextLedger | None = None,
     ) -> None:
         self._config = config
         self._pack_loader = pack_loader
         self._sandbox = sandbox
         self._send_alert = send_alert_fn
         self._alert_chat_ids = alert_chat_ids or []
+        self._ledger = user_context_ledger or UserContextLedger()
 
         # Load check definitions
         self._checks = load_checks(config.checks)
@@ -221,15 +224,22 @@ class SentinelScheduler:
         if not eval_result.triggered:
             return f"✅ {check.name}: 正常 ({eval_result.description})"
 
-        # Step 3: Alert triggered → check suppression
+        # Step 2.5: Verify User Context Ledger
+        override_reason = self._ledger.is_exempt(check_key, output)
+        if override_reason:
+            # Re-route the alert into the exact suppression format used for natural suppression
+            suppression = SuppressionResult(suppressed=True, reason=f"user_override: {override_reason}")
+            # Ensure it skips the standard suppressor cooldown loop
+        else:
+            # Step 3: Alert triggered → check suppression
+            suppression = self._suppressor.should_push(
+                check_id=check_key,
+                severity=check.severity,
+                cooldown_override=check.cooldown,
+            )
+
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         label = severity_label(check.severity)
-
-        suppression = self._suppressor.should_push(
-            check_id=check_key,
-            severity=check.severity,
-            cooldown_override=check.cooldown,
-        )
 
         # Step 4: Record to history
         event = AlertEvent(

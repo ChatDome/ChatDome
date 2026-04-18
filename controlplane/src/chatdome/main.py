@@ -19,6 +19,7 @@ from chatdome.executor.sandbox import CommandSandbox
 from chatdome.llm.client import LLMClient
 from chatdome.runtime_environment import collect_and_persist_runtime_environment
 from chatdome.sentinel.pack_loader import PackLoader
+from chatdome.sentinel.user_context import UserContextLedger
 from chatdome.telegram.bot import TelegramBot
 
 
@@ -124,6 +125,10 @@ def main() -> None:
         env_report_path.resolve(),
     )
 
+    # User Context Ledger
+    user_context_ledger = UserContextLedger()
+    valid_check_ids = [str(c.get("check_id")) for c in config.sentinel.checks if c.get("check_id")]
+    
     # AI Agent
     agent = Agent(
         llm=llm,
@@ -131,6 +136,8 @@ def main() -> None:
         config=config.agent,
         runtime_environment_context=runtime_environment_context,
         pack_loader=pack_loader,
+        user_context_ledger=user_context_ledger,
+        valid_check_ids=valid_check_ids,
     )
 
     # Telegram Bot
@@ -150,6 +157,7 @@ def main() -> None:
             sandbox=sandbox,
             send_alert_fn=bot.send_alert,
             alert_chat_ids=alert_targets,
+            user_context_ledger=user_context_ledger,
         )
 
         bot.set_sentinel(sentinel_scheduler, pack_loader)
