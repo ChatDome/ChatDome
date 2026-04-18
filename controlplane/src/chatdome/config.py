@@ -236,6 +236,14 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     if sentinel_enabled_env:
         config.sentinel.enabled = sentinel_enabled_env.lower() in ("true", "1", "yes", "on")
 
+    # Actionable guardrail: enabled sentinel without checks is a no-op.
+    if config.sentinel.enabled and not config.sentinel.checks:
+        logger.warning(
+            "Sentinel is enabled but no checks are configured. "
+            "Define chatdome.sentinel.checks in config.yaml (copy config.example.yaml as a base), "
+            "or provide CHATDOME_CONFIG pointing to that file.",
+        )
+
     # ── Validation ──
 
     if not config.telegram.bot_token:
