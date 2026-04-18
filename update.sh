@@ -16,7 +16,7 @@ fi
 cd "$CHATDOME_DIR" || exit
 
 # 2. 自动清除 ChatDome 进程
-echo "[1/5] 正在停止旧的 ChatDome 进程..."
+echo "[1/4] 正在停止旧的 ChatDome 进程..."
 # 查找正在运行的 chatdome 进程并 kill 掉
 PIDS=$(ps aux | grep '[c]hatdome' | awk '{print $2}')
 if [ -n "$PIDS" ]; then
@@ -28,14 +28,14 @@ else
 fi
 
 # 3. 自动拉取 GitHub 代码
-echo "[2/5] 正在从 GitHub 拉取最新代码..."
+echo "[2/4] 正在从 GitHub 拉取最新代码..."
 git fetch --all
 git reset --hard origin/main
 git pull
 echo "✅ 代码更新完成"
 
 # 4. 更新依赖/重新安装 (如果需要)
-echo "[3/5] 更新 Python 环境依赖..."
+echo "[3/4] 更新 Python 环境依赖..."
 cd "$CHATDOME_DIR/controlplane" || exit
 # 假设您使用的是系统环境或已经激活的虚拟环境
 # 如果使用了虚拟环境，请在此处 source venv/bin/activate
