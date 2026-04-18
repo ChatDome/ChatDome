@@ -580,8 +580,20 @@ class TelegramBot:
             await update.message.reply_text("ℹ️ 哨兵模式未启用。请在 config.yaml 中设置 sentinel.enabled: true")
             return
         from chatdome.sentinel.alerter import format_status_message
+        status = "运行中" if self._sentinel.is_running else "未运行"
+        check_count = len(self._sentinel.checks)
+        loaded_commands = self._pack_loader.command_count if self._pack_loader is not None else 0
+        learning = "是" if self._sentinel.suppressor.is_learning else "否"
+
+        runtime_lines = [
+            "🧭 调度器状态",
+            f"  - 运行状态: {status}",
+            f"  - 检查项数量: {check_count}",
+            f"  - 已加载命令: {loaded_commands}",
+            f"  - 基线学习中: {learning}",
+        ]
         text = format_status_message(self._sentinel.history)
-        await update.message.reply_text(text)
+        await update.message.reply_text("\n".join(runtime_lines) + "\n\n" + text)
 
     async def _handle_sentinel_trigger(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

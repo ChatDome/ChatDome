@@ -8,6 +8,7 @@ API format (OpenAI, Azure, local models via LiteLLM, etc.).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -155,7 +156,6 @@ class LLMClient:
         Use the LLM to evaluate the safety and impact of a shell command.
         Forces JSON output format.
         """
-        import json
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"请分析以下命令：\n{command}"}
@@ -172,7 +172,7 @@ class LLMClient:
                 response_format={"type": "json_object"}
             )
             content = response.content or "{}"
-            result = json.loads(content)
+            result = self._parse_json_object(content)
             
             if chat_id > 0:
                 from chatdome.agent.tracker import TokenTracker
@@ -222,6 +222,64 @@ class LLMClient:
             }
         finally:
             self.temperature = original_temp
+
+    @staticmethod
+    def _extract_json_object(raw_text: str) -> str:
+        """
+        Extract a JSON object candidate from model output.
+
+        Some OpenAI-compatible providers may wrap JSON in markdown fences
+        or add extra text before/after the object.
+        """
+        text = (raw_text or "").strip()
+        if not text:
+            return "{}"
+
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if len(lines) >= 3 and lines[-1].strip() == "```":
+                text = "\n".join(lines[1:-1]).strip()
+
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return text[start:end + 1]
+        return text
+
+    @staticmethod
+    def _parse_json_object(raw_text: str) -> dict[str, Any]:
+        """
+        Parse a JSON object with strict-first and relaxed fallback.
+
+        Fallback with strict=False tolerates unescaped control characters
+        returned by some models/providers.
+        """
+        candidate = LLMClient._extract_json_object(raw_text)
+        parse_error: json.JSONDecodeError | None = None
+
+        for strict in (True, False):
+            try:
+                parsed = json.loads(candidate, strict=strict)
+                if isinstance(parsed, dict):
+                    if not strict:
+                        logger.warning(
+                            "Command safety JSON parsed with relaxed mode due to invalid control characters."
+                        )
+                    return parsed
+                raise ValueError("Reviewer response is not a JSON object")
+            except json.JSONDecodeError as e:
+                parse_error = e
+                if strict:
+                    logger.warning(
+                        "Strict JSON parse failed for command safety response, retrying in relaxed mode: %s",
+                        e,
+                    )
+                    continue
+                raise
+
+        if parse_error:
+            raise parse_error
+        raise ValueError("Failed to parse command safety response")
 
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse the raw OpenAI response into our normalized format."""

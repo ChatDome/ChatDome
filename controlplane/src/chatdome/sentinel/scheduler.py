@@ -21,7 +21,7 @@ from chatdome.sentinel.alerter import AlertEvent, AlertHistory, format_alert_mes
 from chatdome.sentinel.checks import CheckDefinition, load_checks, severity_label
 from chatdome.sentinel.evaluator import evaluate
 from chatdome.sentinel.pack_loader import PackLoader
-from chatdome.sentinel.suppressor import Suppressor
+from chatdome.sentinel.suppressor import SuppressionResult, Suppressor
 from chatdome.sentinel.user_context import UserContextLedger
 
 logger = logging.getLogger(__name__)
@@ -208,8 +208,13 @@ class SentinelScheduler:
             logger.warning("Check %s timed out", check.name)
             return f"⏱️ {check.name}: 超时"
 
-        if result.return_code is not None and result.return_code != 0 and not result.stdout:
-            logger.warning("Check %s failed: %s", check.name, result.stderr)
+        stderr_text = (result.stderr or "").strip()
+        if result.return_code is None and stderr_text:
+            logger.warning("Check %s failed before completion: %s", check.name, stderr_text)
+            return f"❌ {check.name}: 执行失败"
+
+        if result.return_code is not None and result.return_code != 0:
+            logger.warning("Check %s failed (code=%s): %s", check.name, result.return_code, stderr_text)
             return f"❌ {check.name}: 执行失败"
 
         output = result.stdout or ""
