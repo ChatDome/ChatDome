@@ -1,0 +1,67 @@
+# System Resources — 系统资源监控
+pack:
+  name: "System Resources"
+  description: "磁盘、内存、CPU 负载与系统状态监控"
+  version: "1.0"
+
+commands:
+  disk_usage:
+    name: "磁盘使用"
+    templates:
+      - platform: linux
+        command: "df -h"
+        requires: [df]
+    params: {}
+    timeout: 10
+    tags: [system, disk, impact]
+
+  memory_usage:
+    name: "内存使用"
+    templates:
+      - platform: linux
+        command: "free -h"
+        requires: [free]
+    params: {}
+    timeout: 10
+    tags: [system, memory]
+
+  system_load:
+    name: "系统负载"
+    templates:
+      - platform: linux
+        command: "uptime; echo '---'; top -bn1 | head -20"
+        requires: [uptime, top, head]
+    params: {}
+    timeout: 15
+    tags: [system, cpu, performance]
+
+  last_reboot:
+    name: "重启历史"
+    templates:
+      - platform: linux
+        command: "last reboot | head -{limit}"
+        requires: [last, head]
+    params:
+      limit: { type: int, default: 10, max: 30 }
+    timeout: 10
+    tags: [system, reboot, audit]
+
+  uptime_info:
+    name: "运行时间"
+    templates:
+      - platform: linux
+        command: "uptime -p && uptime -s"
+        requires: [uptime]
+    params: {}
+    timeout: 5
+    tags: [system, uptime]
+
+  swap_usage:
+    name: "Swap 使用"
+    templates:
+      - platform: linux
+        command: "swapon --show && echo '---' && cat /proc/swaps"
+        requires: [swapon]
+    params: {}
+    timeout: 5
+    tags: [system, memory, swap]

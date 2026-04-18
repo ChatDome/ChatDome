@@ -1,0 +1,46 @@
+# Containers — 容器安全审计
+pack:
+  name: "Containers"
+  description: "Docker 容器安全检查"
+  version: "1.0"
+
+commands:
+  docker_containers:
+    name: "运行中的容器"
+    templates:
+      - platform: linux
+        command: "docker ps --format 'table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Names}}\t{{.Ports}}' 2>/dev/null || echo 'Docker not available'"
+        requires: [docker]
+    params: {}
+    timeout: 10
+    tags: [containers, docker, audit]
+
+  docker_privileged:
+    name: "特权容器检测"
+    templates:
+      - platform: linux
+        command: "docker ps -q 2>/dev/null | xargs -I{} docker inspect --format '{{.Name}} Privileged={{.HostConfig.Privileged}} PidMode={{.HostConfig.PidMode}}' {} 2>/dev/null || echo 'Docker not available'"
+        requires: [docker]
+    params: {}
+    timeout: 10
+    tags: [containers, privileged, defense_evasion]
+
+  docker_volumes:
+    name: "容器挂载卷"
+    templates:
+      - platform: linux
+        command: "docker ps -q 2>/dev/null | xargs -I{} docker inspect --format '{{.Name}}: {{range .Mounts}}{{.Source}}->{{.Destination}} {{end}}' {} 2>/dev/null || echo 'Docker not available'"
+        requires: [docker]
+    params: {}
+    timeout: 10
+    tags: [containers, volumes, persistence]
+
+  docker_images:
+    name: "Docker 镜像列表"
+    templates:
+      - platform: linux
+        command: "docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}' 2>/dev/null || echo 'Docker not available'"
+        requires: [docker]
+    params: {}
+    timeout: 10
+    tags: [containers, images, audit]

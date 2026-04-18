@@ -67,11 +67,34 @@ class AgentConfig:
 
 
 @dataclass
+class SentinelConfig:
+    """Sentinel 7×24 security monitoring configuration."""
+    enabled: bool = False
+    alert_chat_ids: list[int] = field(default_factory=list)
+    push_min_severity: int = 7                                  # ≥ 7 (high) pushes to Telegram
+    builtin_packs: list[str] = field(default_factory=lambda: [
+        "ssh_auth", "network", "system_resources", "processes_services", "logs",
+    ])
+    custom_packs_dir: str = ""
+    default_cooldown: int = 300                                 # seconds
+    max_cooldown: int = 1800                                    # seconds
+    global_rate_limit: int = 10                                 # max pushes per window
+    global_rate_window: int = 300                               # rate window (seconds)
+    learning_rounds: int = 1                                    # cold-start silent rounds
+    aggregation_window: int = 10                                # Phase 2
+    daily_report: bool = True
+    daily_report_time: str = "09:00"                            # UTC
+    ai_analysis_min_severity: int = 7
+    checks: list[dict] = field(default_factory=list)
+
+
+@dataclass
 class ChatDomeConfig:
     """Root configuration object."""
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     ai: AIConfig = field(default_factory=AIConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    sentinel: SentinelConfig = field(default_factory=SentinelConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +167,7 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
         telegram=_dict_to_dataclass(TelegramConfig, yaml_data.get("telegram")),
         ai=_dict_to_dataclass(AIConfig, yaml_data.get("ai")),
         agent=_dict_to_dataclass(AgentConfig, yaml_data.get("agent")),
+        sentinel=_dict_to_dataclass(SentinelConfig, yaml_data.get("sentinel")),
     )
 
     # ── Override with environment variables (sensitive + optional) ──

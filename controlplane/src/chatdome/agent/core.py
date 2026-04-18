@@ -36,11 +36,13 @@ class Agent:
         sandbox: CommandSandbox,
         config: AgentConfig,
         runtime_environment_context: str = "",
+        pack_loader: Any = None,
     ):
         self.llm = llm
         self.config = config
         self.tools = build_tools(
             allow_unrestricted_commands=config.allow_unrestricted_commands,
+            pack_loader=pack_loader,
         )
         self.tool_dispatcher = ToolDispatcher(sandbox, llm=llm)
         self.session_manager = SessionManager(
@@ -51,6 +53,7 @@ class Agent:
             system_prompt=build_system_prompt(
                 allow_unrestricted_commands=config.allow_unrestricted_commands,
                 runtime_environment_context=runtime_environment_context,
+                pack_loader=pack_loader,
             ),
         )
 

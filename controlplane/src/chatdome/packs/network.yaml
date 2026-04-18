@@ -1,0 +1,78 @@
+# Network — 网络连接与防火墙审计
+pack:
+  name: "Network"
+  description: "网络连接、端口监听与防火墙审计"
+  version: "1.0"
+
+commands:
+  active_connections:
+    name: "当前活跃连接"
+    templates:
+      - platform: linux
+        command: "ss -tunapl | head -{limit}"
+        requires: [ss, head]
+      - platform: linux
+        command: "netstat -tunap | head -{limit}"
+        requires: [netstat, head]
+    params:
+      limit: { type: int, default: 30, max: 100 }
+    timeout: 10
+    tags: [network, connections]
+
+  open_ports:
+    name: "监听端口"
+    templates:
+      - platform: linux
+        command: "ss -tlnp"
+        requires: [ss]
+      - platform: linux
+        command: "netstat -tlnp"
+        requires: [netstat]
+    params: {}
+    timeout: 10
+    tags: [network, ports, reconnaissance]
+
+  firewall_rules:
+    name: "防火墙规则"
+    templates:
+      - platform: linux
+        command: >-
+          iptables -L -n --line-numbers 2>/dev/null
+          || nft list ruleset 2>/dev/null
+          || echo 'No firewall detected'
+    params: {}
+    timeout: 10
+    tags: [network, firewall, defense_evasion]
+
+  dns_resolv:
+    name: "DNS 配置"
+    templates:
+      - platform: linux
+        command: "cat /etc/resolv.conf"
+    params: {}
+    timeout: 5
+    tags: [network, dns]
+
+  routing_table:
+    name: "路由表"
+    templates:
+      - platform: linux
+        command: "ip route show"
+        requires: [ip]
+      - platform: linux
+        command: "route -n"
+        requires: [route]
+    params: {}
+    timeout: 5
+    tags: [network, routing]
+
+  external_connections:
+    name: "外部连接统计"
+    templates:
+      - platform: linux
+        command: "ss -tun state established | awk 'NR>1 {print $5}' | cut -d: -f1 | sort | uniq -c | sort -nr | head -{limit}"
+        requires: [ss, awk, cut, sort, uniq, head]
+    params:
+      limit: { type: int, default: 20, max: 50 }
+    timeout: 10
+    tags: [network, connections, command_and_control]

@@ -1,0 +1,59 @@
+# Users & Permissions — 用户与权限审计
+pack:
+  name: "Users & Permissions"
+  description: "用户账户、权限变更与特权审计"
+  version: "1.0"
+
+commands:
+  current_users:
+    name: "当前登录用户"
+    templates:
+      - platform: linux
+        command: "w"
+        requires: [w]
+    params: {}
+    timeout: 5
+    tags: [users, login, audit]
+
+  recent_logins:
+    name: "最近登录历史"
+    templates:
+      - platform: linux
+        command: "last -n {limit}"
+        requires: [last]
+    params:
+      limit: { type: int, default: 20, max: 100 }
+    timeout: 10
+    tags: [users, login, initial_access]
+
+  passwd_changes:
+    name: "用户账户变更"
+    templates:
+      - platform: linux
+        command: "ls -la /etc/passwd /etc/shadow /etc/group 2>/dev/null && echo '---' && awk -F: '$3>=1000 {print $1,$3,$7}' /etc/passwd"
+        requires: [ls, awk]
+    params: {}
+    timeout: 5
+    tags: [users, persistence, account]
+
+  suid_binaries:
+    name: "SUID/SGID 文件"
+    templates:
+      - platform: linux
+        command: "find / -xdev \\( -perm -4000 -o -perm -2000 \\) -type f 2>/dev/null | head -{limit}"
+        requires: [find, head]
+    params:
+      limit: { type: int, default: 30, max: 100 }
+    timeout: 30
+    tags: [permissions, suid, privilege_escalation]
+
+  world_writable:
+    name: "全局可写目录"
+    templates:
+      - platform: linux
+        command: "find / -xdev -type d -perm -0002 -not -path '/proc/*' -not -path '/sys/*' 2>/dev/null | head -{limit}"
+        requires: [find, head]
+    params:
+      limit: { type: int, default: 20, max: 50 }
+    timeout: 30
+    tags: [permissions, writable, defense_evasion]

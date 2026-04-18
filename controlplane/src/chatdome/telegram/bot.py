@@ -50,6 +50,10 @@ HELP_TEXT = """\
 /env \\- 查看当前运行环境摘要（来自 environment\\_profile\\.md）
 /token \\- 查看当前账号的 Token 资源流水与花费汇总
 /cmd\\_echo \\- 开关命令回显模式（显示底层执行的具体步骤）
+/sentinel\\_status \\- 哨兵模式告警状态总览
+/sentinel\\_trigger \\- 手动触发全量巡检
+/sentinel\\_history \\- 查看告警历史
+/sentinel\\_packs \\- 查看已加载的命令包
 
 _直接发送你的问题即可，无需命令前缀。_
 """
@@ -71,6 +75,13 @@ class TelegramBot:
         self.max_message_length = config.telegram.max_message_length
         self._app: Application | None = None
         self._environment_profile_path = Path("chat_data/environment_profile.md")
+        self._sentinel: Any = None   # SentinelScheduler, injected via set_sentinel()
+        self._pack_loader: Any = None
+
+    def set_sentinel(self, scheduler: Any, pack_loader: Any = None) -> None:
+        """Inject Sentinel scheduler after construction (avoids circular deps)."""
+        self._sentinel = scheduler
+        self._pack_loader = pack_loader
 
     async def post_init(self, app: Application) -> None:
         """Called by the Telegram application after initialization, inside the event loop."""
@@ -119,6 +130,10 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("env", self._handle_env))
         self._app.add_handler(CommandHandler("token", self._handle_token))
         self._app.add_handler(CommandHandler("audit", self._handle_audit))
+        self._app.add_handler(CommandHandler("sentinel_status", self._handle_sentinel_status))
+        self._app.add_handler(CommandHandler("sentinel_trigger", self._handle_sentinel_trigger))
+        self._app.add_handler(CommandHandler("sentinel_history", self._handle_sentinel_history))
+        self._app.add_handler(CommandHandler("sentinel_packs", self._handle_sentinel_packs))
         self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
@@ -552,6 +567,94 @@ class TelegramBot:
             f"- Available: {available}\n"
             f"- Missing: {missing}"
         )
+
+    # ----- Sentinel command handlers -----
+
+    async def _handle_sentinel_status(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /sentinel_status — show alert statistics overview."""
+        if not self._check_auth(update):
+            return
+        if self._sentinel is None:
+            await update.message.reply_text("ℹ️ 哨兵模式未启用。请在 config.yaml 中设置 sentinel.enabled: true")
+            return
+        from chatdome.sentinel.alerter import format_status_message
+        text = format_status_message(self._sentinel.history)
+        await update.message.reply_text(text)
+
+    async def _handle_sentinel_trigger(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /sentinel_trigger — manually trigger all checks."""
+        if not self._check_auth(update):
+            return
+        if self._sentinel is None:
+            await update.message.reply_text("ℹ️ 哨兵模式未启用。")
+            return
+        await update.message.reply_text("⏳ 正在执行全量巡检...")
+        try:
+            result = await self._sentinel.trigger_all()
+            if len(result) > self.max_message_length:
+                result = result[:self.max_message_length - 20] + "\n... (已截断)"
+            await update.message.reply_text(f"🛡️ 巡检完成:\n\n{result}")
+        except Exception as e:
+            logger.exception("Sentinel trigger failed")
+            await update.message.reply_text(f"❌ 巡检出错: {e}")
+
+    async def _handle_sentinel_history(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /sentinel_history — show alert history."""
+        if not self._check_auth(update):
+            return
+        if self._sentinel is None:
+            await update.message.reply_text("ℹ️ 哨兵模式未启用。")
+            return
+        from chatdome.sentinel.alerter import format_history_message
+        text = format_history_message(self._sentinel.history)
+        await update.message.reply_text(text)
+
+    async def _handle_sentinel_packs(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /sentinel_packs — list loaded command packs."""
+        if not self._check_auth(update):
+            return
+        if self._pack_loader is None:
+            await update.message.reply_text("ℹ️ PackLoader 未初始化。")
+            return
+        checks = self._pack_loader.list_checks()
+        if not checks:
+            await update.message.reply_text("ℹ️ 无可用命令包。")
+            return
+        from collections import defaultdict
+        packs: dict[str, list[str]] = defaultdict(list)
+        for cmd in self._pack_loader._commands.values():
+            packs[cmd.pack].append(f"  - {cmd.id}: {cmd.name}")
+        lines = [f"📦 已加载 {len(checks)} 条命令 ({len(packs)} 个包):", ""]
+        for pack_name, cmds in sorted(packs.items()):
+            lines.append(f"**{pack_name}** ({len(cmds)} 条):")
+            lines.extend(sorted(cmds))
+            lines.append("")
+        text = "\n".join(lines)
+        if len(text) > self.max_message_length:
+            text = text[:self.max_message_length - 20] + "\n... (已截断)"
+        await update.message.reply_text(text)
+
+    async def send_alert(self, chat_id: int, text: str) -> None:
+        """Send an alert message to a specific chat. Used by Sentinel Alerter."""
+        if self._app is None:
+            logger.warning("Cannot send alert: app not initialized")
+            return
+        try:
+            if len(text) > self.max_message_length:
+                text = text[:self.max_message_length - 20] + "\n... (已截断)"
+            await self._app.bot.send_message(chat_id=chat_id, text=text)
+        except Exception:
+            logger.exception("Failed to send alert to chat %s", chat_id)
+
+    # ----- Error handler -----
 
     async def _handle_error(
         self,

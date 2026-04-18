@@ -69,11 +69,69 @@ chatdome:
     command_timeout: 10
     max_output_chars: 4000
 
-  # Scheduled patrol (not yet implemented)
-  # patrol:
-  #   enabled: false
-  #   interval: 3600
-  #   checks:
-  #     - ssh_bruteforce
-  #     - disk_usage
-  #     - suspicious_processes
+  # ---------------------------------------------------------------------------
+  # Sentinel — 7×24 Security Monitoring (哨兵模式)
+  # ---------------------------------------------------------------------------
+  sentinel:
+    enabled: false                         # 显式开启
+
+    # 告警推送目标（空 = 使用 telegram.allowed_chat_ids）
+    alert_chat_ids: []
+
+    # 推/拉分离 — 推送策略
+    push_min_severity: 7                   # 数值 ≥ 7 (high) 才主动推送 Telegram
+                                           # 低于此级别的告警静默记录，用户通过 /sentinel_status 查看
+
+    # 命令库
+    builtin_packs:                         # 启用的内置 pack（省略 = 全部加载）
+      - ssh_auth
+      - network
+      - system_resources
+      - processes_services
+      - logs
+      # - users_permissions                # 按需启用
+      # - file_integrity
+      # - containers
+    # custom_packs_dir: "./packs"          # 用户自定义 pack 目录
+
+    # 告警防护
+    default_cooldown: 300                  # 默认冷却期（秒）
+    max_cooldown: 1800                     # 冷却期上限（秒）
+    global_rate_limit: 10                  # 全局速率限制：每窗口最多推送 N 条
+    global_rate_window: 300                # 速率窗口大小（秒）
+    learning_rounds: 1                     # 冷启动静默轮数（首次启动建基线）
+
+    # 检查策略列表
+    checks:
+      - name: "SSH 暴力破解检测"
+        check_id: ssh_bruteforce
+        interval: 300
+        mode: differential
+        severity: 7                        # high
+        rule:
+          type: line_count
+          operator: ">"
+          threshold: 5
+        cooldown: 600
+
+      - name: "磁盘使用率"
+        check_id: disk_usage
+        interval: 600
+        mode: snapshot
+        severity: 4                        # low
+        rule:
+          type: regex_extract
+          pattern: '(\d+)%'
+          aggregation: max
+          operator: ">"
+          threshold: 85
+
+      - name: "新增监听端口"
+        check_id: open_ports
+        interval: 120
+        mode: differential
+        severity: 9                        # critical
+        rule:
+          type: line_count
+          operator: ">"
+          threshold: 0

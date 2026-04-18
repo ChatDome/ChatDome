@@ -4,11 +4,17 @@ System prompt and tool definitions for the AI Agent.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from chatdome.sentinel.pack_loader import PackLoader
+
 # ---------------------------------------------------------------------------
 # System Prompt
 # ---------------------------------------------------------------------------
 
-AVAILABLE_CHECKS_TEXT = """\
+# Fallback for when PackLoader is not available
+_FALLBACK_CHECKS_TEXT = """\
 可用的预定义命令 (check_id)：
 - ssh_bruteforce: SSH 暴力破解检测
 - ssh_success_login: SSH 成功登录记录
@@ -26,6 +32,19 @@ AVAILABLE_CHECKS_TEXT = """\
 - recent_syslog: 最近系统日志
 - kernel_errors: 内核错误
 """
+
+
+def _build_available_checks_text(pack_loader: PackLoader | None = None) -> str:
+    """Build the available checks text, dynamically if PackLoader is provided."""
+    if pack_loader is None:
+        return _FALLBACK_CHECKS_TEXT
+    checks = pack_loader.list_checks()
+    if not checks:
+        return _FALLBACK_CHECKS_TEXT
+    lines = ["可用的预定义命令 (check_id)："]
+    for c in checks:
+        lines.append(f"- {c['check_id']}: {c['name']}")
+    return "\n".join(lines) + "\n"
 
 STRICT_COMMAND_POLICY = """\
 你的能力：
@@ -94,6 +113,7 @@ def _build_runtime_environment_block(runtime_environment_context: str = "") -> s
 def build_system_prompt(
     allow_unrestricted_commands: bool = False,
     runtime_environment_context: str = "",
+    pack_loader: PackLoader | None = None,
 ) -> str:
     """Build the system prompt for the configured command mode."""
     command_policy = (
@@ -104,10 +124,11 @@ def build_system_prompt(
     runtime_environment_block = _build_runtime_environment_block(
         runtime_environment_context,
     )
+    available_checks = _build_available_checks_text(pack_loader)
     return SYSTEM_PROMPT_TEMPLATE.format(
         command_policy=command_policy.strip(),
         runtime_environment_block=runtime_environment_block.strip(),
-        available_checks=AVAILABLE_CHECKS_TEXT.strip(),
+        available_checks=available_checks.strip(),
     )
 
 
@@ -163,8 +184,24 @@ def _shell_command_description(allow_unrestricted_commands: bool = False) -> str
     )
 
 
-def build_tools(allow_unrestricted_commands: bool = False) -> list[dict]:
+def build_tools(
+    allow_unrestricted_commands: bool = False,
+    pack_loader: PackLoader | None = None,
+) -> list[dict]:
     """Build OpenAI tool definitions for the configured command mode."""
+    # Build dynamic check_id list
+    if pack_loader is not None:
+        checks = pack_loader.list_checks()
+        check_ids = ", ".join(c["check_id"] for c in checks)
+    else:
+        check_ids = (
+            "ssh_bruteforce, ssh_success_login, failed_sudo, "
+            "active_connections, open_ports, firewall_rules, "
+            "disk_usage, memory_usage, system_load, last_reboot, "
+            "suspicious_processes, recent_cron_jobs, large_files, "
+            "recent_syslog, kernel_errors"
+        )
+
     return [
         {
             "type": "function",
@@ -173,12 +210,7 @@ def build_tools(allow_unrestricted_commands: bool = False) -> list[dict]:
                 "description": (
                     "执行预定义的主机安全审计命令。"
                     "当前仅实现 Linux 命令包（macOS/Windows 后续支持）。"
-                    "可用的 check_id 包括："
-                    "ssh_bruteforce, ssh_success_login, failed_sudo, "
-                    "active_connections, open_ports, firewall_rules, "
-                    "disk_usage, memory_usage, system_load, last_reboot, "
-                    "suspicious_processes, recent_cron_jobs, large_files, "
-                    "recent_syslog, kernel_errors"
+                    f"可用的 check_id 包括：{check_ids}"
                 ),
                 "parameters": {
                     "type": "object",

@@ -18,6 +18,7 @@ from chatdome.agent.core import Agent
 from chatdome.executor.sandbox import CommandSandbox
 from chatdome.llm.client import LLMClient
 from chatdome.runtime_environment import collect_and_persist_runtime_environment
+from chatdome.sentinel.pack_loader import PackLoader
 from chatdome.telegram.bot import TelegramBot
 
 
@@ -65,7 +66,7 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("=" * 60)
-    logger.info("  ChatDome v0.1.0 — AI Host Security Assistant")
+    logger.info("  ChatDome v0.2.0 — AI Host Security Assistant")
     logger.info("=" * 60)
     logger.info("  Model:    %s", config.ai.model)
     logger.info("  Base URL: %s", config.ai.base_url)
@@ -83,6 +84,15 @@ def main() -> None:
 
     # ── Initialize components ──
 
+    # Pack Loader (replaces old registry.py)
+    pack_loader = PackLoader(
+        builtin_dir=Path(__file__).parent / "packs",
+    )
+    sentinel_cfg = getattr(config, "sentinel", None)
+    enabled_packs = getattr(sentinel_cfg, "builtin_packs", None) if sentinel_cfg else None
+    pack_loader.load(enabled_packs=enabled_packs)
+    logger.info("  Pack Loader: %d commands loaded", pack_loader.command_count)
+
     # LLM Client
     llm = LLMClient(
         api_key=config.ai.api_key,
@@ -98,6 +108,7 @@ def main() -> None:
         max_output_chars=config.agent.max_output_chars,
         allow_generated_commands=config.agent.allow_generated_commands,
         allow_unrestricted_commands=config.agent.allow_unrestricted_commands,
+        pack_loader=pack_loader,
     )
 
     # Runtime environment profile (OS/shell/command availability)
@@ -119,11 +130,47 @@ def main() -> None:
         sandbox=sandbox,
         config=config.agent,
         runtime_environment_context=runtime_environment_context,
+        pack_loader=pack_loader,
     )
 
     # Telegram Bot
     bot = TelegramBot(config=config, agent=agent)
+
+    # Sentinel Scheduler (optional)
+    sentinel_scheduler = None
+    if config.sentinel.enabled:
+        from chatdome.sentinel.scheduler import SentinelScheduler
+
+        # Determine alert targets: sentinel.alert_chat_ids or fallback to telegram.allowed_chat_ids
+        alert_targets = config.sentinel.alert_chat_ids or config.telegram.allowed_chat_ids
+
+        sentinel_scheduler = SentinelScheduler(
+            config=config.sentinel,
+            pack_loader=pack_loader,
+            sandbox=sandbox,
+            send_alert_fn=bot.send_alert,
+            alert_chat_ids=alert_targets,
+        )
+
+        bot.set_sentinel(sentinel_scheduler, pack_loader)
+        logger.info("  Sentinel: ENABLED (%d checks, push≥%d, cooldown=%ds)",
+                     len(config.sentinel.checks), config.sentinel.push_min_severity,
+                     config.sentinel.default_cooldown)
+    else:
+        bot.set_sentinel(None, pack_loader)
+        logger.info("  Sentinel: disabled")
+
     app = bot.build()
+
+    # Start Sentinel after bot is built (needs event loop from run_polling)
+    if sentinel_scheduler is not None:
+        original_post_init = bot.post_init
+
+        async def _post_init_with_sentinel(app_instance):
+            await original_post_init(app_instance)
+            sentinel_scheduler.start()
+
+        app.post_init = _post_init_with_sentinel
 
     # ── Run ──
     logger.info("Starting Telegram bot polling...")

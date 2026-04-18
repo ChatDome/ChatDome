@@ -1,0 +1,61 @@
+# Processes & Services — 进程与服务审计
+pack:
+  name: "Processes & Services"
+  description: "进程监控、计划任务与服务审计"
+  version: "1.0"
+
+commands:
+  suspicious_processes:
+    name: "可疑进程检测"
+    templates:
+      - platform: linux
+        command: "ps aux --sort=-%cpu | head -{limit}"
+        requires: [ps, head]
+    params:
+      limit: { type: int, default: 20, max: 50 }
+    timeout: 10
+    tags: [processes, cpu, execution]
+
+  recent_cron_jobs:
+    name: "最近 cron 执行"
+    templates:
+      - platform: linux
+        command: "journalctl -u cron -u crond --since '{since}' --no-pager | tail -{limit}"
+        requires: [journalctl, tail]
+    params:
+      since: { type: str, default: "1 hour ago" }
+      limit: { type: int, default: 30, max: 100 }
+    timeout: 15
+    tags: [cron, scheduled, persistence]
+
+  crontab_list:
+    name: "Crontab 内容"
+    templates:
+      - platform: linux
+        command: "for user in $(cut -f1 -d: /etc/passwd); do echo \"=== $user ===\"; crontab -l -u $user 2>/dev/null; done"
+        requires: [crontab, cut]
+    params: {}
+    timeout: 10
+    tags: [cron, persistence]
+
+  deleted_but_running:
+    name: "已删除但运行中的进程"
+    templates:
+      - platform: linux
+        command: "ls -la /proc/*/exe 2>/dev/null | grep '(deleted)' | head -{limit}"
+        requires: [ls, grep, head]
+    params:
+      limit: { type: int, default: 20, max: 50 }
+    timeout: 10
+    tags: [processes, suspicious, execution]
+
+  systemd_services:
+    name: "Systemd 服务状态"
+    templates:
+      - platform: linux
+        command: "systemctl list-units --type=service --state=running --no-pager | head -{limit}"
+        requires: [systemctl, head]
+    params:
+      limit: { type: int, default: 30, max: 100 }
+    timeout: 10
+    tags: [services, systemd, audit]

@@ -1,0 +1,77 @@
+# SSH & Authentication — SSH 登录安全与认证审计
+pack:
+  name: "SSH & Authentication"
+  description: "SSH 登录安全与认证审计"
+  version: "1.0"
+
+commands:
+  ssh_bruteforce:
+    name: "SSH 暴力破解检测"
+    templates:
+      - platform: linux
+        command: >-
+          (if [ -f /var/log/auth.log ]; then
+          awk '/Failed password/ {print $(NF-3)}' /var/log/auth.log;
+          elif [ -f /var/log/secure ]; then
+          awk '/Failed password/ {print $(NF-3)}' /var/log/secure;
+          else echo 'No SSH auth log found'; fi)
+          | sort | uniq -c | sort -nr | head -{limit}
+        requires: [awk, sort, uniq, head]
+    params:
+      limit: { type: int, default: 10, max: 50 }
+    timeout: 10
+    tags: [ssh, bruteforce, credential_access]
+
+  ssh_success_login:
+    name: "SSH 成功登录记录"
+    templates:
+      - platform: linux
+        command: >-
+          (if [ -f /var/log/auth.log ]; then
+          awk '/Accepted/ {print $1, $2, $3, $9, $11}' /var/log/auth.log;
+          elif [ -f /var/log/secure ]; then
+          awk '/Accepted/ {print $1, $2, $3, $9, $11}' /var/log/secure;
+          else echo 'No SSH auth log found'; fi)
+          | tail -{limit}
+        requires: [awk, tail]
+    params:
+      limit: { type: int, default: 20, max: 100 }
+    timeout: 10
+    tags: [ssh, login, initial_access]
+
+  failed_sudo:
+    name: "sudo 失败记录"
+    templates:
+      - platform: linux
+        command: >-
+          (if [ -f /var/log/auth.log ]; then
+          grep 'sudo:.*COMMAND' /var/log/auth.log | grep 'NOT';
+          elif [ -f /var/log/secure ]; then
+          grep 'sudo:.*COMMAND' /var/log/secure | grep 'NOT';
+          else echo 'No sudo log found'; fi)
+          | tail -{limit}
+        requires: [grep, tail]
+    params:
+      limit: { type: int, default: 20, max: 100 }
+    timeout: 10
+    tags: [sudo, privilege_escalation]
+
+  ssh_authorized_keys:
+    name: "SSH 公钥变更检测"
+    templates:
+      - platform: linux
+        command: "find /home -name authorized_keys -exec md5sum {} \\;"
+        requires: [find, md5sum]
+    params: {}
+    timeout: 10
+    tags: [ssh, persistence, file_integrity]
+
+  sudoers_changes:
+    name: "sudoers 文件变更"
+    templates:
+      - platform: linux
+        command: "ls -la /etc/sudoers /etc/sudoers.d/ 2>/dev/null && md5sum /etc/sudoers 2>/dev/null"
+        requires: [ls, md5sum]
+    params: {}
+    timeout: 10
+    tags: [sudo, persistence, privilege_escalation]

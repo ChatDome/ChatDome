@@ -1,0 +1,60 @@
+# File Integrity — 文件完整性监控
+pack:
+  name: "File Integrity"
+  description: "关键文件变更、大文件检测与文件系统审计"
+  version: "1.0"
+
+commands:
+  large_files:
+    name: "大文件检测"
+    templates:
+      - platform: linux
+        command: "find / -xdev -type f -size +{min_size} 2>/dev/null | head -{limit}"
+        requires: [find, head]
+    params:
+      min_size: { type: str, default: "100M" }
+      limit: { type: int, default: 20, max: 50 }
+    timeout: 30
+    tags: [files, disk, impact]
+
+  recently_modified:
+    name: "最近修改的文件"
+    templates:
+      - platform: linux
+        command: "find /etc /usr/bin /usr/sbin -xdev -type f -mtime -{days} 2>/dev/null | head -{limit}"
+        requires: [find, head]
+    params:
+      days: { type: int, default: 1, max: 7 }
+      limit: { type: int, default: 30, max: 100 }
+    timeout: 15
+    tags: [files, modification, persistence]
+
+  tmp_suspicious:
+    name: "临时目录可疑文件"
+    templates:
+      - platform: linux
+        command: "find /tmp /var/tmp /dev/shm -type f \\( -perm -u+x -o -name '*.sh' -o -name '*.py' -o -name '*.pl' \\) 2>/dev/null | head -{limit}"
+        requires: [find, head]
+    params:
+      limit: { type: int, default: 20, max: 50 }
+    timeout: 10
+    tags: [files, suspicious, execution]
+
+  etc_hosts:
+    name: "hosts 文件检查"
+    templates:
+      - platform: linux
+        command: "cat /etc/hosts"
+    params: {}
+    timeout: 5
+    tags: [files, dns, defense_evasion]
+
+  critical_file_hashes:
+    name: "关键文件哈希"
+    templates:
+      - platform: linux
+        command: "md5sum /etc/passwd /etc/shadow /etc/sudoers /etc/ssh/sshd_config 2>/dev/null"
+        requires: [md5sum]
+    params: {}
+    timeout: 5
+    tags: [files, integrity, persistence]

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from chatdome.agent.audit import CommandAuditTracker
-from chatdome.executor.registry import render_command
+from chatdome.sentinel.pack_loader import PackLoader
 from chatdome.executor.validator import validate_command
 
 logger = logging.getLogger(__name__)
@@ -50,11 +50,13 @@ class CommandSandbox:
         max_output_chars: int = 4000,
         allow_generated_commands: bool = False,
         allow_unrestricted_commands: bool = False,
+        pack_loader: PackLoader | None = None,
     ):
         self.default_timeout = default_timeout
         self.max_output_chars = max_output_chars
         self.allow_generated_commands = allow_generated_commands
         self.allow_unrestricted_commands = allow_unrestricted_commands
+        self._pack_loader = pack_loader
 
     async def _execute(
         self,
@@ -188,8 +190,15 @@ class CommandSandbox:
         Returns:
             CommandResult with execution output.
         """
+        if self._pack_loader is None:
+            return CommandResult(
+                stdout="",
+                stderr="PackLoader not initialized",
+                return_code=None,
+                command=f"[check:{check_id}]",
+            )
         try:
-            rendered = render_command(check_id, args)
+            rendered = self._pack_loader.render_command(check_id, args)
         except ValueError as e:
             self._record_execution_audit(
                 event_type="security_check_invalid",
@@ -217,7 +226,7 @@ class CommandSandbox:
             command=rendered.command,
             reason=f"security_check:{rendered.check_id}",
             result=result,
-            execution_mode="registry",
+            execution_mode="pack",
             duration_ms=duration_ms,
             extra_fields={
                 "check_id": rendered.check_id,

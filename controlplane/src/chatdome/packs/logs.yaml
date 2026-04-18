@@ -1,0 +1,54 @@
+# Logs — 系统日志审计
+pack:
+  name: "Logs"
+  description: "系统日志与内核错误检查"
+  version: "1.0"
+
+commands:
+  recent_syslog:
+    name: "最近系统日志"
+    templates:
+      - platform: linux
+        command: "journalctl --since '{since}' --no-pager --priority={priority} | tail -{limit}"
+        requires: [journalctl, tail]
+    params:
+      since: { type: str, default: "1 hour ago" }
+      priority: { type: str, default: "warning" }
+      limit: { type: int, default: 50, max: 200 }
+    timeout: 15
+    tags: [logs, syslog, audit]
+
+  kernel_errors:
+    name: "内核错误"
+    templates:
+      - platform: linux
+        command: "dmesg --level=err,warn | tail -{limit}"
+        requires: [dmesg, tail]
+    params:
+      limit: { type: int, default: 30, max: 100 }
+    timeout: 10
+    tags: [logs, kernel, impact]
+
+  auth_log:
+    name: "认证日志"
+    templates:
+      - platform: linux
+        command: >-
+          (if [ -f /var/log/auth.log ]; then tail -{limit} /var/log/auth.log;
+          elif [ -f /var/log/secure ]; then tail -{limit} /var/log/secure;
+          else journalctl -u sshd --no-pager | tail -{limit}; fi)
+        requires: [tail]
+    params:
+      limit: { type: int, default: 50, max: 200 }
+    timeout: 10
+    tags: [logs, authentication, audit]
+
+  failed_services:
+    name: "失败的服务"
+    templates:
+      - platform: linux
+        command: "systemctl list-units --type=service --state=failed --no-pager"
+        requires: [systemctl]
+    params: {}
+    timeout: 10
+    tags: [logs, services, impact]
