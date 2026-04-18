@@ -97,7 +97,6 @@ class CommandSandbox:
                 )
             except asyncio.TimeoutError:
                 if sys.platform != "win32":
-                    import os, signal
                     try:
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                     except ProcessLookupError:
