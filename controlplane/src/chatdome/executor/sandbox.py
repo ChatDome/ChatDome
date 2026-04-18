@@ -14,6 +14,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import os
+import signal
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,10 +77,17 @@ class CommandSandbox:
         logger.info("Executing command (timeout=%ds): %s", effective_timeout, command)
 
         try:
+
+            kwargs = {
+                "stdout": asyncio.subprocess.PIPE,
+                "stderr": asyncio.subprocess.PIPE,
+            }
+            if sys.platform != "win32":
+                kwargs["preexec_fn"] = os.setsid
+                
             proc = await asyncio.create_subprocess_shell(
                 command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                **kwargs
             )
 
             try:
@@ -86,7 +96,14 @@ class CommandSandbox:
                     timeout=effective_timeout,
                 )
             except asyncio.TimeoutError:
-                proc.kill()
+                if sys.platform != "win32":
+                    import os, signal
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    proc.kill()
                 await proc.wait()
                 logger.warning("Command timed out after %ds: %s", effective_timeout, command)
                 return CommandResult(
