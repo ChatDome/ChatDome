@@ -135,7 +135,10 @@ class CommandSandbox:
             )
 
         except Exception as e:
-            logger.error("Command execution failed: %s - %s", command, e)
+            logger.error(
+                "Command execution failed!\n  [Command]: %s\n  [Error]: %s", 
+                command, e
+            )
             return CommandResult(
                 stdout="",
                 stderr=f"命令执行异常: {e}",
