@@ -20,7 +20,7 @@ from chatdome.config import SentinelConfig
 from chatdome.executor.sandbox import CommandSandbox
 from chatdome.sentinel.alerter import AlertEvent, AlertHistory, format_alert_message
 from chatdome.sentinel.checks import CheckDefinition, load_checks, severity_label
-from chatdome.sentinel.evaluator import evaluate
+from chatdome.sentinel.evaluator import EvalResult, evaluate
 from chatdome.sentinel.pack_loader import PackLoader
 from chatdome.sentinel.suppressor import SuppressionResult, Suppressor
 from chatdome.sentinel.user_context import UserContextLedger
@@ -318,6 +318,23 @@ class SentinelScheduler:
 
         return eval_description
 
+    @staticmethod
+    def _build_rule_summary_runtime(check: CheckDefinition, eval_description: str) -> str:
+        """Build runtime-facing rule summaries with explicit differential semantics."""
+        if check.rule is None:
+            return "no rule"
+
+        if check.mode == "differential" and check.rule.type == "added_count":
+            return f"added items {check.rule.operator} {check.rule.threshold:g} (differential mode)"
+
+        if check.mode == "differential" and check.rule.type == "line_count":
+            return f"line count {check.rule.operator} {check.rule.threshold:g} (alert on baseline delta)"
+
+        if check.rule.type == "line_count":
+            return f"line count {check.rule.operator} {check.rule.threshold:g}"
+
+        return eval_description
+
     async def _send_baseline_summary_if_needed(self) -> None:
         """Send one startup baseline summary after the first full round."""
         if self._baseline_report_sent or not self._baseline_notes:
@@ -396,15 +413,39 @@ class SentinelScheduler:
             # No rule → informational only
             return f"ℹ️ {check.name}: 已执行 (无规则)"
 
-        # Rule evaluation still reflects the current snapshot; differential mode
-        # only controls whether there is *new* change worth alerting.
-        eval_result = evaluate(check.rule, output)
-        rule_summary = self._build_rule_summary(check, eval_result.description)
+        # Differential strategy:
+        # - ssh_bruteforce: alert only when NEW source IPs appear.
+        # - added_count rules: evaluate against added delta lines.
+        # - others: evaluate against the full snapshot output.
+        if check.mode == "differential" and check_key == "ssh_bruteforce":
+            added_ip_count = len(added_lines)
+            eval_result = EvalResult(
+                triggered=added_ip_count > 0,
+                current_value=added_ip_count,
+                description="new ssh source ip count > 0",
+            )
+            rule_summary = "new ssh source ip > 0 (added-only differential alert)"
+        elif check.mode == "differential" and check.rule.type == "added_count":
+            added_output = "\n".join(sorted(added_lines))
+            eval_result = evaluate(check.rule, added_output)
+            rule_summary = self._build_rule_summary_runtime(check, eval_result.description)
+        else:
+            eval_result = evaluate(check.rule, output)
+            rule_summary = self._build_rule_summary_runtime(check, eval_result.description)
 
         if not eval_result.triggered:
             return f"✅ {check.name}: 正常 (当前值={eval_result.current_value}, 规则={rule_summary})"
 
-        if check.mode == "differential":
+        if check.mode == "differential" and check_key == "ssh_bruteforce":
+            if not added_lines:
+                return (
+                    f"✅ {check.name}: anomaly persists but no new ssh source ip "
+                    f"(value={eval_result.current_value}, rule={rule_summary})"
+                )
+            # SSH differential policy: alert on newly seen source IPs only.
+            removed_lines = set()
+
+        if check.mode == "differential" and check_key != "ssh_bruteforce":
             if not added_lines and not removed_lines:
                 return f"✅ {check.name}: 异常持续但无变化 (当前值={eval_result.current_value}, 规则={rule_summary})"
             alert_output = self._build_diff_payload(added_lines, removed_lines)

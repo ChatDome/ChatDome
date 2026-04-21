@@ -59,7 +59,7 @@ def evaluate(rule: RuleDefinition, output: str) -> EvalResult:
             return _eval_regex_match(rule, output)
         elif rule.type == "added_count":
             # Phase 2 — for now treat as line_count
-            return _eval_line_count(rule, output)
+            return _eval_added_count(rule, output)
         else:
             logger.warning("Unknown rule type: %s", rule.type)
             return EvalResult(triggered=False, current_value=None, description=f"Unknown rule type: {rule.type}")
@@ -86,6 +86,18 @@ def _eval_line_count(rule: RuleDefinition, output: str) -> EvalResult:
         triggered=triggered,
         current_value=count,
         description=f"匹配行数 {rule.operator} {rule.threshold}",
+    )
+
+
+def _eval_added_count(rule: RuleDefinition, output: str) -> EvalResult:
+    """Count non-empty added-delta lines in differential mode."""
+    lines = [ln for ln in output.strip().splitlines() if ln.strip()]
+    count = len(lines)
+    triggered = _compare(count, rule.operator, rule.threshold)
+    return EvalResult(
+        triggered=triggered,
+        current_value=count,
+        description=f"added item count {rule.operator} {rule.threshold}",
     )
 
 

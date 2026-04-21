@@ -109,9 +109,9 @@ chatdome:
         mode: differential
         severity: 7                        # high
         rule:
-          type: line_count
+          type: added_count
           operator: ">"
-          threshold: 5
+          threshold: 0
         cooldown: 600
 
       - name: "磁盘使用率"

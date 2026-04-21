@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -24,6 +25,7 @@ from telegram.ext import (
 from chatdome.agent.core import Agent
 from chatdome.config import ChatDomeConfig
 from chatdome.telegram.auth import Authenticator
+from chatdome.telegram.formatting import MessageMarkup, TelegramMessageFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,8 @@ class TelegramBot:
         self._environment_profile_path = Path("chat_data/environment_profile.md")
         self._sentinel: Any = None   # SentinelScheduler, injected via set_sentinel()
         self._pack_loader: Any = None
+        # Default policy: plain text output; markdown can be enabled per message.
+        self._formatter = TelegramMessageFormatter(enable_markdown=True)
 
     def set_sentinel(self, scheduler: Any, pack_loader: Any = None) -> None:
         """Inject Sentinel scheduler after construction (avoids circular deps)."""
@@ -90,10 +94,10 @@ class TelegramBot:
         # Send startup notifications
         for chat_id in self.config.telegram.allowed_chat_ids:
             try:
-                await app.bot.send_message(
-                    chat_id=chat_id, 
+                await self._send_bot_text(
+                    bot=app.bot,
+                    chat_id=chat_id,
                     text="🚀 *ChatDome 已上线*\n安全探针与大模型推理引擎已就绪，随时听候指令！", 
-                    parse_mode="Markdown"
                 )
             except Exception as e:
                 logger.error("Failed to send startup message to %s: %s", chat_id, e)
@@ -102,10 +106,10 @@ class TelegramBot:
         """Called when the application stops."""
         for chat_id in self.config.telegram.allowed_chat_ids:
             try:
-                await app.bot.send_message(
-                    chat_id=chat_id, 
+                await self._send_bot_text(
+                    bot=app.bot,
+                    chat_id=chat_id,
                     text="💤 *ChatDome 已下线*\n主控进程已退出，暂停安全接管服务。", 
-                    parse_mode="Markdown"
                 )
             except Exception as e:
                 logger.error("Failed to send shutdown message to %s: %s", chat_id, e)
@@ -154,10 +158,7 @@ class TelegramBot:
         if not self._check_auth(update):
             return
 
-        await update.message.reply_text(
-            HELP_TEXT,
-            parse_mode="MarkdownV2",
-        )
+        await self._send_long_message(update.message, HELP_TEXT)
 
     async def _handle_clear(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -190,7 +191,7 @@ class TelegramBot:
         else:
             msg = "🔍 *Command Echo (命令回显模式) 已关闭* 🔴\n\n对话展示将恢复为干净清爽的安全专家总结模式。"
             
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await self._send_long_message(update.message, msg)
 
     async def _handle_token(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -210,7 +211,7 @@ class TelegramBot:
             f"⬇️ 下行总花费 (Completion): {stats['completion_tokens']:,.0f} Tokens\n"
             f"🔢 累计调用账单: {stats['total_tokens']:,.0f} Tokens"
         )
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await self._send_long_message(update.message, msg)
 
     async def _handle_env(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -387,13 +388,12 @@ class TelegramBot:
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-        try:
-            await message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
-        except Exception as e:
-            # Fallback: send without Markdown if parsing fails
-            logger.warning("Markdown parse failed, falling back to plain text: %s", e)
-            plain_text = text.replace('*', '').replace('`', '').replace('\\', '')
-            await message.reply_text(plain_text, reply_markup=reply_markup)
+        await self._reply_text(
+            message,
+            text,
+            markup=MessageMarkup.PLAIN,
+            reply_markup=reply_markup,
+        )
 
     async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline keyboard button clicks."""
@@ -477,21 +477,69 @@ class TelegramBot:
 
     # ----- Utilities -----
 
+    async def _reply_text(
+        self,
+        message,
+        text: str,
+        *,
+        markup: MessageMarkup = MessageMarkup.PLAIN,
+        reply_markup=None,
+    ) -> None:
+        """Send a single reply through formatter policy."""
+        rendered = self._formatter.render(text, markup=markup)
+        kwargs: dict[str, Any] = {}
+        if rendered.parse_mode:
+            kwargs["parse_mode"] = rendered.parse_mode
+        if reply_markup is not None:
+            kwargs["reply_markup"] = reply_markup
+        await message.reply_text(rendered.text, **kwargs)
+
+    async def _send_bot_text(
+        self,
+        bot,
+        chat_id: int,
+        text: str,
+        *,
+        markup: MessageMarkup = MessageMarkup.PLAIN,
+    ) -> None:
+        """Send bot-initiated chat message through formatter policy."""
+        rendered = self._formatter.render(text, markup=markup)
+        kwargs: dict[str, Any] = {}
+        if rendered.parse_mode:
+            kwargs["parse_mode"] = rendered.parse_mode
+        await bot.send_message(chat_id=chat_id, text=rendered.text, **kwargs)
+
     def _check_auth(self, update: Update) -> bool:
         """Check if the message sender is authorized."""
         if update.effective_chat is None:
             return False
         return self.auth.is_authorized(update.effective_chat.id)
 
-    async def _send_long_message(self, message, text: str) -> None:
+    async def _send_long_message(
+        self,
+        message,
+        text: str,
+        *,
+        markup: MessageMarkup = MessageMarkup.PLAIN,
+    ) -> None:
         """
         Send a message, automatically splitting if it exceeds Telegram's
         4096 character limit.
         """
+        rendered = self._formatter.render(text, markup=markup)
+        text = rendered.text
+        parse_mode = rendered.parse_mode
+
+        async def _send_chunk(chunk_text: str) -> None:
+            kwargs: dict[str, Any] = {}
+            if parse_mode:
+                kwargs["parse_mode"] = parse_mode
+            await message.reply_text(chunk_text, **kwargs)
+
         max_len = min(self.max_message_length, 4096)
 
         if len(text) <= max_len:
-            await message.reply_text(text)
+            await _send_chunk(text)
             return
 
         # Split into chunks
@@ -512,7 +560,7 @@ class TelegramBot:
         for i, chunk in enumerate(chunks, 1):
             if len(chunks) > 1:
                 chunk = f"📄 ({i}/{len(chunks)})\n{chunk}"
-            await message.reply_text(chunk)
+            await _send_chunk(chunk)
 
     @staticmethod
     def _truncate_csv_items(raw: str, max_items: int = 14) -> str:
@@ -625,7 +673,7 @@ class TelegramBot:
             return
         from chatdome.sentinel.alerter import format_history_message
         text = format_history_message(self._sentinel.history)
-        await update.message.reply_text(text)
+        await self._send_long_message(update.message, text)
 
     async def _handle_sentinel_packs(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -662,7 +710,7 @@ class TelegramBot:
         try:
             if len(text) > self.max_message_length:
                 text = text[:self.max_message_length - 20] + "\n... (已截断)"
-            await self._app.bot.send_message(chat_id=chat_id, text=text)
+            await self._send_bot_text(self._app.bot, chat_id, text)
         except Exception:
             logger.exception("Failed to send alert to chat %s", chat_id)
 
