@@ -39,6 +39,9 @@ class AgentSession:
     pending_command: str | None = None
     pending_since: float | None = None
     pending_followups: list[dict[str, str]] = field(default_factory=list)
+    pending_reason: str | None = None
+    pending_analysis: dict[str, Any] | None = None
+    task_auto_approve: bool = False
     
     # UI Mode
     command_echo: bool = False
@@ -56,6 +59,9 @@ class AgentSession:
             "pending_command": self.pending_command,
             "pending_since": self.pending_since,
             "pending_followups": self.pending_followups,
+            "pending_reason": self.pending_reason,
+            "pending_analysis": self.pending_analysis,
+            "task_auto_approve": self.task_auto_approve,
             "command_echo": self.command_echo,
         }
 
@@ -88,6 +94,11 @@ class AgentSession:
                 else None
             ),
             pending_followups=pending_followups,
+            pending_reason=payload.get("pending_reason"),
+            pending_analysis=payload.get("pending_analysis")
+            if isinstance(payload.get("pending_analysis"), dict)
+            else None,
+            task_auto_approve=bool(payload.get("task_auto_approve", False)),
             command_echo=bool(payload.get("command_echo", False)),
         )
 
@@ -103,6 +114,8 @@ class AgentSession:
         self.messages.append({"role": "user", "content": content})
         self.last_active = time.time()
         self.round_count = 0
+        # New user turn starts a new task scope.
+        self.task_auto_approve = False
 
     def add_assistant_message(self, content: str) -> None:
         """Append an assistant text response."""
@@ -145,6 +158,8 @@ class AgentSession:
         self.pending_command = None
         self.pending_since = None
         self.pending_followups.clear()
+        self.pending_reason = None
+        self.pending_analysis = None
 
     def is_expired(self, timeout: int) -> bool:
         """Check if this session has been idle for too long."""

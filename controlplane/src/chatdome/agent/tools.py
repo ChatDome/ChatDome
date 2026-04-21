@@ -139,46 +139,174 @@ class ToolDispatcher:
         if not command:
             return "缺少 command 参数"
 
+        # New approval flow:
+        # - Do static-only precheck first (no LLM call here)
+        # - Show minimal approval prompt
+        # - Run full LLM analysis only when user asks for details
+        analysis = await self.analyze_command_for_approval(
+            command=command,
+            reason=reason,
+            chat_id=chat_id,
+            tool_call_id=tool_call_id,
+            include_llm=False,
+        )
+        static_is_safe = bool(analysis.get("static_is_safe", False))
+        static_critical = bool(analysis.get("static_critical", False))
+        mutation_detected = bool(analysis.get("mutation_detected", False))
+        deletion_detected = bool(analysis.get("deletion_detected", False))
+        safety_status = str(analysis.get("safety_status", "UNSAFE"))
+        risk_level = str(analysis.get("risk_level", "HIGH"))
+
+        CommandAuditTracker.record_event(
+            "command_reviewed",
+            chat_id=chat_id,
+            tool_call_id=tool_call_id,
+            command=command,
+            reason=reason,
+            safety_status=safety_status,
+            risk_level=risk_level,
+            mutation_detected=mutation_detected,
+            deletion_detected=deletion_detected,
+            reviewer_mode="deferred",
+            static_is_safe=static_is_safe,
+            static_reason=analysis.get("static_reason", ""),
+            static_write_detected=bool(analysis.get("static_write_detected", False)),
+            static_critical=static_critical,
+            unrestricted_mode=self.sandbox.allow_unrestricted_commands,
+        )
+
+        if self.sandbox.allow_unrestricted_commands:
+            can_auto_execute = (
+                static_is_safe
+                and not static_critical
+                and not mutation_detected
+                and not deletion_detected
+            )
+            if can_auto_execute:
+                result = await self.sandbox.execute_shell_command(
+                    command,
+                    reason,
+                    chat_id=chat_id,
+                    tool_call_id=tool_call_id,
+                )
+                return self._format_command_result(result)
+            pending_mode = "unrestricted_guardrail"
+        else:
+            pending_mode = "restricted_default"
+
+        CommandAuditTracker.record_event(
+            "command_pending_approval",
+            chat_id=chat_id,
+            tool_call_id=tool_call_id,
+            command=command,
+            reason=reason,
+            safety_status=safety_status,
+            risk_level=risk_level,
+            mutation_detected=mutation_detected,
+            deletion_detected=deletion_detected,
+            mode=pending_mode,
+        )
+        raise PendingApprovalError(
+            command=command,
+            safety_status=safety_status,
+            impact_analysis="",
+            tool_call_id=tool_call_id,
+            reason=reason,
+            risk_level=risk_level,
+            mutation_detected=mutation_detected,
+            deletion_detected=deletion_detected,
+        )
+
+    async def get_command_approval_details(
+        self,
+        command: str,
+        reason: str,
+        chat_id: int = 0,
+        tool_call_id: str = "",
+    ) -> dict[str, Any]:
+        """Return full approval details, including optional LLM analysis."""
+        analysis = await self.analyze_command_for_approval(
+            command=command,
+            reason=reason,
+            chat_id=chat_id,
+            tool_call_id=tool_call_id,
+            include_llm=True,
+        )
+        CommandAuditTracker.record_event(
+            "command_detail_requested",
+            chat_id=chat_id,
+            tool_call_id=tool_call_id,
+            command=command,
+            reason=reason,
+            safety_status=analysis.get("safety_status"),
+            risk_level=analysis.get("risk_level"),
+            mutation_detected=analysis.get("mutation_detected"),
+            deletion_detected=analysis.get("deletion_detected"),
+            reviewer_mode=analysis.get("reviewer_mode"),
+        )
+        return analysis
+
+    async def analyze_command_for_approval(
+        self,
+        command: str,
+        reason: str,
+        chat_id: int = 0,
+        tool_call_id: str = "",
+        include_llm: bool = False,
+    ) -> dict[str, Any]:
+        """Run static + optional LLM analysis for one command."""
         from chatdome.executor.validator import (
             has_write_intent,
             is_critical_command,
             validate_command,
         )
 
-        review_status = "UNSAFE"
-        review_risk_level = "HIGH"
-        review_mutation = True
-        review_deletion = False
-        review_impact = "AI Reviewer unavailable，已按保守策略处理。"
-        if self.llm:
+        static_check = validate_command(command, check_allowlist=False)
+        static_critical = is_critical_command(command)
+        static_write = has_write_intent(command)
+        static_delete = self._has_delete_intent(command)
+
+        if static_critical:
+            safety_status = "CRITICAL"
+            risk_level = "CRITICAL"
+        elif static_write or not static_check.is_safe:
+            safety_status = "UNSAFE"
+            risk_level = "HIGH"
+        else:
+            safety_status = "SAFE"
+            risk_level = "LOW"
+
+        mutation_detected = static_write
+        deletion_detected = static_delete
+        impact_analysis = "Static precheck only. Detailed LLM analysis available on demand."
+        reviewer_mode = "static_only"
+        reviewer_status = safety_status
+        reviewer_risk_level = risk_level
+
+        if include_llm and self.llm:
             from chatdome.agent.prompts import REVIEWER_SYSTEM_PROMPT
 
-            logger.info("Running AI Reviewer for shell command: %s", command)
+            logger.info("Running deferred AI reviewer for command details: %s", command)
             review = await self.llm.evaluate_command_safety(
                 command,
                 REVIEWER_SYSTEM_PROMPT,
                 chat_id=chat_id,
             )
-            review_status = str(review.get("safety_status", "UNSAFE")).strip().upper() or "UNSAFE"
-            if review_status not in {"SAFE", "UNSAFE", "CRITICAL"}:
-                review_status = "UNSAFE"
-            review_risk_level = str(review.get("risk_level", "HIGH")).strip().upper() or "HIGH"
-            if review_risk_level not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
-                review_risk_level = "HIGH"
-            review_mutation = bool(review.get("mutation_detected", review_status != "SAFE"))
-            review_deletion = bool(review.get("deletion_detected", False))
-            review_impact = str(review.get("impact_analysis", "")).strip() or "分析失败"
+            reviewer_mode = "llm"
+            reviewer_status = str(review.get("safety_status", "UNSAFE")).strip().upper() or "UNSAFE"
+            if reviewer_status not in {"SAFE", "UNSAFE", "CRITICAL"}:
+                reviewer_status = "UNSAFE"
+            reviewer_risk_level = str(review.get("risk_level", "HIGH")).strip().upper() or "HIGH"
+            if reviewer_risk_level not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+                reviewer_risk_level = "HIGH"
+            mutation_detected = mutation_detected or bool(
+                review.get("mutation_detected", reviewer_status != "SAFE")
+            )
+            deletion_detected = deletion_detected or bool(review.get("deletion_detected", False))
+            impact_analysis = str(review.get("impact_analysis", "")).strip() or "LLM analysis unavailable."
+            safety_status = reviewer_status
+            risk_level = reviewer_risk_level
 
-        static_check = validate_command(command, check_allowlist=False)
-        static_critical = is_critical_command(command)
-        static_write = has_write_intent(command)
-
-        mutation_detected = review_mutation or static_write
-        deletion_detected = review_deletion or ("删除" in (static_check.reason or ""))
-        safety_status = review_status
-        risk_level = review_risk_level
-
-        # LLM-first decision with static fail-safe escalation.
         if mutation_detected and safety_status == "SAFE":
             safety_status = "UNSAFE"
         if deletion_detected and risk_level in {"LOW", "MEDIUM"}:
@@ -191,115 +319,40 @@ class ToolDispatcher:
 
         static_signals: list[str] = []
         if static_write:
-            static_signals.append("检测到写入/状态变更意图")
+            static_signals.append("Detected potential write/state mutation intent.")
         if not static_check.is_safe and static_check.reason:
-            static_signals.append(static_check.reason)
+            static_signals.append(str(static_check.reason))
         if static_critical:
-            static_signals.append("命令匹配极端高危模式")
-
-        impact_analysis = review_impact
+            static_signals.append("Matched critical command pattern.")
+        if static_delete:
+            static_signals.append("Detected delete/destructive intent.")
         if static_signals:
-            impact_analysis = f"{review_impact}\n\n[静态护栏信号]\n- " + "\n- ".join(static_signals)
-
-        CommandAuditTracker.record_event(
-            "command_reviewed",
-            chat_id=chat_id,
-            tool_call_id=tool_call_id,
-            command=command,
-            reason=reason,
-            safety_status=safety_status,
-            risk_level=risk_level,
-            mutation_detected=mutation_detected,
-            deletion_detected=deletion_detected,
-            reviewer_status=review_status,
-            reviewer_risk_level=review_risk_level,
-            static_is_safe=static_check.is_safe,
-            static_reason=static_check.reason,
-            static_write_detected=static_write,
-            static_critical=static_critical,
-            unrestricted_mode=self.sandbox.allow_unrestricted_commands,
-        )
-
-        # Unrestricted mode auto-exec only for clearly low-risk read-only commands.
-        if self.sandbox.allow_unrestricted_commands:
-            can_auto_execute = (
-                safety_status == "SAFE"
-                and risk_level == "LOW"
-                and not mutation_detected
-                and not deletion_detected
-                and static_check.is_safe
-                and not static_critical
-            )
-            if can_auto_execute:
-                logger.info(
-                    "Unrestricted auto-execute (LLM SAFE+LOW, reason: %s): %s",
-                    reason,
-                    command,
-                )
-                result = await self.sandbox.execute_shell_command(
-                    command,
-                    reason,
-                    chat_id=chat_id,
-                    tool_call_id=tool_call_id,
-                )
-                return self._format_command_result(result)
-
-            CommandAuditTracker.record_event(
-                "command_pending_approval",
-                chat_id=chat_id,
-                tool_call_id=tool_call_id,
-                command=command,
-                reason=reason,
-                safety_status=safety_status,
-                risk_level=risk_level,
-                mutation_detected=mutation_detected,
-                deletion_detected=deletion_detected,
-                mode="unrestricted_guardrail",
-            )
-            raise PendingApprovalError(
-                command=command,
-                safety_status=safety_status,
-                impact_analysis=impact_analysis,
-                tool_call_id=tool_call_id,
-                reason=reason,
-                risk_level=risk_level,
-                mutation_detected=mutation_detected,
-                deletion_detected=deletion_detected,
+            impact_analysis = (
+                f"{impact_analysis}\n\n[Static guardrail signals]\n- "
+                + "\n- ".join(static_signals)
             )
 
-        # Restricted mode: every generated command requires approval.
-        if self.llm:
-            CommandAuditTracker.record_event(
-                "command_pending_approval",
-                chat_id=chat_id,
-                tool_call_id=tool_call_id,
-                command=command,
-                reason=reason,
-                safety_status=safety_status,
-                risk_level=risk_level,
-                mutation_detected=mutation_detected,
-                deletion_detected=deletion_detected,
-                mode="restricted_default",
-            )
-            raise PendingApprovalError(
-                command=command,
-                safety_status=safety_status,
-                impact_analysis=impact_analysis,
-                tool_call_id=tool_call_id,
-                reason=reason,
-                risk_level=risk_level,
-                mutation_detected=mutation_detected,
-                deletion_detected=deletion_detected,
-            )
-        
-        # 2. Fallback (should not be reached normally)
-        result = await self.sandbox.execute_shell_command(
-            command,
-            "LLM Generated",
-            chat_id=chat_id,
-            tool_call_id=tool_call_id,
-        )
-        return self._format_command_result(result)
+        return {
+            "safety_status": safety_status,
+            "risk_level": risk_level,
+            "mutation_detected": mutation_detected,
+            "deletion_detected": deletion_detected,
+            "impact_analysis": impact_analysis,
+            "reviewer_mode": reviewer_mode,
+            "reviewer_status": reviewer_status,
+            "reviewer_risk_level": reviewer_risk_level,
+            "static_is_safe": static_check.is_safe,
+            "static_reason": static_check.reason,
+            "static_write_detected": static_write,
+            "static_critical": static_critical,
+        }
+
+    @staticmethod
+    def _has_delete_intent(command: str) -> bool:
+        """Lightweight lexical detector for delete/destructive intent."""
+        text = f" {str(command or '').lower()} "
+        tokens = (" rm ", " rmdir ", " del ", " unlink ", " shred ", " wipe ")
+        return any(tok in text for tok in tokens)
 
     async def _handle_whois_lookup(self, args: dict[str, Any]) -> str:
         """Look up IP geolocation via ip-api.com."""

@@ -309,91 +309,29 @@ class TelegramBot:
 
     # ----- Interactive Approval -----
 
-    @staticmethod
-    def _escape_markdown(text: str) -> str:
-        """Escape special characters for Telegram Markdown (v1) parse mode."""
-        # Markdown v1 special chars: _ * ` [
-        for ch in ('\\', '`', '*', '_', '[', ']'):
-            text = text.replace(ch, f'\\{ch}')
-        return text
-
-    async def _send_approval_request(self, message, data: dict) -> None:
-        command = data.get("command", "")
-        safety = str(data.get("safety_status", "UNSAFE")).strip().upper()
-        impact = data.get("impact_analysis", "")
-        risk_level = str(data.get("risk_level", "HIGH")).strip().upper()
-        mutation_detected = bool(data.get("mutation_detected", False))
-        deletion_detected = bool(data.get("deletion_detected", False))
-        reason = data.get("reason", "未提供原因说明")
-        
-        # Escape dynamic content to prevent Markdown parse errors
-        escaped_reason = self._escape_markdown(reason)
-        escaped_impact = self._escape_markdown(impact)
-        if safety not in {"SAFE", "UNSAFE", "CRITICAL"}:
-            safety = "UNSAFE"
-        if risk_level not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
-            risk_level = "HIGH"
-        if mutation_detected and safety == "SAFE":
-            safety = "UNSAFE"
-        if deletion_detected and risk_level in {"LOW", "MEDIUM"}:
-            risk_level = "HIGH"
-        if safety == "CRITICAL":
-            risk_level = "CRITICAL"
-        
+    async def _send_approval_request(self, message, _data: dict) -> None:
         text = (
-            f"⚠️ *AI 尝试执行动态命令*\n"
-            f"`{command}`\n\n"
-            f"📋 *执行评估*\n"
-            f"• *意图*: {escaped_reason}\n"
-            f"• *影响*: {escaped_impact}\n\n"
+            "⚠️ 检测到需要审批的系统操作。\n"
+            "默认不展示命令细节。\n"
+            "你可以直接允许/拒绝，或先查看详细命令及影响分析。"
         )
-        
-        text += (
-            f"\n风险等级: {risk_level}"
-            f"\n检测到修改: {'是' if mutation_detected else '否'}"
-            f"\n检测到删除: {'是' if deletion_detected else '否'}\n"
-        )
-
-        reply_markup = None
-        if (
-            safety == "SAFE"
-            and risk_level == "LOW"
-            and not mutation_detected
-            and not deletion_detected
-        ):
-            text += "🟢 *风险定级*: 已评估为安全操作，等待您的最终确认。"
-            keyboard = [
-                [
-                    InlineKeyboardButton("✅ 批准并执行", callback_data="approve_cmd"),
-                    InlineKeyboardButton("❌ 拒绝", callback_data="reject_cmd"),
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-        elif safety == "CRITICAL" or risk_level == "CRITICAL":
-            text += (
-                "⛔ *风险定级*: 极端高危！此操作可能导致不可逆的数据丢失或系统损坏。\n"
-                "按钮已禁用，如您明确了解后果并执意执行，请回复指令： `/confirm`"
-            )
-            keyboard = [
-                [InlineKeyboardButton("❌ 拒绝", callback_data="reject_cmd")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-        else:
-            text += (
-                "🔴 *风险定级*: 高危操作！等待确认。\n"
-                "为防止误触，请点击下方拒绝。若您明确后果并执意执行，请回复指令： `/confirm`"
-            )
-            keyboard = [
-                [InlineKeyboardButton("❌ 拒绝", callback_data="reject_cmd")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ 允许", callback_data="approve_cmd"),
+                InlineKeyboardButton("✅ 本次任务允许", callback_data="approve_task_cmd"),
+            ],
+            [
+                InlineKeyboardButton("❌ 拒绝", callback_data="reject_cmd"),
+                InlineKeyboardButton("🔎 展示详细命令及影响分析", callback_data="show_cmd_details"),
+            ],
+        ]
         await self._reply_text(
             message,
             text,
             markup=MessageMarkup.PLAIN,
-            reply_markup=reply_markup,
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
+        return
 
     async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline keyboard button clicks."""
@@ -404,9 +342,41 @@ class TelegramBot:
             return
             
         chat_id = update.effective_chat.id
-        action = "APPROVE" if query.data == "approve_cmd" else "REJECT"
-        
-        # Remove buttons from the message
+        callback_data = query.data or ""
+
+        if callback_data == "show_cmd_details":
+            try:
+                details = await self.agent.get_pending_approval_details(chat_id)
+                if not details.get("ok"):
+                    await self._send_long_message(query.message, str(details.get("message", "No pending approval.")))
+                    return
+
+                analysis = details.get("analysis", {}) or {}
+                text = (
+                    "审批详情\n\n"
+                    f"命令: {details.get('command', '')}\n"
+                    f"意图: {details.get('reason', '')}\n"
+                    f"安全状态: {analysis.get('safety_status', 'UNSAFE')}\n"
+                    f"风险等级: {analysis.get('risk_level', 'HIGH')}\n"
+                    f"检测到修改: {bool(analysis.get('mutation_detected', False))}\n"
+                    f"检测到删除: {bool(analysis.get('deletion_detected', False))}\n"
+                    f"分析模式: {analysis.get('reviewer_mode', 'static_only')}\n\n"
+                    f"影响分析:\n{analysis.get('impact_analysis', '')}"
+                )
+                await self._send_long_message(query.message, text)
+                await self._send_approval_request(query.message, {})
+            except Exception as e:
+                await self._send_long_message(query.message, f"⚠️ 获取审批详情失败: {e}")
+            return
+
+        if callback_data == "approve_task_cmd":
+            action = "APPROVE_TASK"
+        elif callback_data == "approve_cmd":
+            action = "APPROVE"
+        else:
+            action = "REJECT"
+
+        # Remove buttons from the message for terminal decision actions.
         await query.edit_message_reply_markup(reply_markup=None)
         
         thinking_msg = await query.message.reply_text("🤔 处理中...")
@@ -417,7 +387,7 @@ class TelegramBot:
             except Exception:
                 pass
                 
-            if action == "APPROVE" and raw_result:
+            if action in {"APPROVE", "APPROVE_TASK"} and raw_result:
                 await self._send_long_message(query.message, f"⚙️ *真实沙箱执行结果*:\n```text\n{raw_result}\n```")
                 
             if final_response.startswith("__PENDING_APPROVAL__:"):

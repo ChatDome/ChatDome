@@ -96,13 +96,19 @@ class Agent:
 
         tool_call_id = session.pending_tool_call_id
         command = session.pending_command
+        normalized_action = (action or "").strip().upper()
+        if normalized_action not in {"APPROVE", "APPROVE_TASK", "REJECT"}:
+            normalized_action = "REJECT"
         followup_summary = self._summarize_pending_followups(session)
+        if normalized_action == "APPROVE_TASK":
+            session.task_auto_approve = True
 
         # Clear pending state before continuing the normal loop.
         session.clear_pending_state()
         self._persist_session(session)
 
-        if action == "REJECT":
+        if normalized_action == "REJECT":
+            session.task_auto_approve = False
             logger.info("User rejected command: %s", command)
             CommandAuditTracker.record_event(
                 "command_rejected",
@@ -126,7 +132,7 @@ class Agent:
                 chat_id=chat_id,
                 tool_call_id=tool_call_id,
                 command=command,
-                approval_action="APPROVE",
+                approval_action=normalized_action,
             )
             try:
                 # Bypass Reviewer, go straight to sandbox
@@ -151,6 +157,35 @@ class Agent:
 
         final_answer = await self._run_loop(chat_id, session)
         return raw_result, final_answer
+
+    async def get_pending_approval_details(self, chat_id: int) -> dict[str, Any]:
+        """
+        Return full details for the currently pending approval.
+
+        Safety analysis is computed lazily and cached in session state.
+        """
+        session = self.session_manager.get_or_create(chat_id)
+        if not session.pending_approval or not session.pending_command:
+            return {
+                "ok": False,
+                "message": "No pending command requires approval.",
+            }
+
+        if session.pending_analysis is None:
+            session.pending_analysis = await self.tool_dispatcher.get_command_approval_details(
+                command=session.pending_command,
+                reason=session.pending_reason or "",
+                chat_id=chat_id,
+                tool_call_id=session.pending_tool_call_id or "",
+            )
+            self._persist_session(session)
+
+        return {
+            "ok": True,
+            "command": session.pending_command,
+            "reason": session.pending_reason or "",
+            "analysis": session.pending_analysis,
+        }
 
     @staticmethod
     def _is_reject_intent(user_message: str) -> bool:
@@ -316,20 +351,39 @@ class Agent:
                         self._persist_session(session)
                         logger.debug("Tool result for %s: %s", tc.id, result[:200])
                     except PendingApprovalError as e:
+                        if session.task_auto_approve and e.command:
+                            logger.info("Task-scope auto-approval applied for command: %s", e.command)
+                            CommandAuditTracker.record_event(
+                                "command_auto_approved_task_scope",
+                                chat_id=chat_id,
+                                tool_call_id=tc.id,
+                                command=e.command,
+                            )
+                            try:
+                                res = await self.tool_dispatcher.sandbox.execute_shell_command(
+                                    e.command,
+                                    "Task Scope Approved",
+                                    chat_id=chat_id,
+                                    tool_call_id=tc.id,
+                                )
+                                session.add_tool_result(tc.id, self.tool_dispatcher._format_command_result(res))
+                            except Exception as ex:
+                                session.add_tool_result(tc.id, f"Command execution failed: {ex}")
+                            self._persist_session(session)
+                            continue
+
                         logger.info("Execution suspended for user approval: %s", tc.id)
                         session.pending_approval = True
                         session.pending_tool_call_id = e.tool_call_id
                         session.pending_command = e.command
+                        session.pending_reason = getattr(e, "reason", "")
+                        session.pending_analysis = None
                         session.pending_since = time.time()
                         session.pending_followups.clear()
                         payload = {
                             "command": e.command, 
-                            "safety_status": e.safety_status, 
-                            "impact_analysis": e.impact_analysis,
                             "reason": getattr(e, 'reason', ''),
-                            "risk_level": getattr(e, "risk_level", "HIGH"),
-                            "mutation_detected": bool(getattr(e, "mutation_detected", False)),
-                            "deletion_detected": bool(getattr(e, "deletion_detected", False)),
+                            "requires_detail_expansion": True,
                         }
                         self._persist_session(session)
                         return f"__PENDING_APPROVAL__:{json.dumps(payload)}"
@@ -347,6 +401,7 @@ class Agent:
                         echo_text = "\n\n---\n*🔍 Command Echo 模式*\n" + "\n".join(cmds)
                         final_content += echo_text
                         
+                session.task_auto_approve = False
                 session.add_assistant_message(final_content)
                 self._persist_session(session)
                 logger.info("Agent completed for chat_id=%d in %d rounds", chat_id, round_num)
@@ -364,6 +419,7 @@ class Agent:
                 echo_text = "\n\n---\n*🔍 Command Echo 模式*\n" + "\n".join(cmds)
                 max_rounds_msg += echo_text
                 
+        session.task_auto_approve = False
         session.add_assistant_message(max_rounds_msg)
         self._persist_session(session)
         logger.warning(
