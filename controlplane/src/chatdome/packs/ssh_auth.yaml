@@ -22,6 +22,27 @@ commands:
     timeout: 10
     tags: [ssh, bruteforce, credential_access]
 
+  ssh_failed_burst:
+    name: "SSH 短时失败爆发检测"
+    templates:
+      - platform: linux
+        command: >-
+          (if command -v journalctl >/dev/null 2>&1; then
+          journalctl --since '-{minutes} min' --no-pager 2>/dev/null | grep 'Failed password' || true;
+          elif [ -f /var/log/auth.log ]; then
+          grep 'Failed password' /var/log/auth.log | tail -{fallback_limit} || true;
+          elif [ -f /var/log/secure ]; then
+          grep 'Failed password' /var/log/secure | tail -{fallback_limit} || true;
+          fi)
+          | tail -{max_lines}
+        requires: [grep, tail]
+    params:
+      minutes: { type: int, default: 5, max: 120 }
+      fallback_limit: { type: int, default: 3000, max: 20000 }
+      max_lines: { type: int, default: 2000, max: 20000 }
+    timeout: 15
+    tags: [ssh, bruteforce, burst, credential_access]
+
   ssh_success_login:
     name: "SSH 成功登录记录"
     templates:

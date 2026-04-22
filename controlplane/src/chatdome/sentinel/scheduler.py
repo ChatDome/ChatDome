@@ -12,7 +12,7 @@ import asyncio
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Coroutine
 
@@ -76,6 +76,7 @@ class SentinelScheduler:
 
         self._history = AlertHistory(
             alerts_path=Path("chat_data/sentinel_alerts.jsonl"),
+            retention_days=config.alert_retention_days,
         )
 
         # Runtime state
@@ -211,7 +212,7 @@ class SentinelScheduler:
         Canonicalize a differential line to suppress noisy fields.
 
         - ssh_bruteforce: keep only source IP (drop changing count prefix)
-        - open_ports: keep local listen endpoint (drop queue/process noise)
+        - open_ports: keep listen endpoint + process owners (name:pid)
         """
         text = line.strip()
         if not text:
@@ -226,15 +227,49 @@ class SentinelScheduler:
             return parts[-1] if parts else ""
 
         if check_key == "open_ports":
-            # Extract first host:port-like endpoint (e.g. 0.0.0.0:22 / [::]:443).
+            endpoint = ""
             for token in text.split():
                 if token.endswith(":*"):
                     continue
                 if re.search(r":\d+$", token):
-                    return token
-            return text
+                    endpoint = token
+                    break
+            if not endpoint:
+                return ""
+
+            owners = SentinelScheduler._extract_port_owners(text)
+            if not owners:
+                return f"{endpoint} (unknown:unknown)"
+            return f"{endpoint} ({','.join(owners)})"
 
         return text
+
+    @staticmethod
+    def _extract_port_owners(line: str) -> list[str]:
+        """
+        Extract process owners as stable `name:pid` items.
+
+        Supports:
+        - ss output: users:(("sshd",pid=123,fd=3),(...))
+        - netstat output: ... LISTEN 123/sshd
+        """
+        owners: set[tuple[str, str]] = set()
+
+        # ss style owners
+        for name, pid in re.findall(r'"([^"]+)"\s*,pid=(\d+)', line):
+            n = (name or "").strip()
+            p = (pid or "").strip()
+            if n and p:
+                owners.add((n, p))
+
+        # netstat style owners
+        for pid, name in re.findall(r"\b(\d+)/([^\s/]+)\b", line):
+            n = (name or "").strip()
+            p = (pid or "").strip()
+            if n and p and n != "-" and p != "-":
+                owners.add((n, p))
+
+        return [f"{name}:{pid}" for name, pid in sorted(owners)]
 
     def _normalize_lines(self, check_key: str, output: str) -> set[str]:
         """Normalize output into a unique canonical line set for differential mode."""
@@ -415,16 +450,25 @@ class SentinelScheduler:
 
         # Differential strategy:
         # - ssh_bruteforce: alert only when NEW source IPs appear.
+        # - ssh_success_login: alert only when NEW successful-login entries appear.
         # - added_count rules: evaluate against added delta lines.
         # - others: evaluate against the full snapshot output.
-        if check.mode == "differential" and check_key == "ssh_bruteforce":
+        if check.mode == "differential" and check_key in {"ssh_bruteforce", "ssh_success_login"}:
             added_ip_count = len(added_lines)
             eval_result = EvalResult(
                 triggered=added_ip_count > 0,
                 current_value=added_ip_count,
-                description="new ssh source ip count > 0",
+                description=(
+                    "new ssh source ip count > 0"
+                    if check_key == "ssh_bruteforce"
+                    else "new ssh successful login entry count > 0"
+                ),
             )
-            rule_summary = "new ssh source ip > 0 (added-only differential alert)"
+            rule_summary = (
+                "new ssh source ip > 0 (added-only differential alert)"
+                if check_key == "ssh_bruteforce"
+                else "new ssh successful login entry > 0 (added-only differential alert)"
+            )
         elif check.mode == "differential" and check.rule.type == "added_count":
             added_output = "\n".join(sorted(added_lines))
             eval_result = evaluate(check.rule, added_output)
@@ -436,16 +480,17 @@ class SentinelScheduler:
         if not eval_result.triggered:
             return f"✅ {check.name}: 正常 (当前值={eval_result.current_value}, 规则={rule_summary})"
 
-        if check.mode == "differential" and check_key == "ssh_bruteforce":
+        if check.mode == "differential" and check_key in {"ssh_bruteforce", "ssh_success_login"}:
             if not added_lines:
                 return (
-                    f"✅ {check.name}: anomaly persists but no new ssh source ip "
+                    f"✅ {check.name}: anomaly persists but no new ssh delta entry "
                     f"(value={eval_result.current_value}, rule={rule_summary})"
                 )
-            # SSH differential policy: alert on newly seen source IPs only.
+            # SSH differential policy: alert on newly seen added entries only.
             removed_lines = set()
+            alert_output = "\n".join(sorted(added_lines))
 
-        if check.mode == "differential" and check_key != "ssh_bruteforce":
+        if check.mode == "differential" and check_key not in {"ssh_bruteforce", "ssh_success_login"}:
             if not added_lines and not removed_lines:
                 return f"✅ {check.name}: 异常持续但无变化 (当前值={eval_result.current_value}, 规则={rule_summary})"
             alert_output = self._build_diff_payload(added_lines, removed_lines)
@@ -465,7 +510,7 @@ class SentinelScheduler:
                 cooldown_override=check.cooldown,
             )
 
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
         label = severity_label(check.severity)
 
         # Step 4: Record to history

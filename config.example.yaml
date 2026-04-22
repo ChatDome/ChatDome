@@ -77,6 +77,7 @@ chatdome:
 
     # 告警推送目标（空 = 使用 telegram.allowed_chat_ids）
     alert_chat_ids: []
+    alert_retention_days: 30             # sentinel_alerts.jsonl 按天保留窗口
 
     # 推/拉分离 — 推送策略
     push_min_severity: 7                   # 数值 ≥ 7 (high) 才主动推送 Telegram
@@ -107,12 +108,55 @@ chatdome:
         check_id: ssh_bruteforce
         interval: 300
         mode: differential
-        severity: 7                        # high
+        severity: 6                        # medium（保留检查，不主动推送）
         rule:
           type: added_count
           operator: ">"
           threshold: 0
         cooldown: 600
+
+      - name: "SSH 失败爆发（3分钟）"
+        check_id: ssh_failed_burst
+        interval: 60
+        mode: snapshot
+        args:
+          minutes: 3
+          fallback_limit: 1000
+          max_lines: 500
+        severity: 8                        # high
+        rule:
+          type: line_count
+          operator: ">="
+          threshold: 10                    # 3 分钟内失败 >= 10 次触发
+        cooldown: 120
+
+      - name: "SSH 慢速失败攻击（1小时）"
+        check_id: ssh_failed_burst
+        interval: 300
+        mode: snapshot
+        args:
+          minutes: 60
+          fallback_limit: 5000
+          max_lines: 1000
+        severity: 7                        # high
+        rule:
+          type: line_count
+          operator: ">="
+          threshold: 15                    # 1 小时内失败 >= 15 次触发
+        cooldown: 600
+
+      - name: "SSH 成功登录告警"
+        check_id: ssh_success_login
+        interval: 60
+        mode: differential
+        args:
+          limit: 200
+        severity: 9                        # critical
+        rule:
+          type: added_count
+          operator: ">"
+          threshold: 0
+        cooldown: 60
 
       - name: "磁盘使用率"
         check_id: disk_usage

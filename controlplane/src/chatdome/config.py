@@ -14,6 +14,7 @@ Environment variables:
   CHATDOME_ALLOWED_CHAT_IDS – Comma-separated chat IDs (optional)
   CHATDOME_PENDING_APPROVAL_TIMEOUT – Pending approval timeout in seconds (optional)
   CHATDOME_PERSISTED_SESSION_TTL – Persisted session retention in seconds (optional)
+  CHATDOME_SENTINEL_ALERT_RETENTION_DAYS – Sentinel alert log retention days (optional)
   CHATDOME_CONFIG           – Path to config.yaml (optional)
 """
 
@@ -71,6 +72,7 @@ class SentinelConfig:
     """Sentinel 7×24 security monitoring configuration."""
     enabled: bool = False
     alert_chat_ids: list[int] = field(default_factory=list)
+    alert_retention_days: int = 30                              # sentinel_alerts.jsonl retention window
     push_min_severity: int = 7                                  # ≥ 7 (high) pushes to Telegram
     builtin_packs: list[str] = field(default_factory=lambda: [
         "ssh_auth", "network", "system_resources", "processes_services", "logs",
@@ -235,6 +237,24 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     sentinel_enabled_env = os.environ.get("CHATDOME_SENTINEL_ENABLED", "")
     if sentinel_enabled_env:
         config.sentinel.enabled = sentinel_enabled_env.lower() in ("true", "1", "yes", "on")
+
+    # Optional: Sentinel alert retention days
+    sentinel_retention_env = os.environ.get("CHATDOME_SENTINEL_ALERT_RETENTION_DAYS", "")
+    if sentinel_retention_env:
+        try:
+            parsed_days = int(sentinel_retention_env)
+            if parsed_days > 0:
+                config.sentinel.alert_retention_days = parsed_days
+            else:
+                logger.warning(
+                    "CHATDOME_SENTINEL_ALERT_RETENTION_DAYS must be > 0, ignored: %s",
+                    sentinel_retention_env,
+                )
+        except ValueError:
+            logger.warning(
+                "Invalid CHATDOME_SENTINEL_ALERT_RETENTION_DAYS ignored: %s",
+                sentinel_retention_env,
+            )
 
     # Actionable guardrail: enabled sentinel without checks is a no-op.
     if config.sentinel.enabled and not config.sentinel.checks:
