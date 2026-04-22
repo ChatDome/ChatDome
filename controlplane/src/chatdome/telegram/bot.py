@@ -7,6 +7,7 @@ Routes messages through authentication → AI Agent → reply.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -322,7 +323,7 @@ class TelegramBot:
             ],
             [
                 InlineKeyboardButton("❌ 拒绝", callback_data="reject_cmd"),
-                InlineKeyboardButton("🔎 展示详细命令及影响分析", callback_data="show_cmd_details"),
+                InlineKeyboardButton("🔎 详细命令", callback_data="show_cmd_details"),
             ],
         ]
         await self._reply_text(
@@ -336,67 +337,106 @@ class TelegramBot:
     async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline keyboard button clicks."""
         query = update.callback_query
-        await query.answer()
-        
-        if not self._check_auth(update):
+        if query is None:
             return
-            
-        chat_id = update.effective_chat.id
-        callback_data = query.data or ""
 
-        if callback_data == "show_cmd_details":
-            try:
-                details = await self.agent.get_pending_approval_details(chat_id)
+        try:
+            await query.answer()
+        except Exception:
+            logger.exception("Failed to answer callback query")
+
+        try:
+            if not self._check_auth(update):
+                return
+
+            chat = update.effective_chat
+            if chat is None or query.message is None:
+                return
+
+            chat_id = chat.id
+            callback_data = query.data or ""
+
+            if callback_data == "show_cmd_details":
+                await self._send_long_message(query.message, "正在分析命令影响，请稍候...")
+                try:
+                    details = await asyncio.wait_for(
+                        self.agent.get_pending_approval_details(chat_id),
+                        timeout=25,
+                    )
+                except TimeoutError:
+                    await self._send_long_message(
+                        query.message,
+                        "Approval detail request timed out. Command is still pending. Please click allow/reject again or send /confirm.",
+                    )
+                    return
+                except Exception as e:
+                    await self._send_long_message(query.message, f"Failed to load approval details: {e}")
+                    return
+
                 if not details.get("ok"):
                     await self._send_long_message(query.message, str(details.get("message", "No pending approval.")))
                     return
 
                 analysis = details.get("analysis", {}) or {}
                 text = (
-                    "审批详情\n\n"
-                    f"命令: {details.get('command', '')}\n"
-                    f"意图: {details.get('reason', '')}\n"
-                    f"安全状态: {analysis.get('safety_status', 'UNSAFE')}\n"
-                    f"风险等级: {analysis.get('risk_level', 'HIGH')}\n"
-                    f"检测到修改: {bool(analysis.get('mutation_detected', False))}\n"
-                    f"检测到删除: {bool(analysis.get('deletion_detected', False))}\n"
-                    f"分析模式: {analysis.get('reviewer_mode', 'static_only')}\n\n"
-                    f"影响分析:\n{analysis.get('impact_analysis', '')}"
+                    "Approval details\n\n"
+                    f"Command: {details.get('command', '')}\n"
+                    f"Intent: {details.get('reason', '')}\n"
+                    f"Safety status: {analysis.get('safety_status', 'UNSAFE')}\n"
+                    f"Risk level: {analysis.get('risk_level', 'HIGH')}\n"
+                    f"Mutation detected: {bool(analysis.get('mutation_detected', False))}\n"
+                    f"Deletion detected: {bool(analysis.get('deletion_detected', False))}\n"
+                    f"Reviewer mode: {analysis.get('reviewer_mode', 'static_only')}\n\n"
+                    f"Impact analysis:\n{analysis.get('impact_analysis', '')}"
                 )
                 await self._send_long_message(query.message, text)
                 await self._send_approval_request(query.message, {})
-            except Exception as e:
-                await self._send_long_message(query.message, f"⚠️ 获取审批详情失败: {e}")
-            return
+                return
 
-        if callback_data == "approve_task_cmd":
-            action = "APPROVE_TASK"
-        elif callback_data == "approve_cmd":
-            action = "APPROVE"
-        else:
-            action = "REJECT"
+            if callback_data == "approve_task_cmd":
+                action = "APPROVE_TASK"
+            elif callback_data == "approve_cmd":
+                action = "APPROVE"
+            elif callback_data == "reject_cmd":
+                action = "REJECT"
+            else:
+                await self._send_long_message(query.message, "Unknown action button. Please retry.")
+                return
 
-        # Remove buttons from the message for terminal decision actions.
-        await query.edit_message_reply_markup(reply_markup=None)
-        
-        thinking_msg = await query.message.reply_text("🤔 处理中...")
-        try:
-            raw_result, final_response = await self.agent.resume_session(chat_id, action)
+            # Remove buttons from the message for terminal decision actions.
             try:
-                await thinking_msg.delete()
+                await query.edit_message_reply_markup(reply_markup=None)
             except Exception:
-                pass
-                
+                logger.exception("Failed to edit callback message markup")
+
+            thinking_msg = await query.message.reply_text("Processing...")
+            try:
+                raw_result, final_response = await asyncio.wait_for(
+                    self.agent.resume_session(chat_id, action),
+                    timeout=90,
+                )
+            finally:
+                try:
+                    await thinking_msg.delete()
+                except Exception:
+                    pass
+
             if action in {"APPROVE", "APPROVE_TASK"} and raw_result:
-                await self._send_long_message(query.message, f"⚙️ *真实沙箱执行结果*:\n```text\n{raw_result}\n```")
-                
+                await self._send_long_message(query.message, f"Execution result:\n```text\n{raw_result}\n```")
+
             if final_response.startswith("__PENDING_APPROVAL__:"):
                 data = json.loads(final_response.split(":", 1)[1])
                 await self._send_approval_request(query.message, data)
             else:
                 await self._send_long_message(query.message, final_response)
+        except TimeoutError:
+            await self._send_long_message(
+                query.message,
+                "Approval action timed out. Command is still pending. Please retry or send /confirm.",
+            )
         except Exception as e:
-            await query.message.reply_text(f"⚠️ 恢复会话异常: {e}")
+            logger.exception("Callback query handling failed")
+            await query.message.reply_text(f"Resume session failed: {e}")
 
     async def _handle_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /confirm command for high-risk executions."""
