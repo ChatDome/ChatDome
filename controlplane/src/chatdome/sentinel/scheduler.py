@@ -123,6 +123,7 @@ class SentinelScheduler:
         check_timers: dict[str, float] = {}
         for check in self._checks:
             check_timers[check.check_id or check.name] = 0.0
+        checks_seen_in_round: set[str] = set()
 
         tick_interval = 10
 
@@ -137,7 +138,6 @@ class SentinelScheduler:
         try:
             while self._running:
                 now = time.monotonic()
-                checks_executed = 0
 
                 for check in self._checks:
                     key = check.check_id or check.name
@@ -146,7 +146,6 @@ class SentinelScheduler:
 
                     try:
                         result_text = await self._run_single_check(check)
-                        checks_executed += 1
                         if self._round_count == 0 and result_text.startswith("BASELINE_INIT:"):
                             note = f"- {result_text[len('BASELINE_INIT: '):]}"
                             if note not in self._baseline_notes:
@@ -155,12 +154,16 @@ class SentinelScheduler:
                         logger.exception("Check failed: %s", check.name)
 
                     check_timers[key] = now + check.interval
+                    # Count this check as seen even when execution fails, to avoid
+                    # getting stuck in cold-start forever due to one bad check.
+                    checks_seen_in_round.add(key)
 
-                if checks_executed > 0 and checks_executed >= len(self._checks):
+                if len(checks_seen_in_round) >= len(self._checks):
                     self._round_count += 1
                     self._suppressor.complete_round()
                     if self._round_count == 1:
                         await self._send_baseline_summary_if_needed()
+                    checks_seen_in_round.clear()
 
                 await asyncio.sleep(tick_interval)
 

@@ -152,6 +152,22 @@ chatdome:
           operator: ">"
           threshold: 0
 
+      - name: "SSH 异常时段成功登录告警"
+        check_id: ssh_success_login_offhours
+        interval: 60
+        mode: differential
+        args:
+          since_hours: 24
+          fallback_limit: 3000
+          work_start_hour: 8               # 正常时段起始（含）
+          work_end_hour: 23                # 正常时段结束（不含）
+          limit: 200
+        severity: 8                        # high
+        rule:
+          type: added_count
+          operator: ">"
+          threshold: 0
+
       - name: "磁盘使用率"
         check_id: disk_usage
         interval: 600

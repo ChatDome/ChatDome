@@ -48,17 +48,70 @@ commands:
     templates:
       - platform: linux
         command: >-
-          (if [ -f /var/log/auth.log ]; then
-          awk '/Accepted/ {print $1, $2, $3, $9, $11}' /var/log/auth.log;
+          (if command -v journalctl >/dev/null 2>&1; then
+          journalctl -u ssh -u sshd --since '-24 hours' --no-pager 2>/dev/null
+          | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true;
+          elif [ -f /var/log/auth.log ]; then
+          grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' /var/log/auth.log || true;
           elif [ -f /var/log/secure ]; then
-          awk '/Accepted/ {print $1, $2, $3, $9, $11}' /var/log/secure;
+          grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' /var/log/secure || true;
           else echo 'No SSH auth log found'; fi)
+          | awk '{
+              user=""; ip="";
+              for (i=1; i<=NF; i++) {
+                if ($i=="for" && (i+1)<=NF) user=$(i+1);
+                if ($i=="from" && (i+1)<=NF) ip=$(i+1);
+              }
+              if (user!="" && ip!="") print $1, $2, $3, user, ip;
+              else print $0;
+            }'
           | tail -{limit}
-        requires: [awk, tail]
+        requires: [grep, awk, tail]
     params:
       limit: { type: int, default: 20, max: 100 }
     timeout: 10
     tags: [ssh, login, initial_access]
+
+  ssh_success_login_offhours:
+    name: "SSH 异常时段成功登录"
+    templates:
+      - platform: linux
+        command: >-
+          (if command -v journalctl >/dev/null 2>&1; then
+          journalctl -u ssh -u sshd --since '-{since_hours} hours' --no-pager 2>/dev/null
+          | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true;
+          elif [ -f /var/log/auth.log ]; then
+          tail -{fallback_limit} /var/log/auth.log
+          | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true;
+          elif [ -f /var/log/secure ]; then
+          tail -{fallback_limit} /var/log/secure
+          | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true;
+          else echo 'No SSH auth log found'; fi)
+          | awk -v start={work_start_hour} -v end={work_end_hour} '{
+              split($3, t, ":");
+              h = t[1] + 0;
+              # abnormal = outside [start, end)
+              if (h < start || h >= end) {
+                method=""; user=""; ip="";
+                for (i=1; i<=NF; i++) {
+                  if ($i=="Accepted" && (i+1)<=NF) method=$(i+1);
+                  if ($i=="for" && (i+1)<=NF) user=$(i+1);
+                  if ($i=="from" && (i+1)<=NF) ip=$(i+1);
+                }
+                if (user!="" && ip!="") print $1, $2, $3, method, user, ip;
+                else print $0;
+              }
+            }'
+          | tail -{limit}
+        requires: [grep, awk, tail]
+    params:
+      since_hours: { type: int, default: 24, max: 168 }
+      fallback_limit: { type: int, default: 3000, max: 20000 }
+      work_start_hour: { type: int, default: 8, max: 23 }
+      work_end_hour: { type: int, default: 23, max: 24 }
+      limit: { type: int, default: 200, max: 5000 }
+    timeout: 15
+    tags: [ssh, login, offhours, anomaly_detection]
 
   failed_sudo:
     name: "sudo 失败记录"
