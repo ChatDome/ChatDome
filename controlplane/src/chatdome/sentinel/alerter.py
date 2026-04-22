@@ -32,13 +32,26 @@ class AlertEvent:
     raw_output: str
     pushed: bool
     suppressed: bool
-    suppression_reason: str = ""
+    action_reason: str = ""
     alert_state: str = ""
     previous_state: str = ""
     fingerprint: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        # Backward compatibility for existing jq/scripts that still read
+        # `suppression_reason`.
+        data["suppression_reason"] = self.action_reason
+        return data
+
+    @property
+    def suppression_reason(self) -> str:
+        """Backward-compatible alias for legacy field name."""
+        return self.action_reason
+
+    @suppression_reason.setter
+    def suppression_reason(self, value: str) -> None:
+        self.action_reason = value
 
 
 class AlertHistory:

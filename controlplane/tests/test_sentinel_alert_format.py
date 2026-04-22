@@ -17,7 +17,7 @@ class AlertFormatTests(unittest.TestCase):
             raw_output="1.2.3.4",
             pushed=True,
             suppressed=False,
-            suppression_reason="",
+            action_reason="",
             alert_state=state,
             previous_state=previous,
             fingerprint=fingerprint,

@@ -241,7 +241,7 @@ COMMAND_REGISTRY: dict[str, dict[str, Any]] = {
         "params": {},
         "timeout": 10,
         "templates": {
-            "linux": [{"template": "df -h", "requires": ["df"]}],
+            "linux": [{"template": "df -hT | awk 'NR==1 || ($2 != \"tmpfs\" && $2 != \"devtmpfs\" && $2 != \"squashfs\")'", "requires": ["df", "awk"]}],
             "darwin": [{"template": "df -h", "requires": ["df"]}],
             "windows": [
                 {

@@ -9,7 +9,7 @@ commands:
     name: "磁盘使用"
     templates:
       - platform: linux
-        command: "df -h"
+        command: "df -hT | awk 'NR==1 || ($2 != \"tmpfs\" && $2 != \"devtmpfs\" && $2 != \"squashfs\")'"
         requires: [df]
     params: {}
     timeout: 10
