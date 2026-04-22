@@ -101,7 +101,6 @@ class CheckDefinition:
     # Alert settings
     severity: int = 5                   # 1-10 numeric level
     rule: RuleDefinition | None = None
-    cooldown: int | None = None         # Override default_cooldown
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> CheckDefinition:
@@ -116,7 +115,6 @@ class CheckDefinition:
             mode=raw.get("mode", "snapshot"),
             severity=int(raw.get("severity", 5)),
             rule=RuleDefinition.from_dict(raw.get("rule")),
-            cooldown=raw.get("cooldown"),
         )
 
 

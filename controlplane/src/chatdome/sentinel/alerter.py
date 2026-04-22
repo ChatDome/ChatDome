@@ -1,10 +1,4 @@
-"""
-Sentinel Alerter — alert formatting, history, and Telegram push.
-
-Implements Push/Pull separation:
-  - Push: severity >= push_min_severity → Telegram message
-  - Pull: all alerts → recorded in history, queryable via /sentinel_status
-"""
+"""Sentinel alert formatting, history storage, and status rendering."""
 
 from __future__ import annotations
 
@@ -13,19 +7,15 @@ import json
 import logging
 import time
 from collections import deque
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from chatdome.sentinel.checks import severity_emoji, severity_label
+from chatdome.sentinel.checks import severity_emoji
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Alert event
-# ---------------------------------------------------------------------------
 
 @dataclass
 class AlertEvent:
@@ -43,23 +33,16 @@ class AlertEvent:
     pushed: bool
     suppressed: bool
     suppression_reason: str = ""
+    alert_state: str = ""
+    previous_state: str = ""
+    fingerprint: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-# ---------------------------------------------------------------------------
-# Alert History
-# ---------------------------------------------------------------------------
-
 class AlertHistory:
-    """
-    In-memory alert history with JSONL persistence.
-
-    Keeps the most recent ``max_items`` alerts in memory.
-    All alerts are appended to ``alerts_path`` for audit, and
-    old records are compacted by date retention policy.
-    """
+    """In-memory alert history with JSONL persistence."""
 
     def __init__(
         self,
@@ -78,26 +61,19 @@ class AlertHistory:
             self._maybe_cleanup(force=True)
 
     def record(self, event: AlertEvent) -> None:
-        """Record an alert event."""
         self._history.append(event)
         if self._alerts_path:
             try:
-                with open(self._alerts_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+                with open(self._alerts_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
             except OSError:
                 logger.exception("Failed to write alert to %s", self._alerts_path)
             self._maybe_cleanup()
 
     def recent(self, limit: int = 20) -> list[AlertEvent]:
-        """Get most recent alerts."""
         return list(self._history)[-limit:]
 
     def cleanup_old_records(self, now: datetime | None = None) -> int:
-        """
-        Compact sentinel_alerts.jsonl by retention date.
-
-        Returns the number of removed records.
-        """
         if self._alerts_path is None or not self._alerts_path.exists():
             return 0
 
@@ -117,7 +93,6 @@ class AlertHistory:
                     try:
                         record = json.loads(line)
                     except json.JSONDecodeError:
-                        # Keep malformed historical line to avoid data loss.
                         keep = True
                     else:
                         record_date = self._extract_event_date(record)
@@ -157,8 +132,7 @@ class AlertHistory:
     @staticmethod
     def _extract_event_date(record: dict[str, Any]):
         for key in ("timestamp", "timestamp_iso"):
-            value = record.get(key)
-            parsed = AlertHistory._parse_event_date_value(value)
+            parsed = AlertHistory._parse_event_date_value(record.get(key))
             if parsed is not None:
                 return parsed
         return None
@@ -192,70 +166,82 @@ class AlertHistory:
             return None
 
     def stats_24h(self) -> dict[str, int]:
-        """Count alerts by severity label in last 24h."""
-        cutoff = datetime.now(timezone.utc).isoformat()[:10]  # today's date
+        cutoff = datetime.now(timezone.utc).isoformat()[:10]
         counts: dict[str, int] = {
-            "emergency": 0, "critical": 0, "high": 0,
-            "medium": 0, "low": 0, "info": 0,
+            "emergency": 0,
+            "critical": 0,
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "info": 0,
         }
         pushed_count = 0
+
         for event in self._history:
             if event.timestamp[:10] >= cutoff[:10]:
-                label = event.severity_label
-                if label in counts:
-                    counts[label] += 1
+                if event.severity_label in counts:
+                    counts[event.severity_label] += 1
                 if event.pushed:
                     pushed_count += 1
+
         return {**counts, "_pushed": pushed_count}
 
 
-# ---------------------------------------------------------------------------
-# Alert Formatter
-# ---------------------------------------------------------------------------
+def _state_card(state: str) -> dict[str, str]:
+    """Default interpretation and suggestion per state."""
+    cards: dict[str, dict[str, str]] = {
+        "NEW": {
+            "label": "新威胁首次出现",
+            "risk": "中",
+            "suggestion": "先确认是否为已知变更或可信来源，再决定是否封禁/隔离。",
+            "next_watch": "关注 10 分钟内是否继续出现同类异常，决定是否进入升级态。",
+        },
+        "ESCALATED_L1": {
+            "label": "一级升级",
+            "risk": "中-高",
+            "suggestion": "开始限制可疑来源（如临时封禁 IP/端口），并收集相关日志证据。",
+            "next_watch": "关注 20 分钟窗口内异常是否继续增多，判断是否升级到 L2。",
+        },
+        "ESCALATED_L2": {
+            "label": "二级升级",
+            "risk": "高",
+            "suggestion": "执行强化处置：收紧访问策略、启用更严格审计、准备应急隔离。",
+            "next_watch": "关注 30 分钟窗口内是否达到高强度持续异常，可能升级到 L3。",
+        },
+        "ESCALATED_L3": {
+            "label": "三级升级",
+            "risk": "严重",
+            "suggestion": "按高危事件流程处理：立即隔离受影响面、保留现场、进行应急响应。",
+            "next_watch": "持续监控关键指标，直至进入观察期并确认威胁收敛。",
+        },
+        "RECOVERED_CANDIDATE": {
+            "label": "进入观察期",
+            "risk": "中（待确认）",
+            "suggestion": "暂不放松防护，保持当前拦截与审计策略，验证是否真正恢复。",
+            "next_watch": "观察期内若再次出现异常，将回弹到 ESCALATED_L1。",
+        },
+        "RECOVERED": {
+            "label": "观察期通过，威胁归档",
+            "risk": "低",
+            "suggestion": "归档本次处置记录，评估是否需要固化长期防护策略。",
+            "next_watch": "后续若同类异常再次出现，将按新一轮威胁重新进入状态机。",
+        },
+    }
+    return cards.get(
+        state,
+        {
+            "label": "状态更新",
+            "risk": "未知",
+            "suggestion": "请结合原始日志和上下文做人工复核。",
+            "next_watch": "继续观察后续是否出现新的状态迁移。",
+        },
+    )
+
 
 def format_alert_message(event: AlertEvent) -> str:
-    """Format a single alert for Telegram push."""
+    """Format one alert message for Telegram push."""
     emoji = severity_emoji(event.severity)
     label = event.severity_label.upper()
-
-    if event.check_id == "ssh_bruteforce":
-        new_attack_ips = _extract_ip_list(event.raw_output)
-        lines = [
-            f"{emoji} [{label}] {event.check_name}",
-            "",
-            f"检查项: {event.check_id}",
-            f"时间: {event.timestamp}",
-            "新增攻击IP:",
-        ]
-        if new_attack_ips:
-            lines.extend([f"- {ip}" for ip in new_attack_ips[:80]])
-            if len(new_attack_ips) > 80:
-                lines.append(f"... (+{len(new_attack_ips) - 80} more)")
-        else:
-            lines.append("- (未解析到有效 IP)")
-        return "\n".join(lines)
-
-    if event.check_id == "open_ports":
-        added_ports, removed_ports = _extract_diff_items(event.raw_output)
-        lines = [
-            f"{emoji} [{label}] {event.check_name}",
-            "",
-            f"检查项: {event.check_id}",
-            f"时间: {event.timestamp}",
-            f"变化摘要: 新增 {len(added_ports)}，减少 {len(removed_ports)}",
-            "端口变化:",
-        ]
-        if added_ports or removed_ports:
-            shown_added = added_ports[:80]
-            shown_removed = removed_ports[:80]
-            lines.extend([f"+ {item}" for item in shown_added])
-            lines.extend([f"- {item}" for item in shown_removed])
-            hidden = (len(added_ports) - len(shown_added)) + (len(removed_ports) - len(shown_removed))
-            if hidden > 0:
-                lines.append(f"... (+{hidden} more)")
-        else:
-            lines.append("- (无变化项)")
-        return "\n".join(lines)
 
     mode_label = "差异巡检" if event.mode == "differential" else "快照巡检"
     if event.current_value is None:
@@ -271,27 +257,44 @@ def format_alert_message(event: AlertEvent) -> str:
         f"检查项: {event.check_id}",
         f"巡检模式: {mode_label}",
         f"时间: {event.timestamp}",
-        f"规则阈值: {event.rule}",
         f"当前值: {current_value_text}",
     ]
 
-    # Truncate raw output for readability
-    raw = event.raw_output.strip()
+    if event.alert_state:
+        transition = (
+            f"{event.previous_state} -> {event.alert_state}"
+            if event.previous_state and event.previous_state != event.alert_state
+            else event.alert_state
+        )
+        card = _state_card(event.alert_state)
+
+        lines.extend(
+            [
+                "",
+                "状态告警卡片",
+                f"- 状态: {card['label']} ({transition})",
+                f"- 依据: {event.rule}",
+                f"- 风险: {card['risk']}",
+                f"- 建议: {card['suggestion']}",
+                f"- 下一观察点: {card['next_watch']}",
+            ]
+        )
+
+        if event.fingerprint:
+            lines.append(f"- 指纹: {event.fingerprint}")
+
+    raw = (event.raw_output or "").strip()
     if raw:
         if len(raw) > 800:
             raw = raw[:800] + "\n... (已截断)"
-        lines.append("")
-        lines.append("原始数据:")
-        lines.append(raw)
+        lines.extend(["", "原始数据:", raw])
 
-    lines.append("")
-    lines.append("💡 回复任意消息可进入对话模式，获取 AI 详细分析。")
-
+    lines.extend(["", "提示: 调试阶段会推送每次状态变化，便于评估状态机与阈值配置。"])
     return "\n".join(lines)
 
 
 def _extract_ip_list(raw_output: str) -> list[str]:
-    """Extract unique IPv4/IPv6 tokens from free-form raw output."""
+    """Extract unique IPv4/IPv6 tokens from free-form output."""
     ips: list[str] = []
     seen: set[str] = set()
 
@@ -319,7 +322,6 @@ def _extract_ip_list(raw_output: str) -> list[str]:
 
 
 def _extract_diff_items(raw_output: str) -> tuple[list[str], list[str]]:
-    """Extract +added/-removed items from differential payload text."""
     added: list[str] = []
     removed: list[str] = []
 
@@ -340,57 +342,33 @@ def _extract_diff_items(raw_output: str) -> tuple[list[str], list[str]]:
 
 
 def format_status_message(history: AlertHistory) -> str:
-    """Format /sentinel_status output."""
     stats = history.stats_24h()
-    pushed = stats.pop("_pushed", 0)
+    stats.pop("_pushed", None)
 
     lines = [
-        "🛡️ Sentinel 状态总览",
+        "Sentinel 状态总览",
         "",
-        "📊 最近 24h 告警统计:",
+        "最近 24h 告警统计:",
     ]
 
-    emoji_map = {
-        "emergency": "🚨", "critical": "🔴", "high": "🟠",
-        "medium": "🟡", "low": "🔵", "info": "ℹ️",
-    }
-
     for level in ["emergency", "critical", "high", "medium", "low", "info"]:
-        count = stats.get(level, 0)
-        e = emoji_map[level]
-        suffix = " (已推送)" if level in ("emergency", "critical", "high") and count > 0 else ""
-        if level in ("medium", "low") and count > 0:
-            suffix = " (静默)"
-        if level == "info" and count > 0:
-            suffix = " (仅日志)"
-        lines.append(f"  {e} {level:12s} {count}{suffix}")
+        lines.append(f"- {level:10s}: {stats.get(level, 0)}")
 
-    # Recent unpushed events
-    recent = [e for e in history.recent(10) if not e.pushed and not e.suppressed]
-    if recent:
-        lines.append("")
-        lines.append("最近未推送事件:")
-        for e in recent[-5:]:
-            time_str = e.timestamp[11:16] if len(e.timestamp) > 16 else "?"
-            lines.append(f"  - {time_str} [{e.severity_label}] {e.check_name}")
-
-    lines.append("")
-    lines.append("使用 /sentinel_history 查看完整历史")
+    lines.extend(["", "使用 /sentinel_history 查看完整历史"])
     return "\n".join(lines)
 
 
 def format_history_message(history: AlertHistory, limit: int = 15) -> str:
-    """Format /sentinel_history output."""
     recent = history.recent(limit)
     if not recent:
-        return "📋 暂无告警记录"
+        return "暂无告警记录"
 
-    lines = [f"📋 最近 {len(recent)} 条告警:"]
-    lines.append("")
-    for e in reversed(recent):
-        emoji = severity_emoji(e.severity)
-        time_str = e.timestamp[11:19] if len(e.timestamp) > 19 else e.timestamp
-        push_mark = "✅" if e.pushed else "🔇"
-        lines.append(f"{emoji} {time_str} [{e.severity_label}] {e.check_name} {push_mark}")
+    lines = [f"最近 {len(recent)} 条告警:", ""]
+    for event in reversed(recent):
+        emoji = severity_emoji(event.severity)
+        time_str = event.timestamp[11:19] if len(event.timestamp) > 19 else event.timestamp
+        push_mark = "已推送" if event.pushed else "未推送"
+        state_suffix = f" [{event.alert_state}]" if event.alert_state else ""
+        lines.append(f"{emoji} {time_str} [{event.severity_label}] {event.check_name}{state_suffix} {push_mark}")
 
     return "\n".join(lines)

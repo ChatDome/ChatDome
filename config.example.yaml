@@ -96,15 +96,13 @@ chatdome:
     # custom_packs_dir: "./packs"          # 用户自定义 pack 目录
 
     # 告警防护
-    default_cooldown: 300                  # 默认冷却期（秒）
-    max_cooldown: 1800                     # 冷却期上限（秒）
     global_rate_limit: 10                  # 全局速率限制：每窗口最多推送 N 条
     global_rate_window: 300                # 速率窗口大小（秒）
     learning_rounds: 1                     # 冷启动静默轮数（首次启动建基线）
 
     # 检查策略列表
     checks:
-      - name: "SSH 暴力破解检测"
+      - name: "SSH 新访问来源检测"
         check_id: ssh_bruteforce
         interval: 300
         mode: differential
@@ -113,7 +111,6 @@ chatdome:
           type: added_count
           operator: ">"
           threshold: 0
-        cooldown: 600
 
       - name: "SSH 失败爆发（3分钟）"
         check_id: ssh_failed_burst
@@ -128,7 +125,6 @@ chatdome:
           type: line_count
           operator: ">="
           threshold: 10                    # 3 分钟内失败 >= 10 次触发
-        cooldown: 120
 
       - name: "SSH 慢速失败攻击（1小时）"
         check_id: ssh_failed_burst
@@ -143,7 +139,6 @@ chatdome:
           type: line_count
           operator: ">="
           threshold: 15                    # 1 小时内失败 >= 15 次触发
-        cooldown: 600
 
       - name: "SSH 成功登录告警"
         check_id: ssh_success_login
@@ -156,7 +151,6 @@ chatdome:
           type: added_count
           operator: ">"
           threshold: 0
-        cooldown: 60
 
       - name: "磁盘使用率"
         check_id: disk_usage

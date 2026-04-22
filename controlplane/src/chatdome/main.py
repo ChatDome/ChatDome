@@ -150,9 +150,11 @@ def main() -> None:
         )
 
         bot.set_sentinel(sentinel_scheduler, pack_loader)
-        logger.info("  Sentinel: ENABLED (%d checks, push≥%d, cooldown=%ds)",
-                     len(config.sentinel.checks), config.sentinel.push_min_severity,
-                     config.sentinel.default_cooldown)
+        logger.info(
+            "  Sentinel: ENABLED (%d checks, push>=%d, state-machine mode)",
+            len(config.sentinel.checks),
+            config.sentinel.push_min_severity,
+        )
     else:
         bot.set_sentinel(None, pack_loader)
         logger.info("  Sentinel: disabled")

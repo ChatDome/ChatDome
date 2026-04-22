@@ -78,8 +78,6 @@ class SentinelConfig:
         "ssh_auth", "network", "system_resources", "processes_services", "logs",
     ])
     custom_packs_dir: str = ""
-    default_cooldown: int = 300                                 # seconds
-    max_cooldown: int = 1800                                    # seconds
     global_rate_limit: int = 10                                 # max pushes per window
     global_rate_window: int = 300                               # rate window (seconds)
     learning_rounds: int = 1                                    # cold-start silent rounds

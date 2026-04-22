@@ -281,7 +281,7 @@ The AI uses **function calling** (tool use) to interact with the host. It can:
 
 | Check ID | Description |
 |----------|-------------|
-| `ssh_bruteforce` | Detect SSH brute force attempts |
+| `ssh_bruteforce` | Detect new SSH source access records |
 | `ssh_success_login` | List successful SSH logins |
 | `failed_sudo` | Show failed sudo attempts |
 | `active_connections` | Current network connections |
