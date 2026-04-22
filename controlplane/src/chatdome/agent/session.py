@@ -42,6 +42,8 @@ class AgentSession:
     pending_reason: str | None = None
     pending_analysis: dict[str, Any] | None = None
     task_auto_approve: bool = False
+    pending_round_limit: bool = False
+    pending_round_count: int = 0
     
     # UI Mode
     command_echo: bool = False
@@ -62,6 +64,8 @@ class AgentSession:
             "pending_reason": self.pending_reason,
             "pending_analysis": self.pending_analysis,
             "task_auto_approve": self.task_auto_approve,
+            "pending_round_limit": self.pending_round_limit,
+            "pending_round_count": self.pending_round_count,
             "command_echo": self.command_echo,
         }
 
@@ -99,6 +103,8 @@ class AgentSession:
             if isinstance(payload.get("pending_analysis"), dict)
             else None,
             task_auto_approve=bool(payload.get("task_auto_approve", False)),
+            pending_round_limit=bool(payload.get("pending_round_limit", False)),
+            pending_round_count=int(payload.get("pending_round_count", 0)),
             command_echo=bool(payload.get("command_echo", False)),
         )
 
@@ -116,6 +122,7 @@ class AgentSession:
         self.round_count = 0
         # New user turn starts a new task scope.
         self.task_auto_approve = False
+        self.clear_pending_round_limit()
 
     def add_assistant_message(self, content: str) -> None:
         """Append an assistant text response."""
@@ -160,6 +167,11 @@ class AgentSession:
         self.pending_followups.clear()
         self.pending_reason = None
         self.pending_analysis = None
+
+    def clear_pending_round_limit(self) -> None:
+        """Reset round-limit confirmation state."""
+        self.pending_round_limit = False
+        self.pending_round_count = 0
 
     def is_expired(self, timeout: int) -> bool:
         """Check if this session has been idle for too long."""
@@ -294,6 +306,7 @@ class AgentSession:
             self.messages.append(system_msg)
         self.round_count = 0
         self.clear_pending_state()
+        self.clear_pending_round_limit()
         self.last_active = time.time()
 
     def get_turn_executed_commands(self) -> list[str]:

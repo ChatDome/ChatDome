@@ -80,6 +80,16 @@ class Agent:
                 return final_answer
             return await self._handle_pending_followup(chat_id, session, user_message)
 
+        if session.pending_round_limit:
+            if self._is_reject_intent(user_message):
+                return await self.resolve_round_limit(chat_id, "ABANDON")
+            if self._is_continue_intent(user_message):
+                return await self.resolve_round_limit(chat_id, "CONTINUE")
+            return (
+                f"\u5f53\u524d\u4efb\u52a1\u5df2\u6267\u884c {session.pending_round_count} \u8f6e\uff0c\u4ecd\u672a\u5b8c\u6210\u3002\n"
+                "\u8bf7\u56de\u590d\u2018\u7ee7\u7eed\u2019\u4ee5\u518d\u6267\u884c 10 \u8f6e\uff0c\u6216\u56de\u590d\u2018\u653e\u5f03\u2019\u7ed3\u675f\u5f53\u524d\u4efb\u52a1\u3002"
+            )
+
         session.add_user_message(user_message)
 
         # Trim or compress history if needed using the Local Memory Vault
@@ -87,6 +97,29 @@ class Agent:
         self._persist_session(session)
 
         return await self._run_loop(chat_id, session)
+
+    async def resolve_round_limit(self, chat_id: int, action: str) -> str:
+        """Resolve a round-limit confirmation by continuing or abandoning the task."""
+        session = self.session_manager.get_or_create(chat_id)
+        if not session.pending_round_limit:
+            return "\u2139\ufe0f \u5f53\u524d\u6ca1\u6709\u7b49\u5f85\u7ee7\u7eed\u6267\u884c\u7684\u4efb\u52a1\u3002"
+
+        normalized_action = (action or "").strip().upper()
+        if normalized_action == "CONTINUE":
+            reached = session.pending_round_count
+            session.clear_pending_round_limit()
+            self._persist_session(session)
+            logger.info("User chose to continue task after %d rounds (chat_id=%d)", reached, chat_id)
+            return await self._run_loop(chat_id, session)
+
+        reached = session.pending_round_count
+        session.task_auto_approve = False
+        session.clear_pending_round_limit()
+        final_text = f"\u5df2\u653e\u5f03\u5f53\u524d\u4efb\u52a1\uff08\u7d2f\u8ba1\u6267\u884c {reached} \u8f6e\uff09\u3002\u5982\u9700\u7ee7\u7eed\uff0c\u8bf7\u53d1\u9001\u65b0\u7684\u6307\u4ee4\u3002"
+        session.add_assistant_message(final_text)
+        self._persist_session(session)
+        logger.info("User abandoned task after %d rounds (chat_id=%d)", reached, chat_id)
+        return final_text
 
     async def resume_session(self, chat_id: int, action: str) -> tuple[str, str]:
         """Resume a suspended session after user approval/rejection. Returns (raw_result, llm_response)."""
@@ -201,6 +234,19 @@ class Agent:
         return any(k in text for k in reject_keywords)
 
     @staticmethod
+    def _is_continue_intent(user_message: str) -> bool:
+        """Heuristic for continue intent when a task hits round limit."""
+        text = (user_message or "").strip().lower()
+        if not text:
+            return False
+
+        continue_keywords = (
+            "\u7ee7\u7eed", "\u7ee7\u7eed\u6267\u884c", "\u7ee7\u7eed\u4efb\u52a1", "\u63a5\u7740\u8dd1", "\u7ee7\u7eed\u8dd1",
+            "continue", "go on", "proceed",
+        )
+        return any(k in text for k in continue_keywords)
+
+    @staticmethod
     def _summarize_pending_followups(session: Any, max_chars: int = 1500) -> str:
         """Build a compact transcript of follow-up chat during pending approval."""
         if not session.pending_followups:
@@ -290,10 +336,13 @@ class Agent:
     async def _run_loop(self, chat_id: int, session: Any) -> str:
         """Drive the ReAct loop forward."""
 
-        for round_num in range(session.round_count + 1, self.config.max_rounds_per_turn + 1):
+        start_round = session.round_count
+        window_limit = max(1, int(self.config.max_rounds_per_turn))
+        end_round_exclusive = start_round + window_limit + 1
+        for round_num in range(start_round + 1, end_round_exclusive):
             logger.info(
                 "Agent loop round %d/%d for chat_id=%d",
-                round_num, self.config.max_rounds_per_turn, chat_id,
+                round_num, start_round + window_limit, chat_id,
             )
 
             try:
@@ -402,30 +451,19 @@ class Agent:
                         final_content += echo_text
                         
                 session.task_auto_approve = False
+                session.clear_pending_round_limit()
                 session.add_assistant_message(final_content)
                 self._persist_session(session)
                 logger.info("Agent completed for chat_id=%d in %d rounds", chat_id, round_num)
                 return final_content
-
-        # Exceeded max rounds
-        max_rounds_msg = (
-            f"⚠️ 已达到最大执行轮次 ({self.config.max_rounds_per_turn})，"
-            "请尝试缩小问题范围或重新描述你的需求。"
-        )
-        
-        if session.command_echo:
-            cmds = session.get_turn_executed_commands()
-            if cmds:
-                echo_text = "\n\n---\n*🔍 Command Echo 模式*\n" + "\n".join(cmds)
-                max_rounds_msg += echo_text
-                
+        # Reached one execution window; ask user whether to continue.
+        reached_rounds = session.round_count
+        session.pending_round_limit = True
+        session.pending_round_count = reached_rounds
         session.task_auto_approve = False
-        session.add_assistant_message(max_rounds_msg)
         self._persist_session(session)
-        logger.warning(
-            "Max rounds reached for chat_id=%d", chat_id,
-        )
-        return max_rounds_msg
+        logger.warning("Round limit window reached for chat_id=%d (rounds=%d)", chat_id, reached_rounds)
+        return f'__ROUND_LIMIT_CONFIRM__:{json.dumps({"rounds": reached_rounds, "window": window_limit})}'
 
     def clear_session(self, chat_id: int) -> bool:
         """Clear a chat session. Returns True if it existed."""

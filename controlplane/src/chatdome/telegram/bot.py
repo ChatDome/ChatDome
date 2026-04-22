@@ -297,6 +297,10 @@ class TelegramBot:
                 data = json.loads(response.split(":", 1)[1])
                 await self._send_approval_request(update.message, data)
                 return
+            if response.startswith("__ROUND_LIMIT_CONFIRM__:"):
+                data = json.loads(response.split(":", 1)[1])
+                await self._send_round_limit_prompt(update.message, data)
+                return
 
             # Send response (handle long messages)
             await self._send_long_message(update.message, response)
@@ -334,6 +338,27 @@ class TelegramBot:
         )
         return
 
+    async def _send_round_limit_prompt(self, message, data: dict[str, Any] | None = None) -> None:
+        """Ask user whether to continue after reaching one execution window."""
+        payload = data or {}
+        rounds = int(payload.get("rounds", 0))
+        window = int(payload.get("window", self.agent.config.max_rounds_per_turn))
+        text = (
+            f"\u5f53\u524d\u4efb\u52a1\u5df2\u6267\u884c {rounds} \u8f6e\uff0c\u5c1a\u672a\u5b8c\u6210\u3002\n"
+            f"\u662f\u5426\u7ee7\u7eed\u6267\u884c\uff08\u518d\u8fd0\u884c {window} \u8f6e\uff09\uff1f"
+        )
+        keyboard = [[
+            InlineKeyboardButton("\u25b6\ufe0f \u7ee7\u7eed\u6267\u884c", callback_data="continue_round_task"),
+            InlineKeyboardButton("\ud83d\uded1 \u653e\u5f03\u4efb\u52a1", callback_data="abandon_round_task"),
+        ]]
+        await self._reply_text(
+            message,
+            text,
+            markup=MessageMarkup.PLAIN,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
     async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline keyboard button clicks."""
         query = update.callback_query
@@ -355,6 +380,35 @@ class TelegramBot:
 
             chat_id = chat.id
             callback_data = query.data or ""
+
+            if callback_data in {"continue_round_task", "abandon_round_task"}:
+                action = "CONTINUE" if callback_data == "continue_round_task" else "ABANDON"
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    logger.exception("Failed to edit round-limit callback message markup")
+
+                thinking_msg = await query.message.reply_text("Processing...")
+                try:
+                    final_response = await asyncio.wait_for(
+                        self.agent.resolve_round_limit(chat_id, action),
+                        timeout=120,
+                    )
+                finally:
+                    try:
+                        await thinking_msg.delete()
+                    except Exception:
+                        pass
+
+                if final_response.startswith("__ROUND_LIMIT_CONFIRM__:"):
+                    data = json.loads(final_response.split(":", 1)[1])
+                    await self._send_round_limit_prompt(query.message, data)
+                elif final_response.startswith("__PENDING_APPROVAL__:"):
+                    data = json.loads(final_response.split(":", 1)[1])
+                    await self._send_approval_request(query.message, data)
+                else:
+                    await self._send_long_message(query.message, final_response)
+                return
 
             if callback_data == "show_cmd_details":
                 await self._send_long_message(query.message, "正在分析命令影响，请稍候...")
@@ -427,6 +481,9 @@ class TelegramBot:
             if final_response.startswith("__PENDING_APPROVAL__:"):
                 data = json.loads(final_response.split(":", 1)[1])
                 await self._send_approval_request(query.message, data)
+            elif final_response.startswith("__ROUND_LIMIT_CONFIRM__:"):
+                data = json.loads(final_response.split(":", 1)[1])
+                await self._send_round_limit_prompt(query.message, data)
             else:
                 await self._send_long_message(query.message, final_response)
         except TimeoutError:
@@ -458,6 +515,9 @@ class TelegramBot:
             if final_response.startswith("__PENDING_APPROVAL__:"):
                 data = json.loads(final_response.split(":", 1)[1])
                 await self._send_approval_request(update.message, data)
+            elif final_response.startswith("__ROUND_LIMIT_CONFIRM__:"):
+                data = json.loads(final_response.split(":", 1)[1])
+                await self._send_round_limit_prompt(update.message, data)
             else:
                 await self._send_long_message(update.message, final_response)
         except Exception as e:
@@ -480,6 +540,9 @@ class TelegramBot:
             if final_response.startswith("__PENDING_APPROVAL__:"):
                 data = json.loads(final_response.split(":", 1)[1])
                 await self._send_approval_request(update.message, data)
+            elif final_response.startswith("__ROUND_LIMIT_CONFIRM__:"):
+                data = json.loads(final_response.split(":", 1)[1])
+                await self._send_round_limit_prompt(update.message, data)
             else:
                 await self._send_long_message(update.message, final_response)
         except Exception as e:
