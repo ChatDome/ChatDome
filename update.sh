@@ -34,8 +34,22 @@ git reset --hard origin/main
 git pull
 echo "✅ 代码更新完成"
 
-# 4. 更新依赖/重新安装 (如果需要)
-echo "[3/4] 更新 Python 环境依赖..."
+# 4. 自动同步配置模板 -> config.yaml
+echo "[3/5] 正在同步配置文件..."
+if [ -f "$CHATDOME_DIR/config.example.yaml" ]; then
+    if [ -f "$CHATDOME_DIR/config.yaml" ]; then
+        BACKUP_PATH="$CHATDOME_DIR/config.yaml.bak.$(date +%Y%m%d%H%M%S)"
+        cp "$CHATDOME_DIR/config.yaml" "$BACKUP_PATH"
+        echo "已备份旧配置: $BACKUP_PATH"
+    fi
+    cp "$CHATDOME_DIR/config.example.yaml" "$CHATDOME_DIR/config.yaml"
+    echo "✓ 已用 config.example.yaml 覆盖 config.yaml"
+else
+    echo "⚠ 未找到 config.example.yaml，跳过配置同步"
+fi
+
+# 5. 更新依赖/重新安装 (如果需要)
+echo "[4/5] 更新 Python 环境依赖..."
 cd "$CHATDOME_DIR/controlplane" || exit
 # 假设您使用的是系统环境或已经激活的虚拟环境
 # 如果使用了虚拟环境，请在此处 source venv/bin/activate
@@ -43,8 +57,8 @@ pip install -e .
 echo "✅ 依赖更新完成"
 cd "$CHATDOME_DIR" || exit
 
-# 5. 自动启动 ChatDome 服务 (后台运行)
-echo "[4/4] 正在启动 ChatDome 服务..."
+# 6. 自动启动 ChatDome 服务 (后台运行)
+echo "[5/5] 正在启动 ChatDome 服务..."
 # 使用 nohup 后台启动，将日志输出到 chatdome.log
 nohup chatdome > chatdome.log 2>&1 &
 
