@@ -48,14 +48,20 @@ commands:
     templates:
       - platform: linux
         command: >-
-          (if command -v journalctl >/dev/null 2>&1; then
-          journalctl -u ssh -u sshd --since '-24 hours' --no-pager 2>/dev/null
-          | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true;
+          (J_OUT="";
+          if command -v journalctl >/dev/null 2>&1; then
+            J_OUT=$(journalctl -u ssh -u sshd --since '-24 hours' --no-pager 2>/dev/null
+            | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true);
+          fi;
+          if [ -n "$J_OUT" ]; then
+            printf '%s\n' "$J_OUT";
           elif [ -f /var/log/auth.log ]; then
-          grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' /var/log/auth.log || true;
+            grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' /var/log/auth.log || true;
           elif [ -f /var/log/secure ]; then
-          grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' /var/log/secure || true;
-          else echo 'No SSH auth log found'; fi)
+            grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' /var/log/secure || true;
+          else
+            echo 'No SSH auth log found';
+          fi)
           | awk '{
               user=""; ip="";
               for (i=1; i<=NF; i++) {
@@ -77,16 +83,22 @@ commands:
     templates:
       - platform: linux
         command: >-
-          (if command -v journalctl >/dev/null 2>&1; then
-          journalctl -u ssh -u sshd --since '-{since_hours} hours' --no-pager 2>/dev/null
-          | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true;
+          (J_OUT="";
+          if command -v journalctl >/dev/null 2>&1; then
+            J_OUT=$(journalctl -u ssh -u sshd --since '-{since_hours} hours' --no-pager 2>/dev/null
+            | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true);
+          fi;
+          if [ -n "$J_OUT" ]; then
+            printf '%s\n' "$J_OUT";
           elif [ -f /var/log/auth.log ]; then
-          tail -{fallback_limit} /var/log/auth.log
-          | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true;
+            tail -{fallback_limit} /var/log/auth.log
+            | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true;
           elif [ -f /var/log/secure ]; then
-          tail -{fallback_limit} /var/log/secure
-          | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true;
-          else echo 'No SSH auth log found'; fi)
+            tail -{fallback_limit} /var/log/secure
+            | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true;
+          else
+            echo 'No SSH auth log found';
+          fi)
           | awk -v start={work_start_hour} -v end={work_end_hour} '{
               split($3, t, ":");
               h = t[1] + 0;
