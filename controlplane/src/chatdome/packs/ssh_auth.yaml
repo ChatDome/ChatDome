@@ -14,8 +14,7 @@ commands:
           awk '/Failed password/ {print $(NF-3)}' /var/log/auth.log;
           elif [ -f /var/log/secure ]; then
           awk '/Failed password/ {print $(NF-3)}' /var/log/secure;
-          else echo 'No SSH auth log found'; fi)
-          | sort | uniq -c | sort -nr | head -{limit}
+          else echo 'No SSH auth log found'; fi) | sort | uniq -c | sort -nr | head -{limit}
         requires: [awk, sort, uniq, head]
     params:
       limit: { type: int, default: 10, max: 50 }
@@ -33,8 +32,7 @@ commands:
           grep 'Failed password' /var/log/auth.log | tail -{fallback_limit} || true;
           elif [ -f /var/log/secure ]; then
           grep 'Failed password' /var/log/secure | tail -{fallback_limit} || true;
-          fi)
-          | tail -{max_lines}
+          fi) | tail -{max_lines}
         requires: [grep, tail]
     params:
       minutes: { type: int, default: 5, max: 120 }
@@ -50,8 +48,7 @@ commands:
         command: >-
           (OUT="";
           if command -v journalctl >/dev/null 2>&1; then
-            OUT=$(journalctl -u ssh -u sshd --since '-24 hours' --no-pager 2>/dev/null
-            | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true);
+            OUT=$(journalctl -u ssh -u sshd --since '-24 hours' --no-pager 2>/dev/null | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true);
           fi;
           if [ -z "$OUT" ] && [ -r /var/log/auth.log ]; then
             OUT=$(grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' /var/log/auth.log 2>/dev/null || true);
@@ -68,8 +65,7 @@ commands:
             printf '%s\n' "$OUT";
           else
             echo 'No SSH successful login records found or log access denied';
-          fi)
-          | awk '{
+          fi) | awk '{
               method=""; user=""; ip=""; port="";
               for (i=1; i<=NF; i++) {
                 if ($i=="Accepted" && (i+1)<=NF) method=$(i+1);
@@ -83,8 +79,7 @@ commands:
                 print $1, $2, $3, user, ip, port, method;
               }
               else print $0;
-            }'
-          | tail -{limit}
+            }' | tail -{limit}
         requires: [grep, awk, tail]
     params:
       limit: { type: int, default: 20, max: 100 }
@@ -99,16 +94,13 @@ commands:
         command: >-
           (OUT="";
           if command -v journalctl >/dev/null 2>&1; then
-            OUT=$(journalctl -u ssh -u sshd --since '-{since_hours} hours' --no-pager 2>/dev/null
-            | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true);
+            OUT=$(journalctl -u ssh -u sshd --since '-{since_hours} hours' --no-pager 2>/dev/null | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true);
           fi;
           if [ -z "$OUT" ] && [ -r /var/log/auth.log ]; then
-            OUT=$(tail -{fallback_limit} /var/log/auth.log 2>/dev/null
-            | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true);
+            OUT=$(tail -{fallback_limit} /var/log/auth.log 2>/dev/null | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true);
           fi;
           if [ -z "$OUT" ] && [ -r /var/log/secure ]; then
-            OUT=$(tail -{fallback_limit} /var/log/secure 2>/dev/null
-            | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true);
+            OUT=$(tail -{fallback_limit} /var/log/secure 2>/dev/null | grep -E 'sshd.*Accepted (password|publickey|keyboard-interactive|hostbased|gssapi-with-mic|certificate)' || true);
           fi;
           if [ -z "$OUT" ] && command -v last >/dev/null 2>&1; then
             LAST_OUT=$(last -i -F -n {last_limit} 2>/dev/null);
@@ -119,8 +111,7 @@ commands:
             printf '%s\n' "$OUT";
           else
             echo 'No SSH successful login records found or log access denied';
-          fi)
-          | awk -v start={work_start_hour} -v end={work_end_hour} '{
+          fi) | awk -v start={work_start_hour} -v end={work_end_hour} '{
               split($3, t, ":");
               h = t[1] + 0;
               # abnormal = outside [start, end)
@@ -139,8 +130,7 @@ commands:
                 }
                 else print $0;
               }
-            }'
-          | tail -{limit}
+            }' | tail -{limit}
         requires: [grep, awk, tail]
     params:
       since_hours: { type: int, default: 24, max: 168 }
@@ -161,8 +151,7 @@ commands:
           grep 'sudo:.*COMMAND' /var/log/auth.log | grep 'NOT';
           elif [ -f /var/log/secure ]; then
           grep 'sudo:.*COMMAND' /var/log/secure | grep 'NOT';
-          else echo 'No sudo log found'; fi)
-          | tail -{limit}
+          else echo 'No sudo log found'; fi) | tail -{limit}
         requires: [grep, tail]
     params:
       limit: { type: int, default: 20, max: 100 }

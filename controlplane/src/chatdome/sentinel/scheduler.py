@@ -472,6 +472,15 @@ class SentinelScheduler:
 
         self._baseline_report_sent = True
 
+    @staticmethod
+    def _format_failure_detail(stderr_text: str, max_chars: int = 240) -> str:
+        text = " ".join((stderr_text or "").split())
+        if not text:
+            return ""
+        if len(text) > max_chars:
+            text = text[: max_chars - 3] + "..."
+        return f" ({text})"
+
     # -- Single check ------------------------------------------------------
 
     async def _run_single_check(self, check: CheckDefinition) -> str:
@@ -492,11 +501,11 @@ class SentinelScheduler:
         stderr_text = (result.stderr or "").strip()
         if result.return_code is None and stderr_text:
             logger.warning("Check %s failed before completion: %s", check.name, stderr_text)
-            return f"❌ {check.name}: execution failed"
+            return f"❌ {check.name}: execution failed{self._format_failure_detail(stderr_text)}"
 
         if result.return_code is not None and result.return_code != 0:
             logger.warning("Check %s failed (code=%s): %s", check.name, result.return_code, stderr_text)
-            return f"❌ {check.name}: execution failed"
+            return f"❌ {check.name}: execution failed{self._format_failure_detail(stderr_text)}"
 
         output = result.stdout or ""
         alert_output = output
