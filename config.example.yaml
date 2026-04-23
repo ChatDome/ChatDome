@@ -112,7 +112,7 @@ chatdome:
           operator: ">"
           threshold: 0
 
-      - name: "SSH 失败爆发（3分钟）"
+      - name: "SSH 短时多次失败登录告警（3分钟）"
         check_id: ssh_failed_burst
         interval: 60
         mode: snapshot
@@ -126,7 +126,7 @@ chatdome:
           operator: ">="
           threshold: 10                    # 3 分钟内失败 >= 10 次触发
 
-      - name: "SSH 慢速失败攻击（1小时）"
+      - name: "SSH 持续失败登录告警（1小时）"
         check_id: ssh_failed_burst
         interval: 300
         mode: snapshot

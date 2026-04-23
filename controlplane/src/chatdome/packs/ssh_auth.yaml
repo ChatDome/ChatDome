@@ -22,7 +22,7 @@ commands:
     tags: [ssh, bruteforce, credential_access]
 
   ssh_failed_burst:
-    name: "SSH 短时失败爆发检测"
+    name: "SSH 短时多次失败登录检测"
     templates:
       - platform: linux
         command: >-

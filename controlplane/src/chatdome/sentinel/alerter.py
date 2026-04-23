@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import logging
 import time
-from collections import deque
+import ipaddress
+from collections import Counter, deque
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +15,11 @@ from typing import Any
 from chatdome.sentinel.checks import severity_emoji
 
 logger = logging.getLogger(__name__)
+
+
+SSH_SUCCESS_CHECK_IDS = {"ssh_success_login", "ssh_success_login_offhours"}
+SSH_FAILED_CHECK_IDS = {"ssh_failed_burst", "ssh_bruteforce"}
+SSH_CHECK_IDS = SSH_SUCCESS_CHECK_IDS | SSH_FAILED_CHECK_IDS
 
 
 @dataclass
@@ -251,58 +256,258 @@ def _state_card(state: str) -> dict[str, str]:
     )
 
 
-def format_alert_message(event: AlertEvent) -> str:
-    """Format one alert message for Telegram push."""
+def _display_number(value: float | None) -> str:
+    if value is None:
+        return "未知"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _alert_transition(event: AlertEvent) -> str:
+    if not event.alert_state:
+        return "未进入状态机"
+    if event.previous_state and event.previous_state != event.alert_state:
+        return f"{event.previous_state} -> {event.alert_state}"
+    return event.alert_state
+
+
+def _nonempty_lines(raw_output: str) -> list[str]:
+    return [line.strip() for line in (raw_output or "").splitlines() if line.strip()]
+
+
+def _safe_ip_token(value: str) -> str:
+    try:
+        return str(ipaddress.ip_address(value.strip().strip(",;()[]{}<>")))
+    except ValueError:
+        return ""
+
+
+def _first_ip_with_index(parts: list[str]) -> tuple[str, int]:
+    for index, token in enumerate(parts):
+        ip_value = _safe_ip_token(token)
+        if ip_value:
+            return ip_value, index
+    return "", -1
+
+
+def _extract_ssh_user(parts: list[str], ip_index: int) -> str:
+    for index, token in enumerate(parts):
+        if token == "for" and (index + 1) < len(parts):
+            if parts[index + 1] == "invalid" and (index + 3) < len(parts) and parts[index + 2] == "user":
+                return parts[index + 3]
+            return parts[index + 1]
+
+    if ip_index > 0:
+        candidate = parts[ip_index - 1].strip()
+        ignored = {"from", "port", "ssh2", "Accepted", "Failed", "password", "publickey", "-"}
+        if candidate and candidate not in ignored and not _safe_ip_token(candidate):
+            return candidate
+    return "unknown"
+
+
+def _extract_ssh_port(parts: list[str], ip_index: int) -> str:
+    for index, token in enumerate(parts):
+        if token == "port" and (index + 1) < len(parts) and parts[index + 1].isdigit():
+            return parts[index + 1]
+    if ip_index >= 0 and (ip_index + 1) < len(parts) and parts[ip_index + 1].isdigit():
+        return parts[ip_index + 1]
+    return "22"
+
+
+def _extract_ssh_method(parts: list[str], default: str = "unknown") -> str:
+    for marker in ("Accepted", "Failed"):
+        if marker in parts:
+            index = parts.index(marker)
+            if (index + 1) < len(parts):
+                return parts[index + 1]
+
+    known_methods = {
+        "password",
+        "publickey",
+        "keyboard-interactive",
+        "hostbased",
+        "gssapi-with-mic",
+        "certificate",
+        "last",
+    }
+    for token in reversed(parts):
+        cleaned = token.strip().strip(",;()[]{}<>")
+        if cleaned in known_methods:
+            return cleaned
+    return default
+
+
+def _ssh_time_label(parts: list[str]) -> str:
+    if len(parts) >= 3:
+        return " ".join(parts[:3])
+    return "未知时间"
+
+
+def _parse_ssh_line(line: str, success: bool) -> dict[str, str]:
+    parts = line.split()
+    ip_value, ip_index = _first_ip_with_index(parts)
+    user = _extract_ssh_user(parts, ip_index)
+    port = _extract_ssh_port(parts, ip_index)
+    method = _extract_ssh_method(parts, default="unknown")
+    return {
+        "time": _ssh_time_label(parts),
+        "ip": ip_value or "unknown",
+        "user": user,
+        "port": port,
+        "method": method,
+        "result": "成功" if success else "失败",
+    }
+
+
+def _counter_summary(counter: Counter[str], max_items: int = 5) -> str:
+    items = [(key, count) for key, count in counter.most_common(max_items) if key and key != "unknown"]
+    if not items:
+        return "未提取到"
+    return ", ".join(f"{key} ({count}次)" for key, count in items)
+
+
+def _unique_summary(values: list[str], max_items: int = 6) -> str:
+    seen: list[str] = []
+    for value in values:
+        if value and value != "unknown" and value not in seen:
+            seen.append(value)
+    if not seen:
+        return "未提取到"
+    suffix = f" 等{len(seen)}个" if len(seen) > max_items else ""
+    return ", ".join(seen[:max_items]) + suffix
+
+
+def _ssh_sample_lines(records: list[dict[str, str]], max_items: int = 5) -> list[str]:
+    samples: list[str] = []
+    for record in records[:max_items]:
+        samples.append(
+            f"- {record['time']} {record['result']}: "
+            f"{record['user']}@{record['ip']}:{record['port']} via {record['method']}"
+        )
+    return samples
+
+
+def _format_ssh_alert_message(event: AlertEvent) -> str:
     emoji = severity_emoji(event.severity)
     label = event.severity_label.upper()
+    card = _state_card(event.alert_state) if event.alert_state else None
+    success = event.check_id in SSH_SUCCESS_CHECK_IDS
+    offhours = event.check_id == "ssh_success_login_offhours"
+    lines_raw = _nonempty_lines(event.raw_output)
+    records = [_parse_ssh_line(line, success=success) for line in lines_raw]
+    count_text = _display_number(event.current_value if event.current_value is not None else float(len(records)))
 
-    mode_label = "差异巡检" if event.mode == "differential" else "快照巡检"
-    if event.current_value is None:
-        current_value_text = "N/A"
-    elif isinstance(event.current_value, float) and event.current_value.is_integer():
-        current_value_text = str(int(event.current_value))
+    is_recovery_notice = event.alert_state in {"RECOVERED_CANDIDATE", "RECOVERED"}
+
+    if is_recovery_notice:
+        what_happened = "近期未再发现新的 SSH 登录异常，状态进入观察或归档。"
+        focus_label = "相关来源 IP"
+    elif event.check_id == "ssh_bruteforce":
+        what_happened = f"发现新的 SSH 失败登录来源 IP，共 {count_text} 个。"
+        focus_label = "新增来源 IP"
+    elif success:
+        prefix = "异常时段 " if offhours else ""
+        what_happened = f"检测到 {count_text} 次新增 {prefix}SSH 成功登录。"
+        focus_label = "登录来源 IP"
     else:
-        current_value_text = str(event.current_value)
+        what_happened = f"检测到 {count_text} 次 SSH 登录失败，已达到告警条件。"
+        focus_label = "失败来源 IP"
+
+    ip_counter = Counter(record["ip"] for record in records)
+    user_values = [record["user"] for record in records]
+    method_values = [record["method"] for record in records]
+    port_values = [record["port"] for record in records]
 
     lines = [
         f"{emoji} [{label}] {event.check_name}",
         "",
-        f"检查项: {event.check_id}",
-        f"巡检模式: {mode_label}",
-        f"时间: {event.timestamp}",
-        f"当前值: {current_value_text}",
+        f"发生了什么: {what_happened}",
+        f"告警时间: {event.timestamp}",
     ]
 
-    if event.alert_state:
-        transition = (
-            f"{event.previous_state} -> {event.alert_state}"
-            if event.previous_state and event.previous_state != event.alert_state
-            else event.alert_state
-        )
-        card = _state_card(event.alert_state)
+    if card:
+        lines.append(f"威胁状态: {card['label']} ({_alert_transition(event)})")
+        lines.append(f"风险判断: {card['risk']}")
 
+    if records:
         lines.extend(
             [
                 "",
-                "状态告警卡片",
-                f"- 状态: {card['label']} ({transition})",
-                f"- 依据: {event.rule}",
-                f"- 风险: {card['risk']}",
-                f"- 建议: {card['suggestion']}",
-                f"- 下一观察点: {card['next_watch']}",
+                "需要关注:",
+                f"- {focus_label}: {_counter_summary(ip_counter)}",
+                f"- 相关用户: {_unique_summary(user_values)}",
+                f"- 登录方式: {_unique_summary(method_values)}",
+                f"- 目标端口: {_unique_summary(port_values)}",
+            ]
+        )
+        lines.append(f"- 记录时间: {records[0]['time']} 至 {records[-1]['time']}")
+    else:
+        lines.extend(["", "需要关注:", "- 本次是状态变化通知，没有新的 SSH 日志记录。"])
+
+    lines.extend(["", "建议处理:"])
+    if success:
+        lines.extend(
+            [
+                "- 先确认这些 IP 是否属于你或可信跳板机。",
+                "- 若来源不可信，立即检查当前登录会话、最近命令、authorized_keys 和 root 密码/密钥。",
+                "- 建议临时限制来源 IP，并优先关闭密码登录或收紧 SSH 访问范围。",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "- 优先关注失败次数最多的来源 IP，确认是否为扫描或暴力尝试。",
+                "- 若来源不可信，考虑临时封禁、启用限速，并检查是否存在随后成功登录。",
+                "- 建议确认 SSH 是否仍允许密码登录，必要时改为密钥登录并限制 root 登录。",
             ]
         )
 
-        if event.fingerprint:
-            lines.append(f"- 指纹: {event.fingerprint}")
+    samples = _ssh_sample_lines(records)
+    if samples:
+        lines.extend(["", "样例记录:"])
+        lines.extend(samples)
+
+    return "\n".join(lines)
+
+
+def format_alert_message(event: AlertEvent) -> str:
+    """Format one alert message for Telegram push."""
+    if event.check_id in SSH_CHECK_IDS:
+        return _format_ssh_alert_message(event)
+
+    emoji = severity_emoji(event.severity)
+    label = event.severity_label.upper()
+    mode_label = "新增变化" if event.mode == "differential" else "当前快照"
+    value_text = _display_number(event.current_value)
+
+    lines = [
+        f"{emoji} [{label}] {event.check_name}",
+        "",
+        f"发生了什么: {mode_label}触发了安全告警。",
+        f"告警时间: {event.timestamp}",
+        f"触发数量: {value_text}",
+    ]
+
+    if event.alert_state:
+        card = _state_card(event.alert_state)
+        lines.extend(
+            [
+                "",
+                f"威胁状态: {card['label']} ({_alert_transition(event)})",
+                f"风险判断: {card['risk']}",
+                f"触发原因: {event.rule}",
+                f"建议处理: {card['suggestion']}",
+                f"下一观察点: {card['next_watch']}",
+            ]
+        )
 
     raw = (event.raw_output or "").strip()
     if raw:
         if len(raw) > 800:
             raw = raw[:800] + "\n... (已截断)"
-        lines.extend(["", "原始数据:", raw])
+        lines.extend(["", "相关输出:", raw])
 
-    lines.extend(["", "提示: 调试阶段会推送每次状态变化，便于评估状态机与阈值配置。"])
     return "\n".join(lines)
 
 
