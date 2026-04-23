@@ -44,6 +44,49 @@ class SuppressorStateMachineTests(unittest.TestCase):
         self.assertTrue(l1.state_changed)
         self.assertFalse(l1.suppressed)
 
+    def test_weighted_batch_event_can_escalate_to_l1_immediately(self):
+        suppressor = Suppressor(global_rate_limit=100, global_rate_window=300, learning_rounds=0)
+
+        l1 = self._call_at(
+            10.0,
+            suppressor.process_event,
+            "ssh_success_login",
+            9,
+            {"203.0.113.10|root|22"},
+            event_weight=5,
+        )
+
+        self.assertEqual(l1.state, "ESCALATED_L1")
+        self.assertTrue(l1.state_changed)
+        self.assertFalse(l1.suppressed)
+        self.assertEqual(l1.event_count, 5)
+
+    def test_weighted_repeat_contributes_to_escalation_window(self):
+        suppressor = Suppressor(global_rate_limit=100, global_rate_window=300, learning_rounds=0)
+
+        self._call_at(
+            10.0,
+            suppressor.process_event,
+            "ssh_success_login",
+            9,
+            {"203.0.113.10|root|22"},
+        )
+        l1 = self._call_at(
+            70.0,
+            suppressor.process_event,
+            "ssh_success_login",
+            9,
+            {"203.0.113.10|root|22"},
+            notify_on_repeat=True,
+            event_weight=4,
+        )
+
+        self.assertEqual(l1.previous_state, "NEW")
+        self.assertEqual(l1.state, "ESCALATED_L1")
+        self.assertTrue(l1.state_changed)
+        self.assertFalse(l1.suppressed)
+        self.assertEqual(l1.event_count, 5)
+
     def test_recovered_candidate_rebounds_to_l1_on_new_event(self):
         suppressor = Suppressor(global_rate_limit=100, global_rate_window=300, learning_rounds=0)
 
@@ -88,6 +131,54 @@ class SuppressorStateMachineTests(unittest.TestCase):
         self.assertEqual(recovered.previous_state, "RECOVERED_CANDIDATE")
         self.assertEqual(recovered.state, "RECOVERED")
         self.assertTrue(recovered.state_changed)
+
+    def test_notify_on_repeat_pushes_without_state_change(self):
+        suppressor = Suppressor(global_rate_limit=100, global_rate_window=300, learning_rounds=0)
+
+        first = self._call_at(
+            10.0,
+            suppressor.process_event,
+            "ssh_success_login",
+            9,
+            {"203.0.113.10|root|22"},
+        )
+        repeat = self._call_at(
+            70.0,
+            suppressor.process_event,
+            "ssh_success_login",
+            9,
+            {"203.0.113.10|root|22"},
+            notify_on_repeat=True,
+        )
+
+        self.assertFalse(first.suppressed)
+        self.assertEqual(first.state, "NEW")
+        self.assertFalse(repeat.suppressed)
+        self.assertEqual(repeat.reason, "repeat_event")
+        self.assertEqual(repeat.state, "NEW")
+        self.assertFalse(repeat.state_changed)
+
+    def test_notify_on_repeat_still_respects_global_rate_limit(self):
+        suppressor = Suppressor(global_rate_limit=1, global_rate_window=300, learning_rounds=0)
+
+        self._call_at(
+            10.0,
+            suppressor.process_event,
+            "ssh_success_login",
+            9,
+            {"203.0.113.10|root|22"},
+        )
+        repeat = self._call_at(
+            70.0,
+            suppressor.process_event,
+            "ssh_success_login",
+            9,
+            {"203.0.113.10|root|22"},
+            notify_on_repeat=True,
+        )
+
+        self.assertTrue(repeat.suppressed)
+        self.assertIn("rate_limit", repeat.reason)
 
 
 if __name__ == "__main__":

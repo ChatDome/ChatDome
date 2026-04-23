@@ -27,6 +27,9 @@ from chatdome.sentinel.user_context import UserContextLedger
 
 logger = logging.getLogger(__name__)
 
+SSH_SUCCESS_CHECK_IDS = {"ssh_success_login", "ssh_success_login_offhours"}
+SSH_ADDED_ONLY_CHECK_IDS = {"ssh_bruteforce"} | SSH_SUCCESS_CHECK_IDS
+
 
 class SentinelScheduler:
     """Orchestrates the Sentinel SOC pipeline."""
@@ -187,6 +190,9 @@ class SentinelScheduler:
             parts = text.split()
             return parts[-1] if parts else ""
 
+        if check_key in SSH_SUCCESS_CHECK_IDS:
+            return SentinelScheduler._canonicalize_ssh_success_line(text)
+
         if check_key == "open_ports":
             endpoint = ""
             for token in text.split():
@@ -204,6 +210,38 @@ class SentinelScheduler:
             return f"{endpoint} ({','.join(owners)})"
 
         return text
+
+    @staticmethod
+    def _canonicalize_ssh_success_line(text: str) -> str:
+        lowered = text.lower()
+        if lowered.startswith("no ssh ") or "log access denied" in lowered:
+            return ""
+
+        parts = text.split()
+        if not parts:
+            return ""
+
+        if "Accepted" not in parts:
+            return text
+
+        method = ""
+        user = ""
+        ip_value = ""
+        port = ""
+        for i, token in enumerate(parts):
+            if token == "Accepted" and (i + 1) < len(parts):
+                method = parts[i + 1]
+            elif token == "for" and (i + 1) < len(parts):
+                user = parts[i + 1]
+            elif token == "from" and (i + 1) < len(parts):
+                ip_value = SentinelScheduler._safe_ip(parts[i + 1])
+            elif token == "port" and (i + 1) < len(parts):
+                port = parts[i + 1]
+
+        timestamp = " ".join(parts[:3]) if len(parts) >= 3 else ""
+        fields = [timestamp, method, user, ip_value, port]
+        normalized = " ".join(field for field in fields if field)
+        return normalized or text
 
     @staticmethod
     def _extract_port_owners(line: str) -> list[str]:
@@ -285,27 +323,56 @@ class SentinelScheduler:
     @staticmethod
     def _safe_ip(value: str) -> str:
         try:
-            return str(ipaddress.ip_address(value.strip()))
+            return str(ipaddress.ip_address(value.strip().strip("[](),;")))
         except ValueError:
             return ""
 
     @staticmethod
     def _extract_first_ip(text: str) -> str:
+        ip_value, _ = SentinelScheduler._extract_first_ip_with_index(text)
+        return ip_value
+
+    @staticmethod
+    def _extract_first_ip_with_index(text: str) -> tuple[str, int]:
+        parts = text.split()
+        for index, token in enumerate(parts):
+            ip_value = SentinelScheduler._safe_ip(token)
+            if ip_value:
+                return ip_value, index
+
         for token in re.findall(r"[0-9a-fA-F:.]+", text):
             ip_value = SentinelScheduler._safe_ip(token)
             if ip_value:
-                return ip_value
-        return ""
+                return ip_value, -1
+        return "", -1
 
     @staticmethod
     def _extract_user(text: str) -> str:
         m = re.search(r"\bfor\s+([a-zA-Z0-9_.-]+)\b", text)
-        return m.group(1) if m else "unknown"
+        if m:
+            return m.group(1)
+
+        _, ip_index = SentinelScheduler._extract_first_ip_with_index(text)
+        parts = text.split()
+        if ip_index > 0 and ip_index < len(parts):
+            candidate = parts[ip_index - 1].strip()
+            if candidate and candidate not in {"from", "port"} and not SentinelScheduler._safe_ip(candidate):
+                return candidate
+        return "unknown"
 
     @staticmethod
     def _extract_ssh_port(text: str) -> str:
         m = re.search(r"\bport\s+(\d+)\b", text)
-        return m.group(1) if m else "22"
+        if m:
+            return m.group(1)
+
+        _, ip_index = SentinelScheduler._extract_first_ip_with_index(text)
+        parts = text.split()
+        if ip_index >= 0 and (ip_index + 1) < len(parts):
+            candidate = parts[ip_index + 1].strip()
+            if candidate.isdigit():
+                return candidate
+        return "22"
 
     def _build_fingerprints(self, *, check_key: str, alert_output: str, now: datetime) -> set[str]:
         lines = [x.strip() for x in (alert_output or "").splitlines() if x.strip()]
@@ -326,7 +393,7 @@ class SentinelScheduler:
                     fps.add(f"{ip_value}|{bucket}")
             return fps
 
-        if check_key == "ssh_success_login":
+        if check_key in SSH_SUCCESS_CHECK_IDS:
             for line in lines:
                 ip_value = self._extract_first_ip(line)
                 if not ip_value:
@@ -448,7 +515,7 @@ class SentinelScheduler:
         if check.rule is None:
             return f"ℹ️ {check.name}: executed (no rule)"
 
-        if check.mode == "differential" and check_key in {"ssh_bruteforce", "ssh_success_login"}:
+        if check.mode == "differential" and check_key in SSH_ADDED_ONLY_CHECK_IDS:
             added_count = len(added_lines)
             eval_result = EvalResult(
                 triggered=added_count > 0,
@@ -506,7 +573,7 @@ class SentinelScheduler:
 
             return f"✅ {check.name}: normal (value={eval_result.current_value}, rule={rule_summary})"
 
-        if check.mode == "differential" and check_key in {"ssh_bruteforce", "ssh_success_login"}:
+        if check.mode == "differential" and check_key in SSH_ADDED_ONLY_CHECK_IDS:
             if not added_lines:
                 return (
                     f"✅ {check.name}: anomaly persists but no new ssh delta entry "
@@ -515,7 +582,7 @@ class SentinelScheduler:
             removed_lines = set()
             alert_output = "\n".join(sorted(added_lines))
 
-        if check.mode == "differential" and check_key not in {"ssh_bruteforce", "ssh_success_login"}:
+        if check.mode == "differential" and check_key not in SSH_ADDED_ONLY_CHECK_IDS:
             if not added_lines and not removed_lines:
                 return f"✅ {check.name}: anomaly persists but no differential change (value={eval_result.current_value}, rule={rule_summary})"
             alert_output = self._build_diff_payload(added_lines, removed_lines)
@@ -540,6 +607,8 @@ class SentinelScheduler:
                 check_id=check_key,
                 severity=check.severity,
                 fingerprints=fingerprints,
+                notify_on_repeat=check_key in SSH_SUCCESS_CHECK_IDS and bool(added_lines),
+                event_weight=len(added_lines) if check_key in SSH_ADDED_ONLY_CHECK_IDS else 1,
             )
 
         event = AlertEvent(

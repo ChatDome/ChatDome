@@ -49,6 +49,7 @@ class ThreatEvent:
 
     timestamp: float
     fingerprints: frozenset[str] = field(default_factory=frozenset)
+    event_count: int = 1
 
 
 @dataclass
@@ -117,7 +118,14 @@ class Suppressor:
 
     # -- Main API ----------------------------------------------------------
 
-    def process_event(self, check_id: str, severity: int, fingerprints: set[str] | None = None) -> SuppressionResult:
+    def process_event(
+        self,
+        check_id: str,
+        severity: int,
+        fingerprints: set[str] | None = None,
+        notify_on_repeat: bool = False,
+        event_weight: int = 1,
+    ) -> SuppressionResult:
         """Process one triggered event and evaluate event-driven transitions."""
         del severity  # kept in signature for compatibility/future policy hooks
         now = time.monotonic()
@@ -130,7 +138,8 @@ class Suppressor:
 
         envelope = self._envelopes.setdefault(check_id, ThreatEnvelope())
         event_fingerprints = {x.strip() for x in (fingerprints or set()) if x and x.strip()}
-        self._append_event(envelope, now, event_fingerprints)
+        event_count = max(1, int(event_weight or 1))
+        self._append_event(envelope, now, event_fingerprints, event_count)
         envelope.last_event_at = now
 
         previous_state = envelope.state
@@ -144,6 +153,17 @@ class Suppressor:
 
         event_count, unique_fingerprint_count = self._window_metrics(envelope, window_seconds=self._max_window_seconds, now=now)
         if not state_changed:
+            if notify_on_repeat:
+                return self._allow_or_rate_limit(
+                    state=envelope.state,
+                    previous_state=previous_state,
+                    reason="repeat_event",
+                    event_count=event_count,
+                    unique_fingerprint_count=unique_fingerprint_count,
+                    fingerprints=sorted(event_fingerprints),
+                    now=now,
+                    state_changed=False,
+                )
             return SuppressionResult(
                 suppressed=True,
                 reason="no_state_change",
@@ -228,7 +248,7 @@ class Suppressor:
         """Compute state transition caused by a newly triggered event."""
         state = envelope.state
         if not state or state == "RECOVERED":
-            return "NEW"
+            return self._target_escalation_state(envelope, now) or "NEW"
 
         if state == "RECOVERED_CANDIDATE":
             return "ESCALATED_L1"
@@ -258,12 +278,16 @@ class Suppressor:
         for event in envelope.events:
             if event.timestamp < cutoff:
                 continue
-            event_count += 1
+            event_count += event.event_count
             fingerprints.update(event.fingerprints)
         return event_count, len(fingerprints)
 
-    def _append_event(self, envelope: ThreatEnvelope, now: float, fingerprints: set[str]) -> None:
-        envelope.events.append(ThreatEvent(timestamp=now, fingerprints=frozenset(fingerprints)))
+    def _append_event(self, envelope: ThreatEnvelope, now: float, fingerprints: set[str], event_count: int) -> None:
+        envelope.events.append(ThreatEvent(
+            timestamp=now,
+            fingerprints=frozenset(fingerprints),
+            event_count=event_count,
+        ))
         self._prune_events(envelope, now)
 
     def _prune_events(self, envelope: ThreatEnvelope, now: float) -> None:
@@ -283,6 +307,7 @@ class Suppressor:
         unique_fingerprint_count: int,
         fingerprints: list[str],
         now: float,
+        state_changed: bool = True,
     ) -> SuppressionResult:
         cutoff = now - self._global_rate_window
         while self._push_timestamps and self._push_timestamps[0] < cutoff:
@@ -294,7 +319,7 @@ class Suppressor:
                 reason=f"rate_limit ({self._global_rate_limit}/{self._global_rate_window}s)",
                 state=state,
                 previous_state=previous_state,
-                state_changed=True,
+                state_changed=state_changed,
                 event_count=event_count,
                 unique_fingerprint_count=unique_fingerprint_count,
                 fingerprints=fingerprints,
@@ -306,7 +331,7 @@ class Suppressor:
             reason=reason,
             state=state,
             previous_state=previous_state,
-            state_changed=True,
+            state_changed=state_changed,
             event_count=event_count,
             unique_fingerprint_count=unique_fingerprint_count,
             fingerprints=fingerprints,
