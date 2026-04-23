@@ -39,7 +39,7 @@ class SentinelScheduler:
         config: SentinelConfig,
         pack_loader: PackLoader,
         sandbox: CommandSandbox,
-        send_alert_fn: Callable[[int, str], Coroutine[Any, Any, None]],
+        send_alert_fn: Callable[..., Coroutine[Any, Any, None]],
         alert_chat_ids: list[int] | None = None,
         user_context_ledger: UserContextLedger | None = None,
     ) -> None:
@@ -444,7 +444,7 @@ class SentinelScheduler:
         message = format_alert_message(event)
         for chat_id in self._alert_chat_ids:
             try:
-                await self._send_alert(chat_id, message)
+                await self._send_alert(chat_id, message, event)
             except Exception:
                 logger.exception("Failed to push alert to chat %s", chat_id)
         return True

@@ -206,42 +206,36 @@ class AlertHistory:
 
 
 def _state_card(state: str) -> dict[str, str]:
-    """Default interpretation and suggestion per state."""
+    """Default interpretation per state."""
     cards: dict[str, dict[str, str]] = {
         "NEW": {
             "label": "新威胁首次出现",
             "risk": "中",
-            "suggestion": "先确认是否为已知变更或可信来源，再决定是否封禁/隔离。",
             "next_watch": "关注 10 分钟内是否继续出现同类异常，决定是否进入升级态。",
         },
         "ESCALATED_L1": {
             "label": "一级升级",
             "risk": "中-高",
-            "suggestion": "开始限制可疑来源（如临时封禁 IP/端口），并收集相关日志证据。",
             "next_watch": "关注 20 分钟窗口内异常是否继续增多，判断是否升级到 L2。",
         },
         "ESCALATED_L2": {
             "label": "二级升级",
             "risk": "高",
-            "suggestion": "执行强化处置：收紧访问策略、启用更严格审计、准备应急隔离。",
             "next_watch": "关注 30 分钟窗口内是否达到高强度持续异常，可能升级到 L3。",
         },
         "ESCALATED_L3": {
             "label": "三级升级",
             "risk": "严重",
-            "suggestion": "按高危事件流程处理：立即隔离受影响面、保留现场、进行应急响应。",
             "next_watch": "持续监控关键指标，直至进入观察期并确认威胁收敛。",
         },
         "RECOVERED_CANDIDATE": {
             "label": "进入观察期",
             "risk": "中（待确认）",
-            "suggestion": "暂不放松防护，保持当前拦截与审计策略，验证是否真正恢复。",
             "next_watch": "观察期内若再次出现异常，将回弹到 ESCALATED_L1。",
         },
         "RECOVERED": {
             "label": "观察期通过，威胁归档",
             "risk": "低",
-            "suggestion": "归档本次处置记录，评估是否需要固化长期防护策略。",
             "next_watch": "后续若同类异常再次出现，将按新一轮威胁重新进入状态机。",
         },
     }
@@ -250,7 +244,6 @@ def _state_card(state: str) -> dict[str, str]:
         {
             "label": "状态更新",
             "risk": "未知",
-            "suggestion": "请结合原始日志和上下文做人工复核。",
             "next_watch": "继续观察后续是否出现新的状态迁移。",
         },
     )
@@ -388,12 +381,23 @@ def _ssh_sample_lines(records: list[dict[str, str]], max_items: int = 5) -> list
     return samples
 
 
+def _ssh_time_summary(records: list[dict[str, str]], max_items: int = 5) -> str:
+    times: list[str] = []
+    for record in records:
+        time_value = record.get("time", "")
+        if time_value and time_value != "未知时间" and time_value not in times:
+            times.append(time_value)
+    if not times:
+        return "未提取到"
+    suffix = f" 等{len(times)}个时间点" if len(times) > max_items else ""
+    return ", ".join(times[:max_items]) + suffix
+
+
 def _format_ssh_alert_message(event: AlertEvent) -> str:
     emoji = severity_emoji(event.severity)
     label = event.severity_label.upper()
     card = _state_card(event.alert_state) if event.alert_state else None
     success = event.check_id in SSH_SUCCESS_CHECK_IDS
-    offhours = event.check_id == "ssh_success_login_offhours"
     lines_raw = _nonempty_lines(event.raw_output)
     records = [_parse_ssh_line(line, success=success) for line in lines_raw]
     count_text = _display_number(event.current_value if event.current_value is not None else float(len(records)))
@@ -401,17 +405,12 @@ def _format_ssh_alert_message(event: AlertEvent) -> str:
     is_recovery_notice = event.alert_state in {"RECOVERED_CANDIDATE", "RECOVERED"}
 
     if is_recovery_notice:
-        what_happened = "近期未再发现新的 SSH 登录异常，状态进入观察或归档。"
         focus_label = "相关来源 IP"
     elif event.check_id == "ssh_bruteforce":
-        what_happened = f"发现新的 SSH 失败登录来源 IP，共 {count_text} 个。"
         focus_label = "新增来源 IP"
     elif success:
-        prefix = "异常时段 " if offhours else ""
-        what_happened = f"检测到 {count_text} 次新增 {prefix}SSH 成功登录。"
         focus_label = "登录来源 IP"
     else:
-        what_happened = f"检测到 {count_text} 次 SSH 登录失败，已达到告警条件。"
         focus_label = "失败来源 IP"
 
     ip_counter = Counter(record["ip"] for record in records)
@@ -422,8 +421,8 @@ def _format_ssh_alert_message(event: AlertEvent) -> str:
     lines = [
         f"{emoji} [{label}] {event.check_name}",
         "",
-        f"发生了什么: {what_happened}",
         f"告警时间: {event.timestamp}",
+        f"数量: {count_text}",
     ]
 
     if card:
@@ -434,38 +433,20 @@ def _format_ssh_alert_message(event: AlertEvent) -> str:
         lines.extend(
             [
                 "",
-                "需要关注:",
                 f"- {focus_label}: {_counter_summary(ip_counter)}",
                 f"- 相关用户: {_unique_summary(user_values)}",
                 f"- 登录方式: {_unique_summary(method_values)}",
                 f"- 目标端口: {_unique_summary(port_values)}",
             ]
         )
-        lines.append(f"- 记录时间: {records[0]['time']} 至 {records[-1]['time']}")
+        lines.append(f"- 时间: {_ssh_time_summary(records)}")
     else:
-        lines.extend(["", "需要关注:", "- 本次是状态变化通知，没有新的 SSH 日志记录。"])
-
-    lines.extend(["", "建议处理:"])
-    if success:
-        lines.extend(
-            [
-                "- 先确认这些 IP 是否属于你或可信跳板机。",
-                "- 若来源不可信，立即检查当前登录会话、最近命令、authorized_keys 和 root 密码/密钥。",
-                "- 建议临时限制来源 IP，并优先关闭密码登录或收紧 SSH 访问范围。",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "- 优先关注失败次数最多的来源 IP，确认是否为扫描或暴力尝试。",
-                "- 若来源不可信，考虑临时封禁、启用限速，并检查是否存在随后成功登录。",
-                "- 建议确认 SSH 是否仍允许密码登录，必要时改为密钥登录并限制 root 登录。",
-            ]
-        )
+        lines.extend(["", "- 本次是状态变化通知，没有新的 SSH 日志记录。"])
 
     samples = _ssh_sample_lines(records)
     if samples:
-        lines.extend(["", "样例记录:"])
+        record_title = "登录记录:" if success else "失败记录:"
+        lines.extend(["", record_title])
         lines.extend(samples)
 
     return "\n".join(lines)
@@ -484,9 +465,8 @@ def format_alert_message(event: AlertEvent) -> str:
     lines = [
         f"{emoji} [{label}] {event.check_name}",
         "",
-        f"发生了什么: {mode_label}触发了安全告警。",
         f"告警时间: {event.timestamp}",
-        f"触发数量: {value_text}",
+        f"{mode_label}: {value_text}",
     ]
 
     if event.alert_state:
@@ -497,7 +477,6 @@ def format_alert_message(event: AlertEvent) -> str:
                 f"威胁状态: {card['label']} ({_alert_transition(event)})",
                 f"风险判断: {card['risk']}",
                 f"触发原因: {event.rule}",
-                f"建议处理: {card['suggestion']}",
                 f"下一观察点: {card['next_watch']}",
             ]
         )

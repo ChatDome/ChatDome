@@ -54,7 +54,8 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
         second_delta = first_delta + "Apr 23 10:02:00 root 203.0.113.10 22 publickey\n"
         alerts: list[tuple[int, str]] = []
 
-        async def send_alert(chat_id: int, text: str) -> None:
+        async def send_alert(chat_id: int, text: str, alert_event=None) -> None:
+            del alert_event
             alerts.append((chat_id, text))
 
         old_cwd = os.getcwd()
@@ -94,7 +95,8 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
         )
         alerts: list[tuple[int, str]] = []
 
-        async def send_alert(chat_id: int, text: str) -> None:
+        async def send_alert(chat_id: int, text: str, alert_event=None) -> None:
+            del alert_event
             alerts.append((chat_id, text))
 
         old_cwd = os.getcwd()

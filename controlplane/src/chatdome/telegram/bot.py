@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +82,8 @@ class TelegramBot:
         self._environment_profile_path = Path("chat_data/environment_profile.md")
         self._sentinel: Any = None   # SentinelScheduler, injected via set_sentinel()
         self._pack_loader: Any = None
+        self._alert_analysis_cache: dict[str, dict[str, Any]] = {}
+        self._alert_analysis_cache_max = 200
         # Default policy: plain text output; markdown can be enabled per message.
         self._formatter = TelegramMessageFormatter(enable_markdown=True)
 
@@ -381,6 +385,11 @@ class TelegramBot:
             chat_id = chat.id
             callback_data = query.data or ""
 
+            if callback_data.startswith("sentinel_alert_analysis:"):
+                alert_token = callback_data.split(":", 1)[1].strip()
+                await self._handle_sentinel_alert_analysis(query, chat_id, alert_token)
+                return
+
             if callback_data in {"continue_round_task", "abandon_round_task"}:
                 action = "CONTINUE" if callback_data == "continue_round_task" else "ABANDON"
                 try:
@@ -574,13 +583,144 @@ class TelegramBot:
         text: str,
         *,
         markup: MessageMarkup = MessageMarkup.PLAIN,
+        reply_markup=None,
     ) -> None:
         """Send bot-initiated chat message through formatter policy."""
         rendered = self._formatter.render(text, markup=markup)
         kwargs: dict[str, Any] = {}
         if rendered.parse_mode:
             kwargs["parse_mode"] = rendered.parse_mode
+        if reply_markup is not None:
+            kwargs["reply_markup"] = reply_markup
         await bot.send_message(chat_id=chat_id, text=rendered.text, **kwargs)
+
+    def _cache_alert_analysis_context(
+        self,
+        *,
+        chat_id: int,
+        alert_text: str,
+        alert_event: Any | None,
+    ) -> str:
+        token = uuid.uuid4().hex[:16]
+        event_payload: Any = None
+        if alert_event is not None:
+            if hasattr(alert_event, "to_dict"):
+                try:
+                    event_payload = alert_event.to_dict()
+                except Exception:
+                    logger.exception("Failed to serialize alert event for analysis")
+                    event_payload = str(alert_event)
+            elif isinstance(alert_event, dict):
+                event_payload = alert_event
+            else:
+                event_payload = str(alert_event)
+
+        self._alert_analysis_cache[token] = {
+            "chat_id": chat_id,
+            "alert_text": alert_text,
+            "event": event_payload,
+            "created_at": time.time(),
+        }
+
+        while len(self._alert_analysis_cache) > self._alert_analysis_cache_max:
+            oldest_token = min(
+                self._alert_analysis_cache,
+                key=lambda key: float(self._alert_analysis_cache[key].get("created_at", 0.0)),
+            )
+            self._alert_analysis_cache.pop(oldest_token, None)
+
+        return token
+
+    def _read_environment_profile_for_llm(self, max_chars: int = 6000) -> str:
+        path = self._environment_profile_path
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return f"未找到环境档案: {path}"
+        except OSError as exc:
+            return f"读取环境档案失败: {exc}"
+
+        if not text:
+            return f"环境档案为空: {path}"
+        if len(text) > max_chars:
+            return text[:max_chars] + "\n... (已截断)"
+        return text
+
+    async def _handle_sentinel_alert_analysis(self, query, chat_id: int, alert_token: str) -> None:
+        cached = self._alert_analysis_cache.get(alert_token)
+        if not cached or cached.get("chat_id") != chat_id:
+            await self._send_long_message(
+                query.message,
+                "这条告警上下文已过期，请查看 /sentinel_history 或等待下一次告警。",
+            )
+            return
+
+        thinking_msg = await query.message.reply_text("正在生成告警分析...")
+        try:
+            env_text = self._read_environment_profile_for_llm()
+            alert_text = str(cached.get("alert_text") or "")
+            event_payload = cached.get("event")
+            if isinstance(event_payload, str):
+                event_text = event_payload
+            else:
+                event_text = json.dumps(event_payload or {}, ensure_ascii=False, indent=2)
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是 ChatDome 的主机安全告警分析助手。"
+                        "只基于提供的环境信息和告警信息分析，不要声称已经执行过命令。"
+                        "输出中文，面向运维人员，简洁、具体、可执行。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "请分析这条 Sentinel 告警。\n\n"
+                        "要求:\n"
+                        "- 先给出一句风险判断。\n"
+                        "- 点出最值得关注的 IP、用户、端口、时间点和可能原因。\n"
+                        "- 给出下一步核实/处置建议，优先使用只读排查命令；如果需要变更操作，请明确提示需要人工确认。\n"
+                        "- 不要复述卡片里的全部原始内容。\n\n"
+                        f"环境信息:\n{env_text}\n\n"
+                        f"告警卡片:\n{alert_text}\n\n"
+                        f"结构化告警:\n{event_text}"
+                    ),
+                },
+            ]
+            response = await asyncio.wait_for(
+                self.agent.llm.chat_completion(messages=messages, tools=None),
+                timeout=90,
+            )
+
+            try:
+                from chatdome.agent.tracker import TokenTracker
+                TokenTracker.record_usage(
+                    chat_id=chat_id,
+                    model=self.agent.llm.model,
+                    action="sentinel_alert_analysis",
+                    prompt_tokens=response.prompt_tokens,
+                    completion_tokens=response.completion_tokens,
+                    total_tokens=response.total_tokens,
+                )
+            except Exception:
+                logger.exception("Failed to record Sentinel alert analysis token usage")
+
+            content = (response.content or "").strip() or "LLM 未返回有效分析。"
+        except TimeoutError:
+            logger.exception("Sentinel alert analysis timed out")
+            content = "告警分析超时，请稍后重试。"
+        except Exception as exc:
+            logger.exception("Sentinel alert analysis failed")
+            content = f"告警分析失败: {exc}"
+        finally:
+            try:
+                await thinking_msg.delete()
+            except Exception:
+                pass
+
+        await self._send_long_message(query.message, content)
 
     def _check_auth(self, update: Update) -> bool:
         """Check if the message sender is authorized."""
@@ -775,15 +915,27 @@ class TelegramBot:
             text = text[:self.max_message_length - 20] + "\n... (已截断)"
         await update.message.reply_text(text)
 
-    async def send_alert(self, chat_id: int, text: str) -> None:
+    async def send_alert(self, chat_id: int, text: str, alert_event: Any | None = None) -> None:
         """Send an alert message to a specific chat. Used by Sentinel Alerter."""
         if self._app is None:
             logger.warning("Cannot send alert: app not initialized")
             return
         try:
+            original_text = text
+            reply_markup = None
+            if alert_event is not None:
+                token = self._cache_alert_analysis_context(
+                    chat_id=chat_id,
+                    alert_text=original_text,
+                    alert_event=alert_event,
+                )
+                reply_markup = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("告警分析", callback_data=f"sentinel_alert_analysis:{token}")]]
+                )
+
             if len(text) > self.max_message_length:
                 text = text[:self.max_message_length - 20] + "\n... (已截断)"
-            await self._send_bot_text(self._app.bot, chat_id, text)
+            await self._send_bot_text(self._app.bot, chat_id, text, reply_markup=reply_markup)
         except Exception:
             logger.exception("Failed to send alert to chat %s", chat_id)
 

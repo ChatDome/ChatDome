@@ -41,25 +41,29 @@ class AlertFormatTests(unittest.TestCase):
                 fingerprint="1.2.3.4|22|unknown|failed",
             )
         )
-        self.assertIn("发生了什么:", msg)
+        self.assertIn("告警时间:", msg)
         self.assertIn("威胁状态:", msg)
         self.assertIn("风险判断:", msg)
         self.assertIn("触发原因:", msg)
-        self.assertIn("建议处理:", msg)
         self.assertIn("下一观察点:", msg)
         self.assertNotIn("当前值:", msg)
         self.assertNotIn("指纹:", msg)
         self.assertNotIn("原始数据:", msg)
+        self.assertNotIn("发生了什么", msg)
+        self.assertNotIn("需要关注", msg)
+        self.assertNotIn("建议处理", msg)
 
-    def test_new_state_has_default_suggestion(self):
+    def test_new_state_omits_default_suggestion(self):
         msg = format_alert_message(self._event(state="NEW"))
         self.assertIn("新威胁首次出现", msg)
-        self.assertIn("先确认是否为已知变更或可信来源", msg)
+        self.assertNotIn("先确认是否为已知变更或可信来源", msg)
+        self.assertIn("下一观察点:", msg)
 
-    def test_recovered_state_has_archive_hint(self):
+    def test_recovered_state_omits_archive_suggestion(self):
         msg = format_alert_message(self._event(state="RECOVERED", previous="RECOVERED_CANDIDATE"))
         self.assertIn("观察期通过，威胁归档", msg)
-        self.assertIn("固化长期防护策略", msg)
+        self.assertNotIn("固化长期防护策略", msg)
+        self.assertIn("下一观察点:", msg)
 
     def test_ssh_failed_burst_focuses_on_source_ips(self):
         msg = format_alert_message(
@@ -80,13 +84,18 @@ class AlertFormatTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("检测到 12 次 SSH 登录失败", msg)
+        self.assertIn("数量: 12", msg)
         self.assertIn("失败来源 IP: 45.77.105.217 (2次), 114.246.239.136 (1次)", msg)
         self.assertIn("相关用户: root, admin", msg)
-        self.assertIn("样例记录:", msg)
+        self.assertIn("失败记录:", msg)
+        self.assertIn("时间: Apr 23 10:10:16, Apr 23 10:11:23, Apr 23 10:11:37", msg)
         self.assertNotIn("line count", msg)
         self.assertNotIn("原始数据", msg)
         self.assertNotIn("指纹", msg)
+        self.assertNotIn("发生了什么", msg)
+        self.assertNotIn("需要关注", msg)
+        self.assertNotIn("建议处理", msg)
+        self.assertNotIn(" 至 ", msg)
 
     def test_ssh_success_login_focuses_on_login_details(self):
         msg = format_alert_message(
@@ -102,14 +111,20 @@ class AlertFormatTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("检测到 2 次新增 SSH 成功登录", msg)
+        self.assertIn("数量: 2", msg)
         self.assertIn("登录来源 IP: 114.246.239.136 (2次)", msg)
         self.assertIn("相关用户: root", msg)
         self.assertIn("登录方式: publickey", msg)
         self.assertIn("root@114.246.239.136:51979", msg)
+        self.assertIn("登录记录:", msg)
+        self.assertIn("时间: Apr 23 10:11:29, Apr 23 10:11:37", msg)
         self.assertNotIn("当前值", msg)
         self.assertNotIn("原始数据", msg)
         self.assertNotIn("指纹", msg)
+        self.assertNotIn("发生了什么", msg)
+        self.assertNotIn("需要关注", msg)
+        self.assertNotIn("建议处理", msg)
+        self.assertNotIn(" 至 ", msg)
 
 
 if __name__ == "__main__":
