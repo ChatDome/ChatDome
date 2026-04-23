@@ -318,20 +318,38 @@ class TelegramBot:
 
     # ----- Interactive Approval -----
 
-    async def _send_approval_request(self, message, _data: dict) -> None:
+    async def _send_approval_request(self, message, data: dict) -> None:
+        approval_id = str((data or {}).get("approval_id") or "").strip()
+        risk_level = str((data or {}).get("risk_level") or "unknown").strip()
+        command_hash = str((data or {}).get("command_hash") or "").strip()
+        hash_line = f"\n命令指纹: {command_hash[:12]}" if command_hash else ""
+        approval_line = f"审批编号: {approval_id}\n" if approval_id else ""
         text = (
             "⚠️ 检测到需要审批的系统操作。\n"
+            f"{approval_line}"
+            f"风险等级: {risk_level}{hash_line}\n"
             "默认不展示命令细节。\n"
-            "你可以直接允许/拒绝，或先查看详细命令及影响分析。"
+            "你可以直接允许/拒绝，或先查看详细命令及影响分析。\n"
+            "文本确认可发送 /confirm <审批编号>，文本拒绝可发送 /reject <审批编号>。"
         )
+        if approval_id:
+            approve_data = f"approval:approve:{approval_id}"
+            approve_task_data = f"approval:approve_task:{approval_id}"
+            reject_data = f"approval:reject:{approval_id}"
+            detail_data = f"approval:details:{approval_id}"
+        else:
+            approve_data = "approve_cmd"
+            approve_task_data = "approve_task_cmd"
+            reject_data = "reject_cmd"
+            detail_data = "show_cmd_details"
         keyboard = [
             [
-                InlineKeyboardButton("✅ 允许", callback_data="approve_cmd"),
-                InlineKeyboardButton("✅ 本次任务允许", callback_data="approve_task_cmd"),
+                InlineKeyboardButton("✅ 允许", callback_data=approve_data),
+                InlineKeyboardButton("✅ 本次任务允许", callback_data=approve_task_data),
             ],
             [
-                InlineKeyboardButton("❌ 拒绝", callback_data="reject_cmd"),
-                InlineKeyboardButton("🔎 详细命令", callback_data="show_cmd_details"),
+                InlineKeyboardButton("❌ 拒绝", callback_data=reject_data),
+                InlineKeyboardButton("🔎 详细命令", callback_data=detail_data),
             ],
         ]
         await self._reply_text(
@@ -390,6 +408,14 @@ class TelegramBot:
                 await self._handle_sentinel_alert_analysis(query, chat_id, alert_token)
                 return
 
+            approval_action = ""
+            approval_id = ""
+            if callback_data.startswith("approval:"):
+                parts = callback_data.split(":", 2)
+                if len(parts) == 3:
+                    approval_action = parts[1].strip()
+                    approval_id = parts[2].strip()
+
             if callback_data in {"continue_round_task", "abandon_round_task"}:
                 action = "CONTINUE" if callback_data == "continue_round_task" else "ABANDON"
                 try:
@@ -419,11 +445,11 @@ class TelegramBot:
                     await self._send_long_message(query.message, final_response)
                 return
 
-            if callback_data == "show_cmd_details":
+            if callback_data == "show_cmd_details" or approval_action == "details":
                 await self._send_long_message(query.message, "正在分析命令影响，请稍候...")
                 try:
                     details = await asyncio.wait_for(
-                        self.agent.get_pending_approval_details(chat_id),
+                        self.agent.get_pending_approval_details(chat_id, approval_id=approval_id or None),
                         timeout=25,
                     )
                 except TimeoutError:
@@ -441,9 +467,13 @@ class TelegramBot:
                     return
 
                 analysis = details.get("analysis", {}) or {}
+                command_hash = str(details.get("command_hash", ""))
                 text = (
                     "Approval details\n\n"
+                    f"Approval ID: {details.get('approval_id', '')}\n"
+                    f"Run ID: {details.get('run_id', '')}\n"
                     f"Command: {details.get('command', '')}\n"
+                    f"Command hash: {command_hash[:12]}\n"
                     f"Intent: {details.get('reason', '')}\n"
                     f"Safety status: {analysis.get('safety_status', 'UNSAFE')}\n"
                     f"Risk level: {analysis.get('risk_level', 'HIGH')}\n"
@@ -453,10 +483,16 @@ class TelegramBot:
                     f"Impact analysis:\n{analysis.get('impact_analysis', '')}"
                 )
                 await self._send_long_message(query.message, text)
-                await self._send_approval_request(query.message, {})
+                await self._send_approval_request(query.message, details)
                 return
 
-            if callback_data == "approve_task_cmd":
+            if approval_action == "approve_task":
+                action = "APPROVE_TASK"
+            elif approval_action == "approve":
+                action = "APPROVE"
+            elif approval_action == "reject":
+                action = "REJECT"
+            elif callback_data == "approve_task_cmd":
                 action = "APPROVE_TASK"
             elif callback_data == "approve_cmd":
                 action = "APPROVE"
@@ -475,7 +511,7 @@ class TelegramBot:
             thinking_msg = await query.message.reply_text("Processing...")
             try:
                 raw_result, final_response = await asyncio.wait_for(
-                    self.agent.resume_session(chat_id, action),
+                    self.agent.resume_session(chat_id, action, approval_id=approval_id or None),
                     timeout=90,
                 )
             finally:
@@ -510,9 +546,10 @@ class TelegramBot:
             return
             
         chat_id = update.effective_chat.id
+        approval_id = context.args[0].strip() if context.args else None
         thinking_msg = await update.message.reply_text("🤔 强制批准执行中...")
         try:
-            raw_result, final_response = await self.agent.resume_session(chat_id, "APPROVE")
+            raw_result, final_response = await self.agent.resume_session(chat_id, "APPROVE", approval_id=approval_id)
             try:
                 await thinking_msg.delete()
             except Exception:
@@ -538,9 +575,10 @@ class TelegramBot:
             return
 
         chat_id = update.effective_chat.id
+        approval_id = context.args[0].strip() if context.args else None
         thinking_msg = await update.message.reply_text("🤹 正在拒绝待执行命令...")
         try:
-            _, final_response = await self.agent.resume_session(chat_id, "REJECT")
+            _, final_response = await self.agent.resume_session(chat_id, "REJECT", approval_id=approval_id)
             try:
                 await thinking_msg.delete()
             except Exception:

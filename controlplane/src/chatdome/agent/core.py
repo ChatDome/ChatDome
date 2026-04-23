@@ -8,6 +8,7 @@ Orchestrates the cycle:
 from __future__ import annotations
 
 import logging
+import secrets
 import time
 from typing import Any
 
@@ -67,6 +68,22 @@ class Agent:
         except Exception as e:
             logger.warning("Session persistence failed for chat_id=%s: %s", getattr(session, "chat_id", "?"), e)
 
+    @staticmethod
+    def _new_approval_id() -> str:
+        """Generate a short user-facing approval identifier."""
+        return f"AP-{time.strftime('%Y%m%d-%H%M%S', time.localtime())}-{secrets.token_hex(3).upper()}"
+
+    @staticmethod
+    def _new_run_id(chat_id: int) -> str:
+        """Generate a lightweight run id for binding the pending approval."""
+        return f"RUN-{chat_id}-{time.strftime('%Y%m%d-%H%M%S', time.localtime())}-{secrets.token_hex(3).upper()}"
+
+    @staticmethod
+    def _command_hash(command: str | None) -> str:
+        """Stable command digest used to bind approval to exactly one command."""
+        normalized = (command or "").strip()
+        return CommandAuditTracker.sha256_text(normalized)
+
     async def handle_message(self, chat_id: int, user_message: str) -> str:
         """Process a user message through the full ReAct loop."""
         session = self.session_manager.get_or_create(chat_id)
@@ -121,20 +138,70 @@ class Agent:
         logger.info("User abandoned task after %d rounds (chat_id=%d)", reached, chat_id)
         return final_text
 
-    async def resume_session(self, chat_id: int, action: str) -> tuple[str, str]:
+    async def resume_session(
+        self,
+        chat_id: int,
+        action: str,
+        approval_id: str | None = None,
+    ) -> tuple[str, str]:
         """Resume a suspended session after user approval/rejection. Returns (raw_result, llm_response)."""
         session = self.session_manager.get_or_create(chat_id)
         if not session.pending_approval or not session.pending_tool_call_id:
             return "", "ℹ️ 当前没有等待确认的命令。"
 
         tool_call_id = session.pending_tool_call_id
-        command = session.pending_command
+        command = session.pending_command or ""
+        pending_approval_id = session.pending_approval_id or ""
+        pending_run_id = session.pending_run_id or ""
+        pending_command_hash = session.pending_command_hash or self._command_hash(command)
+        requested_approval_id = (approval_id or "").strip()
+
+        if requested_approval_id and pending_approval_id and requested_approval_id != pending_approval_id:
+            return (
+                "",
+                (
+                    "⚠️ 审批编号不匹配，未执行任何命令。\n\n"
+                    f"当前待审批编号: {pending_approval_id}\n"
+                    f"收到的审批编号: {requested_approval_id}"
+                ),
+            )
+
         normalized_action = (action or "").strip().upper()
         if normalized_action not in {"APPROVE", "APPROVE_TASK", "REJECT"}:
             normalized_action = "REJECT"
         followup_summary = self._summarize_pending_followups(session)
         if normalized_action == "APPROVE_TASK":
             session.task_auto_approve = True
+
+        current_command_hash = self._command_hash(command)
+        if normalized_action in {"APPROVE", "APPROVE_TASK"} and pending_command_hash != current_command_hash:
+            logger.warning(
+                "Pending approval command hash mismatch: approval_id=%s expected=%s actual=%s",
+                pending_approval_id,
+                pending_command_hash,
+                current_command_hash,
+            )
+            CommandAuditTracker.record_event(
+                "command_approval_hash_mismatch",
+                chat_id=chat_id,
+                approval_id=pending_approval_id,
+                run_id=pending_run_id,
+                tool_call_id=tool_call_id,
+                command=command,
+                expected_command_hash=pending_command_hash,
+                actual_command_hash=current_command_hash,
+                approval_action=normalized_action,
+            )
+            session.task_auto_approve = False
+            session.clear_pending_state()
+            tool_result_for_llm = (
+                "审批恢复失败：待执行命令的哈希与审批单不一致。"
+                "系统已按 fail-safe 策略拒绝执行该命令。"
+            )
+            session.add_tool_result(tool_call_id, tool_result_for_llm)
+            self._persist_session(session)
+            final_answer = await self._run_loop(chat_id, session)
+            return "命令校验失败，已拒绝执行。", final_answer
 
         # Clear pending state before continuing the normal loop.
         session.clear_pending_state()
@@ -146,8 +213,11 @@ class Agent:
             CommandAuditTracker.record_event(
                 "command_rejected",
                 chat_id=chat_id,
+                approval_id=pending_approval_id,
+                run_id=pending_run_id,
                 tool_call_id=tool_call_id,
                 command=command,
+                command_hash=pending_command_hash,
                 approval_action="REJECT",
             )
             tool_result_for_llm = "由于存在安全风险，用户已拒绝执行该命令。请提供其他解决方案或向用户解释。"
@@ -163,8 +233,11 @@ class Agent:
             CommandAuditTracker.record_event(
                 "command_approved",
                 chat_id=chat_id,
+                approval_id=pending_approval_id,
+                run_id=pending_run_id,
                 tool_call_id=tool_call_id,
                 command=command,
+                command_hash=pending_command_hash,
                 approval_action=normalized_action,
             )
             try:
@@ -191,7 +264,11 @@ class Agent:
         final_answer = await self._run_loop(chat_id, session)
         return raw_result, final_answer
 
-    async def get_pending_approval_details(self, chat_id: int) -> dict[str, Any]:
+    async def get_pending_approval_details(
+        self,
+        chat_id: int,
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
         """
         Return full details for the currently pending approval.
 
@@ -202,6 +279,17 @@ class Agent:
             return {
                 "ok": False,
                 "message": "No pending command requires approval.",
+            }
+
+        requested_approval_id = (approval_id or "").strip()
+        current_approval_id = session.pending_approval_id or ""
+        if requested_approval_id and current_approval_id and requested_approval_id != current_approval_id:
+            return {
+                "ok": False,
+                "message": (
+                    "Approval ID mismatch. "
+                    f"Current pending approval is {current_approval_id}, not {requested_approval_id}."
+                ),
             }
 
         if session.pending_analysis is None:
@@ -215,8 +303,12 @@ class Agent:
 
         return {
             "ok": True,
+            "approval_id": session.pending_approval_id or "",
+            "run_id": session.pending_run_id or "",
             "command": session.pending_command,
+            "command_hash": session.pending_command_hash or self._command_hash(session.pending_command or ""),
             "reason": session.pending_reason or "",
+            "risk_level": session.pending_risk_level or "",
             "analysis": session.pending_analysis,
         }
 
@@ -258,6 +350,8 @@ class Agent:
             content = str(item.get("content", "")).strip()
             if not content:
                 continue
+            if Agent._looks_like_tool_call_text(content):
+                continue
             prefix = "用户" if role == "user" else "助手"
             lines.append(f"{prefix}: {content}")
 
@@ -266,6 +360,71 @@ class Agent:
             summary = summary[:max_chars] + "\n...(已截断)"
         return summary
 
+    @staticmethod
+    def _looks_like_tool_call_text(content: str) -> bool:
+        """Detect pseudo tool-call text that should never enter side-thread memory."""
+        text = (content or "").strip().lower()
+        if not text:
+            return False
+        markers = (
+            "<tool_call",
+            "</tool_call>",
+            "<function=",
+            "</function>",
+            "<parameter=",
+            "</parameter>",
+        )
+        return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _is_new_execution_request_while_pending(user_message: str) -> bool:
+        """Detect requests that would require starting another command while one is pending."""
+        text = (user_message or "").strip().lower()
+        if not text:
+            return False
+
+        explanation_keywords = (
+            "为什么", "原因", "风险", "危险", "安全吗", "安全么", "影响", "会做什么",
+            "什么意思", "解释", "详细", "命令内容", "这个命令", "这条命令", "替代方案",
+            "why", "risk", "safe", "explain", "detail", "details", "alternative",
+        )
+        if any(keyword in text for keyword in explanation_keywords):
+            return False
+
+        execution_keywords = (
+            "查询", "查看", "检查", "执行", "运行", "跑一下", "看一下", "看下",
+            "多少", "有没有", "是否", "列出", "统计", "状态", "封禁", "拉取",
+            "show", "list", "check", "status", "run", "execute", "how many",
+        )
+        return any(keyword in text for keyword in execution_keywords)
+
+    @staticmethod
+    def _pending_command_waiting_message(command: str, approval_id: str | None = None) -> str:
+        """Deterministic response for new requests while a command waits for approval."""
+        approval_line = f"审批编号: `{approval_id}`\n" if approval_id else ""
+        return (
+            "当前已有一条命令等待确认。你可以继续问不需要执行命令的问题；"
+            "但涉及实时主机状态的新查询，需要先处理这条待确认命令。\n\n"
+            f"{approval_line}"
+            f"待确认命令: `{command or '(unknown)'}`\n\n"
+            "如果你想得到这条命令的结果，请点击“允许”或发送 `/confirm <审批编号>`；"
+            "如果不想执行，请点击“拒绝”或发送 `/reject <审批编号>`。"
+        )
+
+    @classmethod
+    def _prune_pending_followups(cls, session: Any) -> None:
+        """Drop malformed side-thread entries, including old persisted pseudo tool calls."""
+        cleaned: list[dict[str, str]] = []
+        for item in getattr(session, "pending_followups", []) or []:
+            role = item.get("role")
+            content = str(item.get("content", "")).strip()
+            if role not in {"user", "assistant"} or not content:
+                continue
+            if cls._looks_like_tool_call_text(content):
+                continue
+            cleaned.append({"role": role, "content": content})
+        session.pending_followups = cleaned[-12:]
+
     async def _handle_pending_followup(self, chat_id: int, session: Any, user_message: str) -> str:
         """
         Handle user follow-up while a risky command is pending approval.
@@ -273,38 +432,36 @@ class Agent:
         Keep these follow-ups out of the main message chain to avoid breaking
         tool_call -> tool_result ordering required by the LLM API.
         """
+        self._prune_pending_followups(session)
+        pending_cmd = session.pending_command or "(unknown)"
+        pending_approval_id = session.pending_approval_id or ""
+        pending_reason = session.pending_reason or ""
+
+        if self._is_new_execution_request_while_pending(user_message):
+            session.last_active = time.time()
+            self._persist_session(session)
+            return self._pending_command_waiting_message(pending_cmd, pending_approval_id)
+
         session.add_pending_followup("user", user_message)
         self._persist_session(session)
 
-        pending_cmd = session.pending_command or "(unknown)"
-        pending_tool_call_id = session.pending_tool_call_id or "pending_tool_call"
         followup_messages = [
             {"role": item["role"], "content": item["content"]}
             for item in session.pending_followups
             if item.get("role") in {"user", "assistant"} and item.get("content")
         ]
 
-        guidance = (
-            "你正在处理审批等待阶段的追问。现在有一条高风险命令等待人工确认。\n"
+        approval_context = (
+            "现在有一条命令正在等待人工确认，尚未执行。\n"
             f"待确认命令: {pending_cmd}\n"
-            "要求:\n"
-            "1) 回答用户关于该命令的疑问、风险、替代方案；\n"
-            "2) 不要调用工具，不要声称已执行任何命令；\n"
-            "3) 最后提醒：发送 /confirm 执行，或回复“拒绝/取消”来拒绝。"
+            f"申请理由: {pending_reason or '未提供'}\n\n"
+            "你只能解释这条待确认命令的目的、风险、影响和替代方案。"
+            "不要调用工具，不要输出 tool_call/XML/函数调用，不要声称已经执行命令。"
+            "如果用户要求查询新的系统状态或执行新任务，请说明必须先允许或拒绝当前待确认命令。"
+            "最后提醒用户：发送 /confirm 执行，或回复“拒绝/取消”来拒绝。"
         )
 
-        # Inject an ephemeral tool result so this temporary side-thread remains
-        # protocol-valid even when the main chain is paused at tool-call stage.
-        ephemeral_messages = (
-            session.messages
-            + [{
-                "role": "tool",
-                "tool_call_id": pending_tool_call_id,
-                "content": "[Command execution is paused pending user confirmation. No execution yet.]",
-            }]
-            + [{"role": "system", "content": guidance}]
-            + followup_messages
-        )
+        ephemeral_messages = [{"role": "system", "content": approval_context}] + followup_messages
 
         try:
             response = await self.llm.chat_completion(
@@ -312,6 +469,9 @@ class Agent:
                 tools=None,
             )
             content = response.content or "我已记录你的问题。该命令还在等待确认，我可以继续解释风险与替代方案。"
+            if response.tool_calls or self._looks_like_tool_call_text(content):
+                logger.warning("LLM returned tool-like content during pending approval follow-up")
+                content = self._pending_command_waiting_message(pending_cmd, pending_approval_id)
 
             from chatdome.agent.tracker import TokenTracker
             TokenTracker.record_usage(
@@ -329,7 +489,8 @@ class Agent:
                 "你可以继续问风险和替代方案；若决定执行请发 /confirm，若放弃请回复“拒绝执行”。"
             )
 
-        session.add_pending_followup("assistant", content)
+        if not self._looks_like_tool_call_text(content):
+            session.add_pending_followup("assistant", content)
         self._persist_session(session)
         return content
 
@@ -422,16 +583,38 @@ class Agent:
                             continue
 
                         logger.info("Execution suspended for user approval: %s", tc.id)
+                        approval_id = self._new_approval_id()
+                        run_id = self._new_run_id(chat_id)
+                        command_hash = self._command_hash(e.command)
                         session.pending_approval = True
+                        session.pending_approval_id = approval_id
+                        session.pending_run_id = run_id
                         session.pending_tool_call_id = e.tool_call_id
                         session.pending_command = e.command
+                        session.pending_command_hash = command_hash
                         session.pending_reason = getattr(e, "reason", "")
+                        session.pending_risk_level = getattr(e, "risk_level", "")
                         session.pending_analysis = None
                         session.pending_since = time.time()
                         session.pending_followups.clear()
+                        CommandAuditTracker.record_event(
+                            "command_approval_created",
+                            chat_id=chat_id,
+                            approval_id=approval_id,
+                            run_id=run_id,
+                            tool_call_id=e.tool_call_id,
+                            command=e.command,
+                            command_hash=command_hash,
+                            reason=getattr(e, "reason", ""),
+                            risk_level=getattr(e, "risk_level", ""),
+                        )
                         payload = {
-                            "command": e.command, 
+                            "approval_id": approval_id,
+                            "run_id": run_id,
+                            "command": e.command,
+                            "command_hash": command_hash,
                             "reason": getattr(e, 'reason', ''),
+                            "risk_level": getattr(e, "risk_level", ""),
                             "requires_detail_expansion": True,
                         }
                         self._persist_session(session)

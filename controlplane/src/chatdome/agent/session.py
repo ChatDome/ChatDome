@@ -35,11 +35,15 @@ class AgentSession:
     
     # Pause/Resume state for Human-in-the-loop
     pending_approval: bool = False
+    pending_approval_id: str | None = None
+    pending_run_id: str | None = None
     pending_tool_call_id: str | None = None
     pending_command: str | None = None
+    pending_command_hash: str | None = None
     pending_since: float | None = None
     pending_followups: list[dict[str, str]] = field(default_factory=list)
     pending_reason: str | None = None
+    pending_risk_level: str | None = None
     pending_analysis: dict[str, Any] | None = None
     task_auto_approve: bool = False
     pending_round_limit: bool = False
@@ -57,11 +61,15 @@ class AgentSession:
             "last_active": self.last_active,
             "round_count": self.round_count,
             "pending_approval": self.pending_approval,
+            "pending_approval_id": self.pending_approval_id,
+            "pending_run_id": self.pending_run_id,
             "pending_tool_call_id": self.pending_tool_call_id,
             "pending_command": self.pending_command,
+            "pending_command_hash": self.pending_command_hash,
             "pending_since": self.pending_since,
             "pending_followups": self.pending_followups,
             "pending_reason": self.pending_reason,
+            "pending_risk_level": self.pending_risk_level,
             "pending_analysis": self.pending_analysis,
             "task_auto_approve": self.task_auto_approve,
             "pending_round_limit": self.pending_round_limit,
@@ -90,8 +98,11 @@ class AgentSession:
             last_active=float(payload.get("last_active", time.time())),
             round_count=int(payload.get("round_count", 0)),
             pending_approval=bool(payload.get("pending_approval", False)),
+            pending_approval_id=payload.get("pending_approval_id"),
+            pending_run_id=payload.get("pending_run_id"),
             pending_tool_call_id=payload.get("pending_tool_call_id"),
             pending_command=payload.get("pending_command"),
+            pending_command_hash=payload.get("pending_command_hash"),
             pending_since=(
                 float(payload["pending_since"])
                 if payload.get("pending_since") is not None
@@ -99,6 +110,7 @@ class AgentSession:
             ),
             pending_followups=pending_followups,
             pending_reason=payload.get("pending_reason"),
+            pending_risk_level=payload.get("pending_risk_level"),
             pending_analysis=payload.get("pending_analysis")
             if isinstance(payload.get("pending_analysis"), dict)
             else None,
@@ -161,11 +173,15 @@ class AgentSession:
     def clear_pending_state(self) -> None:
         """Reset all pending-approval related state."""
         self.pending_approval = False
+        self.pending_approval_id = None
+        self.pending_run_id = None
         self.pending_tool_call_id = None
         self.pending_command = None
+        self.pending_command_hash = None
         self.pending_since = None
         self.pending_followups.clear()
         self.pending_reason = None
+        self.pending_risk_level = None
         self.pending_analysis = None
 
     def clear_pending_round_limit(self) -> None:
