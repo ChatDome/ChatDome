@@ -168,6 +168,19 @@ chatdome:
           operator: ">"
           threshold: 0
 
+      - name: "SSH 会话命令巡检"
+        check_id: ssh_session_commands_patrol
+        interval: 900                    # 每 15 分钟追踪活跃 SSH 会话命令增量
+        mode: differential
+        args:
+          tracking_window_hours: 1        # 仅主动追踪登录后 1 小时内的会话
+          limit: 50
+        severity: 7                       # high
+        rule:
+          type: added_count
+          operator: ">"
+          threshold: 0
+
       - name: "磁盘使用率"
         check_id: disk_usage
         interval: 600

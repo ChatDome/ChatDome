@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import ipaddress
 from collections import Counter, deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 SSH_SUCCESS_CHECK_IDS = {"ssh_success_login", "ssh_success_login_offhours"}
 SSH_FAILED_CHECK_IDS = {"ssh_failed_burst", "ssh_bruteforce"}
 SSH_CHECK_IDS = SSH_SUCCESS_CHECK_IDS | SSH_FAILED_CHECK_IDS
+SSH_SESSION_COMMAND_CHECK_IDS = {"ssh_session_commands_patrol"}
 
 
 @dataclass
@@ -41,6 +43,7 @@ class AlertEvent:
     alert_state: str = ""
     previous_state: str = ""
     fingerprint: str = ""
+    context: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -276,6 +279,14 @@ def _safe_ip_token(value: str) -> str:
         return ""
 
 
+def _extract_sshd_pid(line: str) -> str:
+    for pattern in (r"\bsshd_pid=(\d+)\b", r"\bsshd\[(\d+)\]"):
+        match = re.search(pattern, line)
+        if match:
+            return match.group(1)
+    return ""
+
+
 def _first_ip_with_index(parts: list[str]) -> tuple[str, int]:
     for index, token in enumerate(parts):
         ip_value = _safe_ip_token(token)
@@ -349,6 +360,7 @@ def _parse_ssh_line(line: str, success: bool) -> dict[str, str]:
         "user": user,
         "port": port,
         "method": method,
+        "sshd_pid": _extract_sshd_pid(line),
         "result": "成功" if success else "失败",
     }
 
@@ -391,6 +403,126 @@ def _ssh_time_summary(records: list[dict[str, str]], max_items: int = 5) -> str:
         return "未提取到"
     suffix = f" 等{len(times)}个时间点" if len(times) > max_items else ""
     return ", ".join(times[:max_items]) + suffix
+
+
+def _session_tracking_status_label(status: str) -> str:
+    labels = {
+        "ok": "已启用",
+        "no_pid": "登录日志未提供 sshd PID",
+        "auditd_unavailable": "auditd 未安装或不可用",
+        "execve_rule_missing": "auditd 缺少 execve 规则",
+        "no_audit_session": "未找到 audit session ID",
+        "no_commands": "暂未捕获到命令",
+        "query_failed": "auditd 查询失败",
+        "command_unavailable": "命令包未加载",
+    }
+    return labels.get(status or "", status or "未知")
+
+
+def _suspicious_command_hints(commands: list[str]) -> list[str]:
+    hints: list[str] = []
+    patterns = [
+        (re.compile(r"\b(wget|curl)\b.+\b(http|https|ftp)://", re.I), "检测到可疑下载行为"),
+        (re.compile(r"\b(chmod|chown)\b.+\b(777|\+x)\b", re.I), "检测到权限放宽或可执行权限变更"),
+        (re.compile(r"\b(iptables|nft)\b.*(?:\s|^)(-F|flush|delete)\b", re.I), "检测到防火墙规则清理行为"),
+        (re.compile(r"\b(nohup|setsid)\b|\s&\s*$", re.I), "检测到后台驻留执行"),
+        (re.compile(r"\b(useradd|adduser|passwd|visudo)\b", re.I), "检测到账号或权限配置变更"),
+    ]
+    for command in commands:
+        for pattern, label in patterns:
+            if pattern.search(command) and label not in hints:
+                hints.append(label)
+    return hints
+
+
+def _format_session_identity(session: dict[str, Any]) -> str:
+    user = str(session.get("user") or "unknown")
+    ip_value = str(session.get("ip") or "unknown")
+    port = str(session.get("port") or "22")
+    identity = f"{user}@{ip_value}:{port}"
+
+    details: list[str] = []
+    session_id = str(session.get("audit_session_id") or "")
+    sshd_pid = str(session.get("sshd_pid") or "")
+    if session_id:
+        details.append(f"ses={session_id}")
+    if sshd_pid:
+        details.append(f"sshd PID={sshd_pid}")
+    return f"{identity} ({', '.join(details)})" if details else identity
+
+
+def _format_ssh_login_session_context(context: dict[str, Any]) -> list[str]:
+    sessions = context.get("ssh_sessions") if isinstance(context, dict) else None
+    if not isinstance(sessions, list) or not sessions:
+        return []
+
+    lines = ["", "会话命令追踪:"]
+    for item in sessions[:5]:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("tracking_status") or "")
+        commands = [str(x) for x in item.get("commands", []) if str(x).strip()]
+        session_id = str(item.get("audit_session_id") or "")
+        identity = _format_session_identity(item)
+
+        lines.append(f"- 会话: {identity}")
+        if commands:
+            title = f"  命令摘要 (ses={session_id}):" if session_id else "  命令摘要:"
+            lines.append(title)
+            for command in commands[:10]:
+                lines.append(f"  - {command}")
+            if len(commands) > 10:
+                lines.append(f"  ... (+{len(commands) - 10} more)")
+            for hint in _suspicious_command_hints(commands):
+                lines.append(f"  ⚠️ {hint}")
+            continue
+
+        lines.append(f"  ℹ️ 会话命令追踪不可用: {_session_tracking_status_label(status)}")
+
+    if len(sessions) > 5:
+        lines.append(f"... (+{len(sessions) - 5} more sessions)")
+    return lines
+
+
+def _format_ssh_session_commands_alert(event: AlertEvent) -> str:
+    emoji = severity_emoji(event.severity)
+    label = event.severity_label.upper()
+    card = _state_card(event.alert_state) if event.alert_state else None
+    updates = event.context.get("ssh_command_updates", []) if isinstance(event.context, dict) else []
+
+    lines = [
+        f"{emoji} [{label}] {event.check_name}",
+        "",
+        f"告警时间: {event.timestamp}",
+        f"新增命令: {_display_number(event.current_value)}",
+    ]
+
+    if card:
+        lines.append(f"威胁状态: {card['label']} ({_alert_transition(event)})")
+        lines.append(f"风险判断: {card['risk']}")
+
+    if isinstance(updates, list) and updates:
+        lines.extend(["", "命令增量:"])
+        all_commands: list[str] = []
+        for update in updates[:5]:
+            if not isinstance(update, dict):
+                continue
+            commands = [str(x) for x in update.get("added_commands", []) if str(x).strip()]
+            all_commands.extend(commands)
+            lines.append(f"- 会话: {_format_session_identity(update)}")
+            for command in commands[:10]:
+                lines.append(f"  - {command}")
+            if len(commands) > 10:
+                lines.append(f"  ... (+{len(commands) - 10} more)")
+
+        for hint in _suspicious_command_hints(all_commands):
+            lines.append(f"⚠️ {hint}")
+    else:
+        raw = (event.raw_output or "").strip()
+        if raw:
+            lines.extend(["", "相关输出:", raw[:800]])
+
+    return "\n".join(lines)
 
 
 def _format_ssh_alert_message(event: AlertEvent) -> str:
@@ -449,11 +581,17 @@ def _format_ssh_alert_message(event: AlertEvent) -> str:
         lines.extend(["", record_title])
         lines.extend(samples)
 
+    if success:
+        lines.extend(_format_ssh_login_session_context(event.context))
+
     return "\n".join(lines)
 
 
 def format_alert_message(event: AlertEvent) -> str:
     """Format one alert message for Telegram push."""
+    if event.check_id in SSH_SESSION_COMMAND_CHECK_IDS:
+        return _format_ssh_session_commands_alert(event)
+
     if event.check_id in SSH_CHECK_IDS:
         return _format_ssh_alert_message(event)
 

@@ -41,6 +41,41 @@ commands:
     timeout: 15
     tags: [ssh, bruteforce, burst, credential_access]
 
+  auditd_status:
+    name: "auditd 审计状态检测"
+    templates:
+      - platform: linux
+        command: >-
+          (echo "=== auditd installed ===";
+          if command -v auditctl >/dev/null 2>&1; then
+            echo "YES";
+            echo "";
+            echo "=== auditd service status ===";
+            systemctl is-active auditd 2>/dev/null || service auditd status 2>/dev/null | head -1 || echo "unknown";
+            echo "";
+            echo "=== execve rules ===";
+            auditctl -l 2>/dev/null | grep -i execve || echo "No execve rules found";
+            echo "";
+            echo "=== audit stats ===";
+            auditctl -s 2>/dev/null | head -10;
+          else
+            echo "NO";
+            echo "";
+            echo "auditd is NOT installed.";
+            echo "To enable SSH session command tracking, install auditd:";
+            if command -v apt-get >/dev/null 2>&1; then
+              echo "  sudo apt-get install -y auditd audispd-plugins";
+            elif command -v dnf >/dev/null 2>&1; then
+              echo "  sudo dnf install -y audit";
+            elif command -v yum >/dev/null 2>&1; then
+              echo "  sudo yum install -y audit";
+            fi;
+          fi)
+        requires: []
+    params: {}
+    timeout: 10
+    tags: [audit, configuration, infrastructure]
+
   ssh_success_login:
     name: "SSH 成功登录记录"
     templates:
@@ -66,7 +101,8 @@ commands:
           else
             echo 'No SSH successful login records found or log access denied';
           fi) | awk '{
-              method=""; user=""; ip=""; port="";
+              method=""; user=""; ip=""; port=""; pid="";
+              if (match($0, /sshd\[[0-9][0-9]*\]/)) pid=substr($0, RSTART+5, RLENGTH-6);
               for (i=1; i<=NF; i++) {
                 if ($i=="Accepted" && (i+1)<=NF) method=$(i+1);
                 if ($i=="for" && (i+1)<=NF) user=$(i+1);
@@ -76,7 +112,8 @@ commands:
               if (user!="" && ip!="") {
                 if (port=="") port="22";
                 if (method=="") method="unknown";
-                print $1, $2, $3, user, ip, port, method;
+                if (pid!="") print $1, $2, $3, user, ip, port, method, "sshd_pid=" pid;
+                else print $1, $2, $3, user, ip, port, method;
               }
               else print $0;
             }' | tail -{limit}
@@ -117,7 +154,8 @@ commands:
               h = t[1] + 0;
               # abnormal = outside [start, end)
               if (h < start || h >= end) {
-                method=""; user=""; ip=""; port="";
+                method=""; user=""; ip=""; port=""; pid="";
+                if (match($0, /sshd\[[0-9][0-9]*\]/)) pid=substr($0, RSTART+5, RLENGTH-6);
                 for (i=1; i<=NF; i++) {
                   if ($i=="Accepted" && (i+1)<=NF) method=$(i+1);
                   if ($i=="for" && (i+1)<=NF) user=$(i+1);
@@ -127,7 +165,8 @@ commands:
                 if (user!="" && ip!="") {
                   if (port=="") port="22";
                   if (method=="") method="unknown";
-                  print $1, $2, $3, user, ip, port, method;
+                  if (pid!="") print $1, $2, $3, user, ip, port, method, "sshd_pid=" pid;
+                  else print $1, $2, $3, user, ip, port, method;
                 }
                 else print $0;
               }
@@ -142,6 +181,74 @@ commands:
       last_limit: { type: int, default: 500, max: 5000 }
     timeout: 15
     tags: [ssh, login, offhours, anomaly_detection]
+
+  ssh_audit_session_for_pid:
+    name: "SSH audit session ID 查询"
+    templates:
+      - platform: linux
+        command: >-
+          (if ! command -v ausearch >/dev/null 2>&1; then
+            echo "AUDITD_NOT_AVAILABLE";
+            exit 0;
+          fi;
+          ausearch -p {sshd_pid} -i 2>/dev/null
+            | grep -Eo 'ses=[0-9]+'
+            | head -1
+          ) 2>/dev/null || true
+        requires: [ausearch, grep, head]
+    params:
+      sshd_pid: { type: str, default: "0" }
+    timeout: 10
+    tags: [ssh, session, audit, auditd]
+
+  ssh_session_commands:
+    name: "SSH 会话命令追踪"
+    templates:
+      - platform: linux
+        command: >-
+          (if ! command -v ausearch >/dev/null 2>&1; then
+            echo "AUDITD_NOT_AVAILABLE";
+            exit 0;
+          fi;
+          ausearch -sc execve --session {session_id} -i 2>/dev/null
+            | grep 'type=EXECVE'
+            | awk -F'"' '{cmd=""; for(i=2;i<=NF;i+=2) cmd=cmd $i " "; gsub(/^ +| +$/, "", cmd); if(cmd!="") print cmd}'
+            | tail -{limit}
+          ) 2>/dev/null || echo "ausearch failed"
+        requires: [ausearch, grep, awk, tail]
+    params:
+      session_id: { type: str, default: "0" }
+      limit: { type: int, default: 50, max: 200 }
+    timeout: 15
+    tags: [ssh, post_login, command_history, execution, auditd]
+
+  ssh_active_sessions:
+    name: "SSH 活跃会话列表"
+    templates:
+      - platform: linux
+        command: >-
+          (echo "=== Active SSH Sessions ===";
+          w -hi 2>/dev/null | awk '{print "user=" $1, "tty=" $2, "from=" $3, "idle=" $4, "cmd=" $8}';
+          echo "";
+          echo "=== sshd Session PIDs ===";
+          ps -eo pid,ppid,user,lstart,args 2>/dev/null
+            | grep 'sshd:.*@'
+            | grep -v grep
+            | head -{limit};
+          echo "";
+          echo "=== Audit Session Mapping ===";
+          if command -v ausearch >/dev/null 2>&1; then
+            ausearch -m USER_LOGIN --start today -i 2>/dev/null
+              | grep -E '(ses=|acct=|addr=)'
+              | tail -{limit};
+          else
+            echo "auditd not available";
+          fi)
+        requires: [ps, w]
+    params:
+      limit: { type: int, default: 20, max: 50 }
+    timeout: 10
+    tags: [ssh, session, active, audit]
 
   failed_sudo:
     name: "sudo 失败记录"

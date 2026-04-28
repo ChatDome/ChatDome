@@ -126,6 +126,63 @@ class AlertFormatTests(unittest.TestCase):
         self.assertNotIn("建议处理", msg)
         self.assertNotIn(" 至 ", msg)
 
+    def test_ssh_success_login_appends_session_command_summary(self):
+        event = self._event(
+            state="NEW",
+            check_id="ssh_success_login",
+            check_name="SSH 成功登录告警",
+            current_value=1,
+            raw_output="Apr 23 10:11:29 root 114.246.239.136 22 publickey sshd_pid=12345",
+        )
+        event.context = {
+            "ssh_sessions": [
+                {
+                    "user": "root",
+                    "ip": "114.246.239.136",
+                    "port": "22",
+                    "sshd_pid": "12345",
+                    "audit_session_id": "101",
+                    "tracking_status": "ok",
+                    "commands": ["whoami", "cat /etc/passwd"],
+                }
+            ]
+        }
+
+        msg = format_alert_message(event)
+
+        self.assertIn("会话命令追踪:", msg)
+        self.assertIn("root@114.246.239.136:22 (ses=101, sshd PID=12345)", msg)
+        self.assertIn("- cat /etc/passwd", msg)
+
+    def test_ssh_session_commands_patrol_formats_command_delta(self):
+        event = self._event(
+            state="NEW",
+            check_id="ssh_session_commands_patrol",
+            check_name="SSH 会话命令巡检",
+            current_value=2,
+            raw_output="",
+        )
+        event.context = {
+            "ssh_command_updates": [
+                {
+                    "user": "root",
+                    "ip": "203.0.113.10",
+                    "port": "22",
+                    "sshd_pid": "12345",
+                    "audit_session_id": "101",
+                    "added_commands": ["iptables -F", "chmod 777 /tmp/exploit"],
+                }
+            ]
+        }
+
+        msg = format_alert_message(event)
+
+        self.assertIn("新增命令: 2", msg)
+        self.assertIn("命令增量:", msg)
+        self.assertIn("root@203.0.113.10:22 (ses=101, sshd PID=12345)", msg)
+        self.assertIn("iptables -F", msg)
+        self.assertIn("检测到防火墙规则清理行为", msg)
+
 
 if __name__ == "__main__":
     unittest.main()
