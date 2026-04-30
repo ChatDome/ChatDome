@@ -256,6 +256,10 @@ class CodexCLIClient:
                 raise RuntimeError(
                     f"Codex CLI call timed out after {self.timeout}s."
                 ) from exc
+            except asyncio.CancelledError:
+                proc.kill()
+                await proc.communicate()
+                raise
 
             stdout_text = stdout.decode("utf-8", errors="replace")
             stderr_text = stderr.decode("utf-8", errors="replace")

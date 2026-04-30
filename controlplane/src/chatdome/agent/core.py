@@ -268,6 +268,7 @@ class Agent:
         self,
         chat_id: int,
         approval_id: str | None = None,
+        include_llm: bool = True,
     ) -> dict[str, Any]:
         """
         Return full details for the currently pending approval.
@@ -298,6 +299,7 @@ class Agent:
                 reason=session.pending_reason or "",
                 chat_id=chat_id,
                 tool_call_id=session.pending_tool_call_id or "",
+                include_llm=include_llm,
             )
             self._persist_session(session)
 
@@ -607,6 +609,7 @@ class Agent:
                             command_hash=command_hash,
                             reason=getattr(e, "reason", ""),
                             risk_level=getattr(e, "risk_level", ""),
+                            impact_analysis=getattr(e, "impact_analysis", ""),
                         )
                         payload = {
                             "approval_id": approval_id,
@@ -615,6 +618,7 @@ class Agent:
                             "command_hash": command_hash,
                             "reason": getattr(e, 'reason', ''),
                             "risk_level": getattr(e, "risk_level", ""),
+                            "impact_analysis": getattr(e, "impact_analysis", ""),
                             "requires_detail_expansion": True,
                         }
                         self._persist_session(session)

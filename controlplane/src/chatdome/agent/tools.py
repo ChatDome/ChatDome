@@ -156,6 +156,7 @@ class ToolDispatcher:
         deletion_detected = bool(analysis.get("deletion_detected", False))
         safety_status = str(analysis.get("safety_status", "UNSAFE"))
         risk_level = str(analysis.get("risk_level", "HIGH"))
+        impact_summary = self._build_initial_impact_summary(analysis)
 
         CommandAuditTracker.record_event(
             "command_reviewed",
@@ -209,7 +210,7 @@ class ToolDispatcher:
         raise PendingApprovalError(
             command=command,
             safety_status=safety_status,
-            impact_analysis="",
+            impact_analysis=impact_summary,
             tool_call_id=tool_call_id,
             reason=reason,
             risk_level=risk_level,
@@ -223,6 +224,7 @@ class ToolDispatcher:
         reason: str,
         chat_id: int = 0,
         tool_call_id: str = "",
+        include_llm: bool = True,
     ) -> dict[str, Any]:
         """Return full approval details, including optional LLM analysis."""
         analysis = await self.analyze_command_for_approval(
@@ -230,7 +232,7 @@ class ToolDispatcher:
             reason=reason,
             chat_id=chat_id,
             tool_call_id=tool_call_id,
-            include_llm=True,
+            include_llm=include_llm,
         )
         CommandAuditTracker.record_event(
             "command_detail_requested",
@@ -278,7 +280,14 @@ class ToolDispatcher:
 
         mutation_detected = static_write
         deletion_detected = static_delete
-        impact_analysis = "Static precheck only. Detailed LLM analysis available on demand."
+        impact_analysis = self._build_initial_impact_summary(
+            {
+                "static_is_safe": static_check.is_safe,
+                "mutation_detected": mutation_detected,
+                "deletion_detected": deletion_detected,
+                "static_critical": static_critical,
+            }
+        )
         reviewer_mode = "static_only"
         reviewer_status = safety_status
         reviewer_risk_level = risk_level
@@ -319,16 +328,16 @@ class ToolDispatcher:
 
         static_signals: list[str] = []
         if static_write:
-            static_signals.append("Detected potential write/state mutation intent.")
+            static_signals.append("检测到写入或系统状态变更意图。")
         if not static_check.is_safe and static_check.reason:
             static_signals.append(str(static_check.reason))
         if static_critical:
-            static_signals.append("Matched critical command pattern.")
+            static_signals.append("命中高危命令模式。")
         if static_delete:
-            static_signals.append("Detected delete/destructive intent.")
+            static_signals.append("检测到删除或破坏性意图。")
         if static_signals:
             impact_analysis = (
-                f"{impact_analysis}\n\n[Static guardrail signals]\n- "
+                f"{impact_analysis}\n\n[静态护栏信号]\n- "
                 + "\n- ".join(static_signals)
             )
 
@@ -353,6 +362,19 @@ class ToolDispatcher:
         text = f" {str(command or '').lower()} "
         tokens = (" rm ", " rmdir ", " del ", " unlink ", " shred ", " wipe ")
         return any(tok in text for tok in tokens)
+
+    @staticmethod
+    def _build_initial_impact_summary(analysis: dict[str, Any]) -> str:
+        """Build a short, command-free impact summary for the first approval card."""
+        if bool(analysis.get("static_critical", False)):
+            return "静态预检命中高危命令模式，可能造成不可逆或高破坏性影响。"
+        if bool(analysis.get("deletion_detected", False)):
+            return "检测到删除或清理意图，可能导致数据丢失，需要谨慎确认。"
+        if bool(analysis.get("mutation_detected", False)):
+            return "检测到写入或状态变更意图，执行后可能修改系统文件、配置或服务状态。"
+        if not bool(analysis.get("static_is_safe", False)):
+            return "未通过只读命令静态校验，需要人工确认后再执行。"
+        return "静态预检显示偏只读查询，预计不修改系统状态；仍建议确认执行目的。"
 
     async def _handle_whois_lookup(self, args: dict[str, Any]) -> str:
         """Look up IP geolocation via ip-api.com."""

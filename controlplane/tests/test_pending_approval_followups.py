@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from chatdome.agent.core import Agent
 from chatdome.agent.session import AgentSession
+from chatdome.agent.tools import ToolDispatcher
 from chatdome.llm.client import LLMResponse, ToolCall
 
 
@@ -123,6 +124,19 @@ def _pending_session() -> AgentSession:
 
 
 class PendingApprovalFollowupTests(unittest.TestCase):
+    def test_initial_impact_summary_describes_static_precheck(self):
+        summary = ToolDispatcher._build_initial_impact_summary(
+            {
+                "static_is_safe": False,
+                "mutation_detected": True,
+                "deletion_detected": False,
+                "static_critical": False,
+            }
+        )
+
+        self.assertIn("状态变更", summary)
+        self.assertNotIn("Static precheck", summary)
+
     def test_pending_session_snapshot_preserves_approval_binding(self):
         session = _pending_session()
 

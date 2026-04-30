@@ -324,10 +324,19 @@ class TelegramBot:
         command_hash = str((data or {}).get("command_hash") or "").strip()
         hash_line = f"\n命令指纹: {command_hash[:12]}" if command_hash else ""
         approval_line = f"审批编号: {approval_id}\n" if approval_id else ""
+        analysis = (data or {}).get("analysis")
+        analysis = analysis if isinstance(analysis, dict) else {}
+        purpose = self._compact_approval_text((data or {}).get("reason"), "未提供")
+        impact = self._compact_approval_text(
+            (data or {}).get("impact_analysis") or analysis.get("impact_analysis"),
+            "点击“详细命令”查看完整影响分析。",
+        )
         text = (
             "⚠️ 检测到需要审批的系统操作。\n"
             f"{approval_line}"
             f"风险等级: {risk_level}{hash_line}\n"
+            f"操作目的: {purpose}\n"
+            f"简要影响: {impact}\n"
             "默认不展示命令细节。\n"
             "你可以直接允许/拒绝，或先查看详细命令及影响分析。\n"
             "文本确认可发送 /confirm <审批编号>，文本拒绝可发送 /reject <审批编号>。"
@@ -359,6 +368,42 @@ class TelegramBot:
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
+
+    @staticmethod
+    def _compact_approval_text(value: Any, fallback: str, max_chars: int = 120) -> str:
+        """Keep approval-card context short and single-line for mobile display."""
+        text = " ".join(str(value or "").split()).strip()
+        if not text:
+            text = fallback
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 1].rstrip() + "…"
+
+    async def _send_approval_actions(self, message, data: dict) -> None:
+        """Send compact action buttons after the detailed analysis message."""
+        approval_id = str((data or {}).get("approval_id") or "").strip()
+        if approval_id:
+            approve_data = f"approval:approve:{approval_id}"
+            approve_task_data = f"approval:approve_task:{approval_id}"
+            reject_data = f"approval:reject:{approval_id}"
+        else:
+            approve_data = "approve_cmd"
+            approve_task_data = "approve_task_cmd"
+            reject_data = "reject_cmd"
+
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ 允许", callback_data=approve_data),
+                InlineKeyboardButton("✅ 本次任务允许", callback_data=approve_task_data),
+            ],
+            [InlineKeyboardButton("❌ 拒绝", callback_data=reject_data)],
+        ]
+        await self._reply_text(
+            message,
+            "详情分析已完成，请选择是否执行。",
+            markup=MessageMarkup.PLAIN,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
     async def _send_round_limit_prompt(self, message, data: dict[str, Any] | None = None) -> None:
         """Ask user whether to continue after reaching one execution window."""
@@ -447,25 +492,34 @@ class TelegramBot:
 
             if callback_data == "show_cmd_details" or approval_action == "details":
                 await self._send_long_message(query.message, "正在分析命令影响，请稍候...")
-                detail_timeout = 25
-                try:
-                    detail_timeout = max(
-                        detail_timeout,
-                        int(getattr(self.agent.llm, "timeout", detail_timeout)),
-                    )
-                except (TypeError, ValueError):
-                    detail_timeout = 25
+                detail_timeout = 45
                 try:
                     details = await asyncio.wait_for(
                         self.agent.get_pending_approval_details(chat_id, approval_id=approval_id or None),
                         timeout=detail_timeout,
                     )
                 except asyncio.TimeoutError:
-                    await self._send_long_message(
-                        query.message,
-                        "Approval detail request timed out. Command is still pending. Please click allow/reject again or send /confirm.",
+                    logger.warning("Approval detail AI review timed out; falling back to static analysis")
+                    details = await self.agent.get_pending_approval_details(
+                        chat_id,
+                        approval_id=approval_id or None,
+                        include_llm=False,
                     )
-                    return
+                    if details.get("ok"):
+                        analysis = details.get("analysis", {}) or {}
+                        analysis["reviewer_mode"] = "static_timeout"
+                        impact = str(analysis.get("impact_analysis", "")).strip()
+                        analysis["impact_analysis"] = (
+                            "AI 审查在限定时间内未完成，以下为静态护栏分析结果。"
+                            + (f"\n\n{impact}" if impact else "")
+                        )
+                        details["analysis"] = analysis
+                    else:
+                        await self._send_long_message(
+                            query.message,
+                            str(details.get("message", "No pending approval.")),
+                        )
+                        return
                 except Exception as e:
                     logger.exception("Failed to load approval details")
                     await self._send_long_message(query.message, f"Failed to load approval details: {e}")
@@ -492,7 +546,7 @@ class TelegramBot:
                     f"Impact analysis:\n{analysis.get('impact_analysis', '')}"
                 )
                 await self._send_long_message(query.message, text)
-                await self._send_approval_request(query.message, details)
+                await self._send_approval_actions(query.message, details)
                 return
 
             if approval_action == "approve_task":
