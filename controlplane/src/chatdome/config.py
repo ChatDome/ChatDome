@@ -9,8 +9,12 @@ config file with optional environment variable override support.
 
 Environment variables:
   CHATDOME_BOT_TOKEN        — Telegram Bot token  (required)
-  CHATDOME_AI_API_KEY       — LLM API key         (required)
+  CHATDOME_AI_API_KEY       — LLM API key         (required for API mode)
+  CHATDOME_AI_PROVIDER      — LLM provider id     (optional)
+  CHATDOME_AI_API_MODE      — LLM adapter mode    (optional)
   CHATDOME_AI_BASE_URL      – LLM API base URL    (optional)
+  CHATDOME_AI_MODEL         — LLM model name      (optional)
+  CHATDOME_CODEX_COMMAND    — Codex CLI command   (optional)
   CHATDOME_ALLOWED_CHAT_IDS – Comma-separated chat IDs (optional)
   CHATDOME_PENDING_APPROVAL_TIMEOUT – Pending approval timeout in seconds (optional)
   CHATDOME_PERSISTED_SESSION_TTL – Persisted session retention in seconds (optional)
@@ -46,11 +50,21 @@ class TelegramConfig:
 @dataclass
 class AIConfig:
     """LLM API connection settings."""
+    provider: str = "openai"
+    api_mode: str = "openai_api"
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = "gpt-4o"
     temperature: float = 0.1
     max_tokens: int = 2000
+    codex_command: str = "codex"
+    codex_profile: str = ""
+    codex_cwd: str = ""
+    codex_timeout: int = 300
+    codex_sandbox: str = "read-only"
+    codex_approval_policy: str = "never"
+    codex_ephemeral: bool = True
+    codex_validate_auth: bool = True
 
 
 @dataclass
@@ -123,6 +137,31 @@ def _parse_chat_ids(raw: str) -> list[int]:
     return ids
 
 
+def _parse_bool_env(raw: str) -> bool:
+    """Parse common truthy strings used in environment toggles."""
+    return raw.lower() in ("true", "1", "yes", "on")
+
+
+def _normalize_api_mode(raw: str) -> str:
+    """Normalize public API mode aliases to internal adapter ids."""
+    value = (raw or "openai_api").strip().lower().replace("-", "_")
+    aliases = {
+        "openai": "openai_api",
+        "openai_api": "openai_api",
+        "chat": "openai_api",
+        "chat_completions": "openai_api",
+        "chat_completion": "openai_api",
+        "codex": "codex_cli",
+        "codex_cli": "codex_cli",
+    }
+    if value not in aliases:
+        raise ValueError(
+            "Unsupported AI API mode: "
+            f"{raw!r}. Supported modes: openai_api, codex_cli."
+        )
+    return aliases[value]
+
+
 # ---------------------------------------------------------------------------
 # Loader
 # ---------------------------------------------------------------------------
@@ -182,6 +221,16 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     if api_key:
         config.ai.api_key = api_key
 
+    # Optional: AI Provider
+    provider = os.environ.get("CHATDOME_AI_PROVIDER", "")
+    if provider:
+        config.ai.provider = provider
+
+    # Optional: AI API Mode
+    api_mode = os.environ.get("CHATDOME_AI_API_MODE", "")
+    if api_mode:
+        config.ai.api_mode = api_mode
+
     # Optional: AI Base URL
     base_url = os.environ.get("CHATDOME_AI_BASE_URL", "")
     if base_url:
@@ -191,6 +240,46 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     model = os.environ.get("CHATDOME_AI_MODEL", "")
     if model:
         config.ai.model = model
+
+    # Optional: Codex CLI settings
+    codex_command = os.environ.get("CHATDOME_CODEX_COMMAND", "")
+    if codex_command:
+        config.ai.codex_command = codex_command
+
+    codex_profile = os.environ.get("CHATDOME_CODEX_PROFILE", "")
+    if codex_profile:
+        config.ai.codex_profile = codex_profile
+
+    codex_cwd = os.environ.get("CHATDOME_CODEX_CWD", "")
+    if codex_cwd:
+        config.ai.codex_cwd = codex_cwd
+
+    codex_timeout = os.environ.get("CHATDOME_CODEX_TIMEOUT", "")
+    if codex_timeout:
+        try:
+            parsed_codex_timeout = int(codex_timeout)
+            if parsed_codex_timeout > 0:
+                config.ai.codex_timeout = parsed_codex_timeout
+            else:
+                logger.warning("CHATDOME_CODEX_TIMEOUT must be > 0, ignored: %s", codex_timeout)
+        except ValueError:
+            logger.warning("Invalid CHATDOME_CODEX_TIMEOUT ignored: %s", codex_timeout)
+
+    codex_sandbox = os.environ.get("CHATDOME_CODEX_SANDBOX", "")
+    if codex_sandbox:
+        config.ai.codex_sandbox = codex_sandbox
+
+    codex_approval_policy = os.environ.get("CHATDOME_CODEX_APPROVAL_POLICY", "")
+    if codex_approval_policy:
+        config.ai.codex_approval_policy = codex_approval_policy
+
+    codex_ephemeral = os.environ.get("CHATDOME_CODEX_EPHEMERAL", "")
+    if codex_ephemeral:
+        config.ai.codex_ephemeral = _parse_bool_env(codex_ephemeral)
+
+    codex_validate_auth = os.environ.get("CHATDOME_CODEX_VALIDATE_AUTH", "")
+    if codex_validate_auth:
+        config.ai.codex_validate_auth = _parse_bool_env(codex_validate_auth)
 
     # Optional: Allowed Chat IDs (comma-separated)
     chat_ids_env = os.environ.get("CHATDOME_ALLOWED_CHAT_IDS", "")
@@ -264,6 +353,18 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
 
     # ── Validation ──
 
+    config.ai.provider = (config.ai.provider or "openai").strip().lower()
+    config.ai.api_mode = _normalize_api_mode(config.ai.api_mode)
+    if config.ai.provider in {"codex", "codex_cli", "openai-codex", "openai_codex"}:
+        config.ai.provider = "codex"
+        if config.ai.api_mode == "openai_api":
+            config.ai.api_mode = "codex_cli"
+
+    if config.ai.api_mode == "codex_cli":
+        config.ai.provider = "codex"
+        if not config.ai.codex_command:
+            raise ValueError("Codex CLI command is not configured.")
+
     if not config.telegram.bot_token:
         raise ValueError(
             "Telegram Bot Token is not configured.\n"
@@ -271,13 +372,18 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
             "  export CHATDOME_BOT_TOKEN=\"your-telegram-bot-token\""
         )
 
-    if not config.ai.api_key:
+    if config.ai.api_mode == "openai_api" and not config.ai.api_key:
         raise ValueError(
             "AI API Key is not configured.\n"
             "Set the CHATDOME_AI_API_KEY environment variable:\n"
             "  export CHATDOME_AI_API_KEY=\"your-api-key\""
         )
 
-    logger.info("Configuration loaded: model=%s, allowed_chats=%s",
-                config.ai.model, config.telegram.allowed_chat_ids)
+    logger.info(
+        "Configuration loaded: provider=%s, api_mode=%s, model=%s, allowed_chats=%s",
+        config.ai.provider,
+        config.ai.api_mode,
+        config.ai.model,
+        config.telegram.allowed_chat_ids,
+    )
     return config

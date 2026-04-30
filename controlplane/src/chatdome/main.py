@@ -16,7 +16,7 @@ from pathlib import Path
 from chatdome.config import load_config
 from chatdome.agent.core import Agent
 from chatdome.executor.sandbox import CommandSandbox
-from chatdome.llm.client import LLMClient
+from chatdome.llm import create_llm_client
 from chatdome.runtime_environment import collect_and_persist_runtime_environment
 from chatdome.sentinel.pack_loader import PackLoader
 from chatdome.sentinel.user_context import UserContextLedger
@@ -58,8 +58,12 @@ def main() -> None:
     logger.info("=" * 60)
     logger.info("  ChatDome v0.2.0 — AI Host Security Assistant")
     logger.info("=" * 60)
+    logger.info("  AI:       %s / %s", config.ai.provider, config.ai.api_mode)
     logger.info("  Model:    %s", config.ai.model)
-    logger.info("  Base URL: %s", config.ai.base_url)
+    if config.ai.api_mode == "openai_api":
+        logger.info("  Base URL: %s", config.ai.base_url)
+    else:
+        logger.info("  Codex CLI: %s", config.ai.codex_command)
     logger.info("  Allowed chats: %s", config.telegram.allowed_chat_ids or "(all)")
     logger.info("  Generated commands: %s", config.agent.allow_generated_commands)
     logger.info(
@@ -84,13 +88,11 @@ def main() -> None:
     logger.info("  Pack Loader: %d commands loaded", pack_loader.command_count)
 
     # LLM Client
-    llm = LLMClient(
-        api_key=config.ai.api_key,
-        base_url=config.ai.base_url,
-        model=config.ai.model,
-        temperature=config.ai.temperature,
-        max_tokens=config.ai.max_tokens,
-    )
+    try:
+        llm = create_llm_client(config.ai)
+    except RuntimeError as e:
+        logger.error("LLM provider error: %s", e)
+        sys.exit(1)
 
     # Command Sandbox
     sandbox = CommandSandbox(

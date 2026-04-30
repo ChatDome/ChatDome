@@ -9,8 +9,11 @@
 #   CHATDOME_AI_API_KEY       — LLM API key
 #
 # Optional environment variables:
+#   CHATDOME_AI_PROVIDER      — LLM provider id (default: openai)
+#   CHATDOME_AI_API_MODE      — Adapter mode: openai_api or codex_cli
 #   CHATDOME_AI_BASE_URL      — LLM API base URL (default: https://api.openai.com/v1)
 #   CHATDOME_AI_MODEL         — LLM model name (default: gpt-4o)
+#   CHATDOME_CODEX_COMMAND    — Codex CLI command/path (default: codex)
 #   CHATDOME_ALLOWED_CHAT_IDS — Comma-separated Telegram Chat IDs (e.g. "123,456")
 
 chatdome:
@@ -19,11 +22,28 @@ chatdome:
     max_message_length: 4000
 
   ai:
+    # provider/api_mode are a pair:
+    #   openai + openai_api: uses OpenAI-compatible Chat Completions API + API key
+    #   codex + codex_cli: uses locally authenticated Codex CLI, no API key required here
+    provider: "openai"
+    api_mode: "openai_api"
     # base_url: set via CHATDOME_AI_BASE_URL env var, or override here
     # base_url: "https://api.openai.com/v1"
     model: "gpt-4o"
     temperature: 0.1
     max_tokens: 2000
+
+    # Codex CLI mode. Run `codex login` first; headless hosts can use
+    # `codex login --device-auth` and complete the browser link elsewhere.
+    codex_command: "codex"
+    codex_profile: ""
+    codex_cwd: ""
+    codex_timeout: 300
+    codex_sandbox: "read-only"
+    # Reserved for future Codex CLI versions / native adapters.
+    codex_approval_policy: "never"
+    codex_ephemeral: true
+    codex_validate_auth: true
 
   agent:
     # -------------------------------------------------------------------------

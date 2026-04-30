@@ -447,18 +447,27 @@ class TelegramBot:
 
             if callback_data == "show_cmd_details" or approval_action == "details":
                 await self._send_long_message(query.message, "正在分析命令影响，请稍候...")
+                detail_timeout = 25
+                try:
+                    detail_timeout = max(
+                        detail_timeout,
+                        int(getattr(self.agent.llm, "timeout", detail_timeout)),
+                    )
+                except (TypeError, ValueError):
+                    detail_timeout = 25
                 try:
                     details = await asyncio.wait_for(
                         self.agent.get_pending_approval_details(chat_id, approval_id=approval_id or None),
-                        timeout=25,
+                        timeout=detail_timeout,
                     )
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     await self._send_long_message(
                         query.message,
                         "Approval detail request timed out. Command is still pending. Please click allow/reject again or send /confirm.",
                     )
                     return
                 except Exception as e:
+                    logger.exception("Failed to load approval details")
                     await self._send_long_message(query.message, f"Failed to load approval details: {e}")
                     return
 

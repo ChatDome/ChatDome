@@ -31,3 +31,8 @@ controlplane/src/chat_data/
 
 # Internal docs (kept in separate private repo)
 docs/
+
+__pycache__/
+*.py[cod]
+.pycache-verify/
+controlplane/.pycache-verify/
