@@ -191,11 +191,20 @@ commands:
             echo "AUDITD_NOT_AVAILABLE";
             exit 0;
           fi;
-          ausearch -p {sshd_pid} -i 2>/dev/null
-            | grep -Eo 'ses=[0-9]+'
-            | head -1
+          for child in $(pgrep -P {sshd_pid} 2>/dev/null); do
+            ses=$(cat /proc/$child/sessionid 2>/dev/null);
+            if [ -n "$ses" ] && [ "$ses" != "4294967295" ]; then
+              echo "ses=$ses";
+              exit 0;
+            fi;
+          done;
+          ausearch -p {sshd_pid} -i 2>/dev/null | grep -Eo 'ses=[0-9]+' | head -1 | grep . && exit 0;
+          PPID_VAL=$(ps -o ppid= -p {sshd_pid} 2>/dev/null | tr -d ' ');
+          if [ -n "$PPID_VAL" ]; then
+            ausearch -p $PPID_VAL -i 2>/dev/null | grep -Eo 'ses=[0-9]+' | head -1 | grep . && exit 0;
+          fi
           ) 2>/dev/null || true
-        requires: [ausearch, grep, head]
+        requires: [ausearch, grep, head, pgrep, cat, ps]
     params:
       sshd_pid: { type: str, default: "0" }
     timeout: 10
