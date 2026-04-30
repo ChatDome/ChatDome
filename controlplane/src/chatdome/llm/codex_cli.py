@@ -105,6 +105,8 @@ class CodexCLIClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         response_format: dict[str, str] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         """Return a normalized ChatDome LLM response via ``codex exec``."""
         prompt = self._build_prompt(messages, tools, response_format)

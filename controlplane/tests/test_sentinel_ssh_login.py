@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Optional, Union
 
 from chatdome.sentinel.scheduler import SentinelScheduler
 
@@ -34,12 +35,12 @@ class FakePackLoader:
 
 
 class RoutingFakeSandbox:
-    def __init__(self, outputs: dict[str, list[str] | str]):
+    def __init__(self, outputs: dict[str, Union[list[str], str]]):
         self.outputs: dict[str, list[str]] = {
             key: list(value) if isinstance(value, list) else [value]
             for key, value in outputs.items()
         }
-        self.calls: list[tuple[str, dict | None]] = []
+        self.calls: list[tuple[str, Optional[dict]]] = []
 
     async def execute_security_check(self, check_id: str, args=None):
         self.calls.append((check_id, args))

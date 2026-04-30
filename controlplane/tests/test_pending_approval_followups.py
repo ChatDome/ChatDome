@@ -70,6 +70,41 @@ class FakeToolDispatcher:
         return result.stdout
 
 
+class FakeApprovalDetailDispatcher:
+    def __init__(self, session=None, clear_pending: bool = False):
+        self.session = session
+        self.clear_pending = clear_pending
+        self.calls = []
+
+    async def get_command_approval_details(
+        self,
+        command,
+        reason,
+        chat_id=0,
+        tool_call_id="",
+        include_llm=True,
+    ):
+        self.calls.append(
+            {
+                "command": command,
+                "reason": reason,
+                "chat_id": chat_id,
+                "tool_call_id": tool_call_id,
+                "include_llm": include_llm,
+            }
+        )
+        if self.clear_pending and self.session is not None:
+            self.session.clear_pending_state()
+        return {
+            "safety_status": "SAFE",
+            "risk_level": "LOW",
+            "mutation_detected": False,
+            "deletion_detected": False,
+            "impact_analysis": "AI detail",
+            "reviewer_mode": "llm" if include_llm else "static_only",
+        }
+
+
 def _agent_with_llm(llm: FakeLLM) -> Agent:
     agent = object.__new__(Agent)
     agent.llm = llm
@@ -89,6 +124,16 @@ def _resume_agent(session: AgentSession) -> Agent:
         return "done"
 
     agent._run_loop = fake_run_loop
+    return agent
+
+
+def _details_agent(session: AgentSession, dispatcher) -> Agent:
+    agent = object.__new__(Agent)
+    agent.llm = FakeLLM(LLMResponse(content="done"))
+    agent.config = SimpleNamespace(model="fake-model")
+    agent.session_manager = FakeSessionManager(session)
+    agent.tool_dispatcher = dispatcher
+    agent._persist_session = lambda saved_session: agent.session_manager.save_session(saved_session)
     return agent
 
 
@@ -146,6 +191,47 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         self.assertEqual(restored.pending_run_id, session.pending_run_id)
         self.assertEqual(restored.pending_command_hash, session.pending_command_hash)
         self.assertEqual(restored.pending_risk_level, "LOW")
+
+    def test_detail_request_can_upgrade_static_cache_to_llm_review(self):
+        session = _pending_session()
+        session.pending_analysis = {
+            "safety_status": "SAFE",
+            "risk_level": "LOW",
+            "mutation_detected": False,
+            "deletion_detected": False,
+            "impact_analysis": "Static detail",
+            "reviewer_mode": "static_only",
+        }
+        dispatcher = FakeApprovalDetailDispatcher()
+        agent = _details_agent(session, dispatcher)
+
+        details = asyncio.run(
+            agent.get_pending_approval_details(
+                123,
+                approval_id=session.pending_approval_id,
+                include_llm=True,
+            )
+        )
+
+        self.assertTrue(details["ok"])
+        self.assertEqual(details["analysis"]["reviewer_mode"], "llm")
+        self.assertEqual([call["include_llm"] for call in dispatcher.calls], [True])
+
+    def test_detail_request_does_not_cache_result_after_approval_changes(self):
+        session = _pending_session()
+        dispatcher = FakeApprovalDetailDispatcher(session=session, clear_pending=True)
+        agent = _details_agent(session, dispatcher)
+
+        details = asyncio.run(
+            agent.get_pending_approval_details(
+                123,
+                approval_id=session.pending_approval_id,
+                include_llm=True,
+            )
+        )
+
+        self.assertFalse(details["ok"])
+        self.assertIsNone(session.pending_analysis)
 
     def test_summary_skips_old_persisted_tool_like_followups(self):
         session = _pending_session()

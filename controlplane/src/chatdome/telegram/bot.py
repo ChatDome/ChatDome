@@ -84,6 +84,7 @@ class TelegramBot:
         self._pack_loader: Any = None
         self._alert_analysis_cache: dict[str, dict[str, Any]] = {}
         self._alert_analysis_cache_max = 200
+        self._approval_detail_tasks: dict[str, asyncio.Task] = {}
         # Default policy: plain text output; markdown can be enabled per message.
         self._formatter = TelegramMessageFormatter(enable_markdown=True)
 
@@ -405,6 +406,96 @@ class TelegramBot:
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
+    @staticmethod
+    def _approval_detail_task_key(chat_id: int, approval_id: str | None) -> str:
+        approval_key = (approval_id or "").strip() or "legacy"
+        return f"{chat_id}:{approval_key}"
+
+    async def _start_approval_detail_analysis(
+        self,
+        message,
+        chat_id: int,
+        approval_id: str | None,
+    ) -> None:
+        """Start an approval detail review without blocking later chat updates."""
+        task_key = self._approval_detail_task_key(chat_id, approval_id)
+        existing_task = self._approval_detail_tasks.get(task_key)
+        if existing_task and not existing_task.done():
+            await self._send_long_message(
+                message,
+                "详细命令分析仍在进行中，完成后会自动发送结果。你可以继续向 ChatDome 发送消息。",
+            )
+            return
+
+        await self._send_long_message(
+            message,
+            "已开始详细命令分析，完成后会自动发送结果。你可以继续向 ChatDome 发送消息。",
+        )
+
+        coroutine = self._run_approval_detail_analysis(
+            message=message,
+            chat_id=chat_id,
+            approval_id=approval_id,
+        )
+        if self._app is not None:
+            task = self._app.create_task(coroutine)
+        else:
+            task = asyncio.create_task(coroutine)
+
+        self._approval_detail_tasks[task_key] = task
+
+        def _drop_finished_task(done_task: asyncio.Task) -> None:
+            if self._approval_detail_tasks.get(task_key) is done_task:
+                self._approval_detail_tasks.pop(task_key, None)
+
+        task.add_done_callback(_drop_finished_task)
+
+    async def _run_approval_detail_analysis(
+        self,
+        message,
+        chat_id: int,
+        approval_id: str | None,
+    ) -> None:
+        try:
+            details = await self.agent.get_pending_approval_details(
+                chat_id,
+                approval_id=approval_id,
+                include_llm=True,
+            )
+        except Exception as e:
+            logger.exception("Failed to load approval details in background")
+            await self._send_long_message(message, f"详细命令分析失败: {e}")
+            return
+
+        if not details.get("ok"):
+            await self._send_long_message(
+                message,
+                str(details.get("message", "No pending approval.")),
+            )
+            return
+
+        await self._send_approval_detail_result(message, details)
+
+    async def _send_approval_detail_result(self, message, details: dict) -> None:
+        analysis = details.get("analysis", {}) or {}
+        command_hash = str(details.get("command_hash", ""))
+        text = (
+            "Approval details\n\n"
+            f"Approval ID: {details.get('approval_id', '')}\n"
+            f"Run ID: {details.get('run_id', '')}\n"
+            f"Command: {details.get('command', '')}\n"
+            f"Command hash: {command_hash[:12]}\n"
+            f"Intent: {details.get('reason', '')}\n"
+            f"Safety status: {analysis.get('safety_status', 'UNSAFE')}\n"
+            f"Risk level: {analysis.get('risk_level', 'HIGH')}\n"
+            f"Mutation detected: {bool(analysis.get('mutation_detected', False))}\n"
+            f"Deletion detected: {bool(analysis.get('deletion_detected', False))}\n"
+            f"Reviewer mode: {analysis.get('reviewer_mode', 'static_only')}\n\n"
+            f"Impact analysis:\n{analysis.get('impact_analysis', '')}"
+        )
+        await self._send_long_message(message, text)
+        await self._send_approval_actions(message, details)
+
     async def _send_round_limit_prompt(self, message, data: dict[str, Any] | None = None) -> None:
         """Ask user whether to continue after reaching one execution window."""
         payload = data or {}
@@ -491,62 +582,11 @@ class TelegramBot:
                 return
 
             if callback_data == "show_cmd_details" or approval_action == "details":
-                await self._send_long_message(query.message, "正在分析命令影响，请稍候...")
-                detail_timeout = 45
-                try:
-                    details = await asyncio.wait_for(
-                        self.agent.get_pending_approval_details(chat_id, approval_id=approval_id or None),
-                        timeout=detail_timeout,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning("Approval detail AI review timed out; falling back to static analysis")
-                    details = await self.agent.get_pending_approval_details(
-                        chat_id,
-                        approval_id=approval_id or None,
-                        include_llm=False,
-                    )
-                    if details.get("ok"):
-                        analysis = details.get("analysis", {}) or {}
-                        analysis["reviewer_mode"] = "static_timeout"
-                        impact = str(analysis.get("impact_analysis", "")).strip()
-                        analysis["impact_analysis"] = (
-                            "AI 审查在限定时间内未完成，以下为静态护栏分析结果。"
-                            + (f"\n\n{impact}" if impact else "")
-                        )
-                        details["analysis"] = analysis
-                    else:
-                        await self._send_long_message(
-                            query.message,
-                            str(details.get("message", "No pending approval.")),
-                        )
-                        return
-                except Exception as e:
-                    logger.exception("Failed to load approval details")
-                    await self._send_long_message(query.message, f"Failed to load approval details: {e}")
-                    return
-
-                if not details.get("ok"):
-                    await self._send_long_message(query.message, str(details.get("message", "No pending approval.")))
-                    return
-
-                analysis = details.get("analysis", {}) or {}
-                command_hash = str(details.get("command_hash", ""))
-                text = (
-                    "Approval details\n\n"
-                    f"Approval ID: {details.get('approval_id', '')}\n"
-                    f"Run ID: {details.get('run_id', '')}\n"
-                    f"Command: {details.get('command', '')}\n"
-                    f"Command hash: {command_hash[:12]}\n"
-                    f"Intent: {details.get('reason', '')}\n"
-                    f"Safety status: {analysis.get('safety_status', 'UNSAFE')}\n"
-                    f"Risk level: {analysis.get('risk_level', 'HIGH')}\n"
-                    f"Mutation detected: {bool(analysis.get('mutation_detected', False))}\n"
-                    f"Deletion detected: {bool(analysis.get('deletion_detected', False))}\n"
-                    f"Reviewer mode: {analysis.get('reviewer_mode', 'static_only')}\n\n"
-                    f"Impact analysis:\n{analysis.get('impact_analysis', '')}"
+                await self._start_approval_detail_analysis(
+                    query.message,
+                    chat_id,
+                    approval_id or None,
                 )
-                await self._send_long_message(query.message, text)
-                await self._send_approval_actions(query.message, details)
                 return
 
             if approval_action == "approve_task":

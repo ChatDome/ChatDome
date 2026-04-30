@@ -293,14 +293,38 @@ class Agent:
                 ),
             }
 
-        if session.pending_analysis is None:
-            session.pending_analysis = await self.tool_dispatcher.get_command_approval_details(
-                command=session.pending_command,
-                reason=session.pending_reason or "",
+        cached_analysis = session.pending_analysis if isinstance(session.pending_analysis, dict) else None
+        cached_reviewer_mode = str((cached_analysis or {}).get("reviewer_mode", ""))
+        needs_analysis = cached_analysis is None or (include_llm and cached_reviewer_mode != "llm")
+
+        if needs_analysis:
+            pending_approval_id = session.pending_approval_id or ""
+            pending_command = session.pending_command or ""
+            pending_command_hash = session.pending_command_hash or self._command_hash(pending_command)
+            pending_reason = session.pending_reason or ""
+            pending_tool_call_id = session.pending_tool_call_id or ""
+
+            analysis = await self.tool_dispatcher.get_command_approval_details(
+                command=pending_command,
+                reason=pending_reason,
                 chat_id=chat_id,
-                tool_call_id=session.pending_tool_call_id or "",
+                tool_call_id=pending_tool_call_id,
                 include_llm=include_llm,
             )
+
+            current_command = session.pending_command or ""
+            current_command_hash = session.pending_command_hash or self._command_hash(current_command)
+            if (
+                not session.pending_approval
+                or (pending_approval_id and session.pending_approval_id != pending_approval_id)
+                or current_command_hash != pending_command_hash
+            ):
+                return {
+                    "ok": False,
+                    "message": "Approval is no longer pending or has changed.",
+                }
+
+            session.pending_analysis = analysis
             self._persist_session(session)
 
         return {

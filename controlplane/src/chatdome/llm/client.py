@@ -82,6 +82,8 @@ class LLMClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         response_format: dict[str, str] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request to the LLM.
@@ -100,8 +102,8 @@ class LLMClient:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "temperature": self.temperature if temperature is None else temperature,
+            "max_tokens": self.max_tokens if max_tokens is None else max_tokens,
         }
         if tools:
             kwargs["tools"] = tools
@@ -169,15 +171,12 @@ class LLMClient:
             },
         ]
         
-        # Force low temperature to ensure deterministic safety output
-        original_temp = self.temperature
-        self.temperature = 0.0
-        
         try:
             # Note: json_object format is supported by OpenAI and many compatible providers.
             response = await self.chat_completion(
                 messages=messages,
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                temperature=0.0,
             )
             content = response.content or "{}"
             result = self._parse_json_object(content)
@@ -228,8 +227,6 @@ class LLMClient:
                 "deletion_detected": False,
                 "impact_analysis": f"安全审查机制执行失败，拒绝放行 ({str(e)})",
             }
-        finally:
-            self.temperature = original_temp
 
     @staticmethod
     def _format_command_for_review(command: str) -> str:
