@@ -157,7 +157,6 @@ class AgentSession:
             "tool_call_id": tool_call_id,
             "content": content,
         })
-        self.round_count += 1
         self.last_active = time.time()
 
     def add_pending_followup(self, role: str, content: str) -> None:

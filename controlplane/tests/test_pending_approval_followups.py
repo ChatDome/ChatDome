@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -25,6 +26,26 @@ class FakeLLM:
             }
         )
         return self.response
+
+
+class RepeatingToolLLM:
+    model = "fake-model"
+
+    def __init__(self, tools_per_round: int):
+        self.tools_per_round = tools_per_round
+        self.calls = 0
+
+    async def chat_completion(self, messages, tools=None, response_format=None):
+        self.calls += 1
+        tool_calls = [
+            ToolCall(
+                id=f"call-{self.calls}-{index}",
+                name="fake_tool",
+                arguments="{}",
+            )
+            for index in range(self.tools_per_round)
+        ]
+        return LLMResponse(content=None, tool_calls=tool_calls)
 
 
 class FakeSessionManager:
@@ -68,6 +89,22 @@ class FakeToolDispatcher:
 
     def _format_command_result(self, result) -> str:
         return result.stdout
+
+
+class CountingToolDispatcher:
+    def __init__(self):
+        self.calls = []
+
+    async def dispatch(self, tool_name, arguments_json, tool_call_id="", chat_id=0):
+        self.calls.append(
+            {
+                "tool_name": tool_name,
+                "arguments_json": arguments_json,
+                "tool_call_id": tool_call_id,
+                "chat_id": chat_id,
+            }
+        )
+        return "ok"
 
 
 class FakeApprovalDetailDispatcher:
@@ -134,6 +171,16 @@ def _details_agent(session: AgentSession, dispatcher) -> Agent:
     agent.session_manager = FakeSessionManager(session)
     agent.tool_dispatcher = dispatcher
     agent._persist_session = lambda saved_session: agent.session_manager.save_session(saved_session)
+    return agent
+
+
+def _loop_agent(llm, dispatcher, max_rounds_per_turn: int = 10) -> Agent:
+    agent = object.__new__(Agent)
+    agent.llm = llm
+    agent.config = SimpleNamespace(model="fake-model", max_rounds_per_turn=max_rounds_per_turn)
+    agent.tools = []
+    agent.tool_dispatcher = dispatcher
+    agent._persist_session = lambda session: None
     return agent
 
 
@@ -232,6 +279,24 @@ class PendingApprovalFollowupTests(unittest.TestCase):
 
         self.assertFalse(details["ok"])
         self.assertIsNone(session.pending_analysis)
+
+    def test_round_limit_reports_llm_rounds_not_tool_results(self):
+        session = AgentSession(chat_id=123)
+        session.add_user_message("run a multi-step investigation")
+        llm = RepeatingToolLLM(tools_per_round=2)
+        dispatcher = CountingToolDispatcher()
+        agent = _loop_agent(llm, dispatcher, max_rounds_per_turn=10)
+
+        with patch("chatdome.agent.tracker.TokenTracker.record_usage"):
+            response = asyncio.run(agent._run_loop(123, session))
+
+        self.assertTrue(response.startswith("__ROUND_LIMIT_CONFIRM__:"))
+        payload = json.loads(response.split(":", 1)[1])
+        self.assertEqual(payload["rounds"], 10)
+        self.assertEqual(session.pending_round_count, 10)
+        self.assertEqual(session.round_count, 10)
+        self.assertEqual(llm.calls, 10)
+        self.assertEqual(len(dispatcher.calls), 20)
 
     def test_summary_skips_old_persisted_tool_like_followups(self):
         session = _pending_session()

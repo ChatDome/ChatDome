@@ -548,6 +548,8 @@ class Agent:
                 len(response.tool_calls),
                 response.total_tokens,
             )
+            session.round_count = round_num
+            self._persist_session(session)
             
             from chatdome.agent.tracker import TokenTracker
             TokenTracker.record_usage(
