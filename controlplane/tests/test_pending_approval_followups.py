@@ -1,6 +1,8 @@
 import asyncio
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -41,11 +43,31 @@ class RepeatingToolLLM:
             ToolCall(
                 id=f"call-{self.calls}-{index}",
                 name="fake_tool",
-                arguments="{}",
+                arguments=json.dumps({"round": self.calls, "index": index}),
             )
             for index in range(self.tools_per_round)
         ]
         return LLMResponse(content=None, tool_calls=tool_calls)
+
+
+class RepeatingSameToolLLM:
+    model = "fake-model"
+
+    def __init__(self):
+        self.calls = 0
+
+    async def chat_completion(self, messages, tools=None, response_format=None):
+        self.calls += 1
+        return LLMResponse(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id=f"same-call-{self.calls}",
+                    name="run_security_check",
+                    arguments='{"check_id": "recent_cron_jobs", "args": {"limit": 5}}',
+                )
+            ],
+        )
 
 
 class FakeSessionManager:
@@ -297,6 +319,66 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         self.assertEqual(session.round_count, 10)
         self.assertEqual(llm.calls, 10)
         self.assertEqual(len(dispatcher.calls), 20)
+
+    def test_repeated_identical_tool_call_is_suppressed_and_stopped(self):
+        session = AgentSession(chat_id=123)
+        session.add_user_message("show the latest 5 executed commands")
+        llm = RepeatingSameToolLLM()
+        dispatcher = CountingToolDispatcher()
+        agent = _loop_agent(llm, dispatcher, max_rounds_per_turn=10)
+
+        with patch("chatdome.agent.tracker.TokenTracker.record_usage"):
+            response = asyncio.run(agent._run_loop(123, session))
+
+        self.assertIn("重复工具调用", response)
+        self.assertEqual(llm.calls, 3)
+        self.assertEqual(len(dispatcher.calls), 1)
+        tool_results = [msg for msg in session.messages if msg.get("role") == "tool"]
+        self.assertEqual(len(tool_results), 3)
+        self.assertIn("Duplicate tool call suppressed", tool_results[-1]["content"])
+
+    def test_command_audit_tool_returns_recent_executed_commands(self):
+        from chatdome.agent.audit import CommandAuditTracker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("chatdome.agent.audit.AUDIT_DIR", Path(tmp)):
+                CommandAuditTracker.record_event(
+                    "security_check_executed",
+                    chat_id=123,
+                    command="last -n 5",
+                    reason="security_check:recent_logins",
+                    check_id="recent_logins",
+                    execution_mode="pack",
+                    return_code=0,
+                    duration_ms=12,
+                )
+                CommandAuditTracker.record_event(
+                    "command_reviewed",
+                    chat_id=123,
+                    command="history | tail -5",
+                    reason="not actually executed",
+                )
+                CommandAuditTracker.record_event(
+                    "security_check_executed",
+                    chat_id=456,
+                    command="whoami",
+                    reason="other chat",
+                )
+
+                dispatcher = ToolDispatcher(SimpleNamespace())
+                result = asyncio.run(
+                    dispatcher.dispatch(
+                        "get_command_audit_events",
+                        '{"limit": 5}',
+                        tool_call_id="audit-call",
+                        chat_id=123,
+                    )
+                )
+
+        self.assertIn("ChatDome audit", result)
+        self.assertIn("last -n 5", result)
+        self.assertNotIn("history | tail -5", result)
+        self.assertNotIn("whoami", result)
 
     def test_summary_skips_old_persisted_tool_like_followups(self):
         session = _pending_session()

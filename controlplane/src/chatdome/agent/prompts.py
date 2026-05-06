@@ -259,6 +259,31 @@ def build_tools(
         {
             "type": "function",
             "function": {
+                "name": "get_command_audit_events",
+                "description": (
+                    "Query ChatDome's own command audit log. Use this when the user asks "
+                    "which commands ChatDome recently executed, asks for command history, "
+                    "or asks for audit events. This does not run host shell commands."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of audit entries to return. Default 5, maximum 30.",
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["executed", "all"],
+                            "description": "Use executed for commands that actually ran; use all for review/approval/block audit records too.",
+                        },
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "whois_lookup",
                 "description": "查询 IP 地址的归属信息（地理位置、AS、运营商）",
                 "parameters": {

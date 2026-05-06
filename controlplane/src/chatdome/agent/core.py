@@ -7,6 +7,7 @@ Orchestrates the cycle:
 
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 import time
@@ -30,6 +31,9 @@ class Agent:
     Receives user messages, manages sessions, calls the LLM,
     dispatches tool calls, and produces final responses.
     """
+
+    DUPLICATE_TOOL_STOP_THRESHOLD = 3
+    DUPLICATE_TOOL_RESULT_MAX_CHARS = 1800
 
     def __init__(
         self,
@@ -84,6 +88,116 @@ class Agent:
         normalized = (command or "").strip()
         return CommandAuditTracker.sha256_text(normalized)
 
+    @staticmethod
+    def _canonical_tool_arguments(arguments_json: str | None) -> str:
+        """Return a stable representation for tool-call arguments."""
+        raw = arguments_json or ""
+        try:
+            parsed = LLMClient.parse_json_object(raw) if raw else {}
+        except Exception:
+            parsed = {"__raw_arguments__": raw}
+        return json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def _tool_call_signature(cls, tool_name: str, arguments_json: str | None) -> str:
+        """Stable identity for duplicate tool-call detection."""
+        return f"{tool_name}:{cls._canonical_tool_arguments(arguments_json)}"
+
+    @staticmethod
+    def _truncate_tool_text(text: str | None, max_chars: int) -> str:
+        """Keep cached tool output small when feeding duplicate guard messages."""
+        value = str(text or "").strip()
+        if len(value) <= max_chars:
+            return value
+        return value[: max_chars - 20].rstrip() + "\n... (truncated)"
+
+    @classmethod
+    def _tool_call_stats_since_last_user(cls, session: Any) -> tuple[dict[str, int], dict[str, str]]:
+        """Count trailing duplicate tool calls and cache latest results for this turn."""
+        messages = getattr(session, "messages", []) or []
+        last_user_index = -1
+        for idx, msg in enumerate(messages):
+            if msg.get("role") == "user":
+                last_user_index = idx
+
+        tool_signature_order: list[str] = []
+        latest_results: dict[str, str] = {}
+        call_id_to_signature: dict[str, str] = {}
+
+        for msg in messages[last_user_index + 1:]:
+            if msg.get("tool_calls"):
+                for tc in msg.get("tool_calls", []) or []:
+                    function = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    signature = cls._tool_call_signature(
+                        str(function.get("name", "")),
+                        str(function.get("arguments", "") or ""),
+                    )
+                    tool_signature_order.append(signature)
+                    call_id = str(tc.get("id", "") or "")
+                    if call_id:
+                        call_id_to_signature[call_id] = signature
+                continue
+
+            if msg.get("role") == "tool":
+                signature = call_id_to_signature.get(str(msg.get("tool_call_id", "") or ""))
+                if signature:
+                    latest_results[signature] = str(msg.get("content", "") or "")
+
+        consecutive_counts: dict[str, int] = {}
+        if tool_signature_order:
+            last_signature = tool_signature_order[-1]
+            count = 0
+            for signature in reversed(tool_signature_order):
+                if signature != last_signature:
+                    break
+                count += 1
+            consecutive_counts[last_signature] = count
+
+        return consecutive_counts, latest_results
+
+    @classmethod
+    def _duplicate_tool_result(cls, signature: str, repeat_count: int, cached_result: str | None) -> str:
+        """Tool result used when an identical call is requested again."""
+        label = signature[:300]
+        cached = cls._truncate_tool_text(cached_result, cls.DUPLICATE_TOOL_RESULT_MAX_CHARS)
+        if cached:
+            return (
+                "[Duplicate tool call suppressed]\n"
+                f"The model requested the same tool call again (repeat_count={repeat_count}). "
+                "ChatDome did not execute the command again. Use the previous result below.\n"
+                f"signature={label}\n\n"
+                f"[Previous result]\n{cached}"
+            )
+        return (
+            "[Duplicate tool call suppressed]\n"
+            f"The model requested the same tool call again (repeat_count={repeat_count}). "
+            "ChatDome did not execute the command again. Use the existing conversation context."
+        )
+
+    @classmethod
+    def _tool_storm_final_response(
+        cls,
+        signature: str,
+        repeat_count: int,
+        cached_result: str | None,
+    ) -> str:
+        """Deterministic final response when the model loops on the same tool call."""
+        label = signature[:300]
+        cached = cls._truncate_tool_text(cached_result, 1200)
+        lines = [
+            "检测到重复工具调用，已停止继续执行，避免命令风暴和 token 继续消耗。",
+            "",
+            f"重复次数: {repeat_count}",
+            f"工具签名: {label}",
+        ]
+        if cached:
+            lines.extend(["", "最近一次工具结果摘录:", cached])
+        lines.extend([
+            "",
+            "请基于上面的已有结果判断；如果还需要继续，请发送更具体的新指令，或使用 /clear 开始一个新任务。",
+        ])
+        return "\n".join(lines)
+
     async def handle_message(self, chat_id: int, user_message: str) -> str:
         """Process a user message through the full ReAct loop."""
         session = self.session_manager.get_or_create(chat_id)
@@ -102,9 +216,10 @@ class Agent:
                 return await self.resolve_round_limit(chat_id, "ABANDON")
             if self._is_continue_intent(user_message):
                 return await self.resolve_round_limit(chat_id, "CONTINUE")
+            window_limit = max(1, int(self.config.max_rounds_per_turn))
             return (
                 f"\u5f53\u524d\u4efb\u52a1\u5df2\u6267\u884c {session.pending_round_count} \u8f6e\uff0c\u4ecd\u672a\u5b8c\u6210\u3002\n"
-                "\u8bf7\u56de\u590d\u2018\u7ee7\u7eed\u2019\u4ee5\u518d\u6267\u884c 10 \u8f6e\uff0c\u6216\u56de\u590d\u2018\u653e\u5f03\u2019\u7ed3\u675f\u5f53\u524d\u4efb\u52a1\u3002"
+                f"\u8bf7\u56de\u590d\u2018\u7ee7\u7eed\u2019\u4ee5\u518d\u6267\u884c {window_limit} \u8f6e\uff0c\u6216\u56de\u590d\u2018\u653e\u5f03\u2019\u7ed3\u675f\u5f53\u524d\u4efb\u52a1\u3002"
             )
 
         session.add_user_message(user_message)
@@ -528,7 +643,7 @@ class Agent:
         end_round_exclusive = start_round + window_limit + 1
         for round_num in range(start_round + 1, end_round_exclusive):
             logger.info(
-                "Agent loop round %d/%d for chat_id=%d",
+                "Agent loop progress %d/%d for chat_id=%d",
                 round_num, start_round + window_limit, chat_id,
             )
 
@@ -562,6 +677,17 @@ class Agent:
             )
 
             if response.tool_calls:
+                prior_tool_counts, prior_tool_results = self._tool_call_stats_since_last_user(session)
+                current_tool_counts: dict[str, int] = {}
+                tool_call_plans: list[tuple[Any, str, int, bool]] = []
+                for tc in response.tool_calls:
+                    signature = self._tool_call_signature(tc.name, tc.arguments)
+                    current_seen = current_tool_counts.get(signature, 0)
+                    repeat_count = prior_tool_counts.get(signature, 0) + current_seen + 1
+                    is_duplicate = prior_tool_counts.get(signature, 0) > 0 or current_seen > 0
+                    tool_call_plans.append((tc, signature, repeat_count, is_duplicate))
+                    current_tool_counts[signature] = current_seen + 1
+
                 # Build the assistant message with tool_calls for the session
                 tool_calls_for_session = [
                     {
@@ -579,13 +705,34 @@ class Agent:
 
                 # Execute each tool call
                 from chatdome.agent.tools import PendingApprovalError
-                import json
-                
-                for tc in response.tool_calls:
+
+                storm_signature: str | None = None
+                storm_repeat_count = 0
+                storm_cached_result = ""
+
+                for tc, signature, repeat_count, is_duplicate in tool_call_plans:
+                    if is_duplicate:
+                        cached_result = prior_tool_results.get(signature, "")
+                        result = self._duplicate_tool_result(signature, repeat_count, cached_result)
+                        session.add_tool_result(tc.id, result)
+                        self._persist_session(session)
+                        logger.warning(
+                            "Suppressed duplicate tool call for chat_id=%d repeat_count=%d signature=%s",
+                            chat_id,
+                            repeat_count,
+                            signature[:300],
+                        )
+                        if repeat_count >= self.DUPLICATE_TOOL_STOP_THRESHOLD:
+                            storm_signature = signature
+                            storm_repeat_count = max(storm_repeat_count, repeat_count)
+                            storm_cached_result = cached_result or result
+                        continue
+
                     logger.info("Executing tool: %s (id=%s)", tc.name, tc.id)
                     try:
                         result = await self.tool_dispatcher.dispatch(tc.name, tc.arguments, tc.id, chat_id)
                         session.add_tool_result(tc.id, result)
+                        prior_tool_results[signature] = result
                         self._persist_session(session)
                         logger.debug("Tool result for %s: %s", tc.id, result[:200])
                     except PendingApprovalError as e:
@@ -604,9 +751,13 @@ class Agent:
                                     chat_id=chat_id,
                                     tool_call_id=tc.id,
                                 )
-                                session.add_tool_result(tc.id, self.tool_dispatcher._format_command_result(res))
+                                formatted = self.tool_dispatcher._format_command_result(res)
+                                session.add_tool_result(tc.id, formatted)
+                                prior_tool_results[signature] = formatted
                             except Exception as ex:
-                                session.add_tool_result(tc.id, f"Command execution failed: {ex}")
+                                formatted = f"Command execution failed: {ex}"
+                                session.add_tool_result(tc.id, formatted)
+                                prior_tool_results[signature] = formatted
                             self._persist_session(session)
                             continue
 
@@ -649,6 +800,24 @@ class Agent:
                         }
                         self._persist_session(session)
                         return f"__PENDING_APPROVAL__:{json.dumps(payload)}"
+
+                if storm_signature is not None:
+                    final_content = self._tool_storm_final_response(
+                        storm_signature,
+                        storm_repeat_count,
+                        storm_cached_result,
+                    )
+                    session.task_auto_approve = False
+                    session.clear_pending_round_limit()
+                    session.add_assistant_message(final_content)
+                    self._persist_session(session)
+                    logger.warning(
+                        "Tool storm stopped for chat_id=%d repeat_count=%d signature=%s",
+                        chat_id,
+                        storm_repeat_count,
+                        storm_signature[:300],
+                    )
+                    return final_content
 
                 # Continue the loop — send results back to LLM
                 continue

@@ -99,6 +99,8 @@ class ToolDispatcher:
                 return await self._handle_security_check(args, tool_call_id, chat_id)
             elif tool_name == "run_shell_command":
                 return await self._handle_shell_command(args, tool_call_id, chat_id)
+            elif tool_name == "get_command_audit_events":
+                return self._handle_command_audit_events(args, chat_id)
             elif tool_name == "whois_lookup":
                 return await self._handle_whois_lookup(args)
             elif tool_name == "add_user_context":
@@ -130,6 +132,66 @@ class ToolDispatcher:
             tool_call_id=tool_call_id,
         )
         return self._format_command_result(result)
+
+    def _handle_command_audit_events(self, args: dict[str, Any], chat_id: int = 0) -> str:
+        """Return recent ChatDome command audit events without running host commands."""
+        try:
+            limit = int(args.get("limit", 5))
+        except (TypeError, ValueError):
+            limit = 5
+        limit = min(max(limit, 1), 30)
+
+        scope = str(args.get("scope", "executed") or "executed").strip().lower()
+        if scope not in {"executed", "all"}:
+            scope = "executed"
+
+        raw_events = CommandAuditTracker.get_recent_events(
+            chat_id=chat_id if chat_id else None,
+            limit=max(100, limit * 20),
+        )
+        executed_event_types = {"command_executed", "security_check_executed"}
+
+        events: list[dict[str, Any]] = []
+        for event in raw_events:
+            command = str(event.get("command", "") or "").strip()
+            if not command:
+                continue
+            if scope == "executed" and str(event.get("event_type", "")) not in executed_event_types:
+                continue
+            events.append(event)
+            if len(events) >= limit:
+                break
+
+        if not events:
+            if scope == "executed":
+                return "No executed ChatDome command audit events were found for this chat."
+            return "No ChatDome command audit events with command text were found for this chat."
+
+        title_scope = "executed commands" if scope == "executed" else "command audit events"
+        lines = [f"ChatDome audit: latest {len(events)} {title_scope} (newest first)."]
+        for idx, event in enumerate(events, start=1):
+            timestamp = str(event.get("timestamp_iso", "unknown"))
+            event_type = str(event.get("event_type", "unknown"))
+            command = " ".join(str(event.get("command", "")).split())
+            if len(command) > 300:
+                command = command[:297].rstrip() + "..."
+
+            details: list[str] = []
+            check_id = str(event.get("check_id", "") or "").strip()
+            if check_id:
+                details.append(f"check_id={check_id}")
+            execution_mode = str(event.get("execution_mode", "") or "").strip()
+            if execution_mode:
+                details.append(f"mode={execution_mode}")
+            if "return_code" in event:
+                details.append(f"return_code={event.get('return_code')}")
+            if "duration_ms" in event:
+                details.append(f"duration_ms={event.get('duration_ms')}")
+
+            suffix = f" ({', '.join(details)})" if details else ""
+            lines.append(f"{idx}. {timestamp} | {event_type}{suffix}\n   {command}")
+
+        return "\n".join(lines)
 
     async def _handle_shell_command(self, args: dict[str, Any], tool_call_id: str, chat_id: int = 0) -> str:
         """Evaluate and suspend an AI-generated shell command for user approval."""
