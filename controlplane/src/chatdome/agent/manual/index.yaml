@@ -1,0 +1,57 @@
+sections:
+  - id: command_audit
+    title: ChatDome 内部命令审计
+    summary: 区分 ChatDome 自己执行的工具命令、审批记录和拦截记录。
+    when_to_read:
+      - 用户询问 ChatDome、机器人、助手、你最近执行过哪些命令
+      - 用户询问 /audit、审批记录、拦截记录或命令审计
+    tools:
+      - get_command_audit_events
+    file: command_audit.md
+
+  - id: host_exec_audit
+    title: 主机级 execve 审计
+    summary: 查询整台 Linux 主机的 auditd execve 记录，并说明其混合来源和追溯限制。
+    when_to_read:
+      - 用户明确询问整台服务器或主机最近执行过哪些命令
+      - 用户询问 auditd、execve、主机级命令历史
+    tools:
+      - auditd_status
+      - run_security_check
+      - run_shell_command
+    file: host_exec_audit.md
+
+  - id: ssh_session_commands
+    title: SSH 会话命令追踪
+    summary: 根据 SSH 登录上下文和 audit session ID 查询某个 SSH 会话内执行过的命令。
+    when_to_read:
+      - 用户询问 SSH 登录后执行了什么命令
+      - 用户要求查看某个登录会话、某个 IP、某个 sshd 进程对应的命令
+    tools:
+      - auditd_status
+      - ssh_success_login
+      - ssh_active_sessions
+      - ssh_audit_session_for_pid
+      - ssh_session_commands
+    file: ssh_session_commands.md
+
+  - id: approvals
+    title: 命令审批与风险解释
+    summary: 解释 pending approval、命令风险、用户确认和拒绝后的处理边界。
+    when_to_read:
+      - 用户询问为什么需要确认
+      - 用户询问命令是否安全、审批后会发生什么
+    tools:
+      - run_shell_command
+    file: approvals.md
+
+  - id: sentinel
+    title: Sentinel 巡检与告警解释
+    summary: 处理哨兵巡检、告警含义、误报判断、用户上下文和静默边界。
+    when_to_read:
+      - 用户询问哨兵告警、巡检命令、为什么一直提醒
+      - 用户要求解释或处理疑似误报
+    tools:
+      - run_security_check
+      - add_user_context
+    file: sentinel.md

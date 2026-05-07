@@ -2,6 +2,7 @@
 Tool dispatch — routes LLM tool_calls to the appropriate executor.
 
 Handles:
+  - read_chatdome_manual → curated internal operating manual
   - run_security_check → CommandSandbox.execute_security_check
   - run_shell_command  → CommandSandbox.execute_shell_command
   - whois_lookup       → HTTP call to ip-api.com
@@ -15,6 +16,7 @@ from typing import Any
 import httpx
 
 from chatdome.agent.audit import CommandAuditTracker
+from chatdome.agent.manual import read_manual_section
 from chatdome.executor.sandbox import CommandSandbox, CommandResult
 from chatdome.llm.client import LLMClient
 
@@ -95,7 +97,9 @@ class ToolDispatcher:
             return f"参数解析失败: {e}"
 
         try:
-            if tool_name == "run_security_check":
+            if tool_name == "read_chatdome_manual":
+                return self._handle_read_chatdome_manual(args)
+            elif tool_name == "run_security_check":
                 return await self._handle_security_check(args, tool_call_id, chat_id)
             elif tool_name == "run_shell_command":
                 return await self._handle_shell_command(args, tool_call_id, chat_id)
@@ -114,6 +118,10 @@ class ToolDispatcher:
             return f"工具执行异常: {e}"
 
     # ----- Handlers -----
+
+    def _handle_read_chatdome_manual(self, args: dict[str, Any]) -> str:
+        """Return one curated operating manual section."""
+        return read_manual_section(str(args.get("section_id", "")))
 
     async def _handle_security_check(
         self,
@@ -168,7 +176,10 @@ class ToolDispatcher:
             return "No ChatDome command audit events with command text were found for this chat."
 
         title_scope = "executed commands" if scope == "executed" else "command audit events"
-        lines = [f"ChatDome audit: latest {len(events)} {title_scope} (newest first)."]
+        lines = [
+            f"ChatDome internal audit: latest {len(events)} {title_scope} (newest first).",
+            "Source note: these are ChatDome tool executions, not SSH user session commands.",
+        ]
         for idx, event in enumerate(events, start=1):
             timestamp = str(event.get("timestamp_iso", "unknown"))
             event_type = str(event.get("event_type", "unknown"))

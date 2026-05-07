@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from chatdome.agent.manual import build_manual_index_prompt, get_manual_section_ids
+
 if TYPE_CHECKING:
     from chatdome.sentinel.pack_loader import PackLoader
 
@@ -90,6 +92,8 @@ SYSTEM_PROMPT_TEMPLATE = """\
 
 {command_policy}
 
+{manual_index}
+
 {runtime_environment_block}
 
 {available_checks}
@@ -129,6 +133,7 @@ def build_system_prompt(
     available_checks = _build_available_checks_text(pack_loader)
     return SYSTEM_PROMPT_TEMPLATE.format(
         command_policy=command_policy.strip(),
+        manual_index=build_manual_index_prompt().strip(),
         runtime_environment_block=runtime_environment_block.strip(),
         available_checks=available_checks.strip(),
     )
@@ -207,8 +212,31 @@ def build_tools(
             "suspicious_processes, recent_cron_jobs, large_files, "
             "recent_syslog, kernel_errors"
         )
+    manual_section_ids = get_manual_section_ids()
 
     return [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_chatdome_manual",
+                "description": (
+                    "Read one curated ChatDome operating manual section by section_id. "
+                    "Use this when tool choice, data source, or workflow is unclear. "
+                    "This is a read-only internal guide and does not access the host."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "section_id": {
+                            "type": "string",
+                            "enum": manual_section_ids,
+                            "description": "Manual section ID to read.",
+                        },
+                    },
+                    "required": ["section_id"],
+                },
+            },
+        },
         {
             "type": "function",
             "function": {
@@ -261,9 +289,13 @@ def build_tools(
             "function": {
                 "name": "get_command_audit_events",
                 "description": (
-                    "Query ChatDome's own command audit log. Use this when the user asks "
-                    "which commands ChatDome recently executed, asks for command history, "
-                    "or asks for audit events. This does not run host shell commands."
+                    "Query ChatDome's own internal command audit log. Use only when the "
+                    "user explicitly asks about commands executed by ChatDome/the bot/the "
+                    "assistant, /audit, approval records, blocked commands, or audit events. "
+                    "Do not use for generic host/user/SSH command history; those require "
+                    "auditd/SSH session tools such as auditd_status, ssh_active_sessions, "
+                    "ssh_audit_session_for_pid, and ssh_session_commands. This does not run "
+                    "host shell commands."
                 ),
                 "parameters": {
                     "type": "object",

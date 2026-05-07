@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from chatdome.agent.core import Agent
+from chatdome.agent.prompts import build_system_prompt, build_tools
 from chatdome.agent.session import AgentSession
 from chatdome.agent.tools import ToolDispatcher
 from chatdome.llm.client import LLMResponse, ToolCall
@@ -375,10 +376,55 @@ class PendingApprovalFollowupTests(unittest.TestCase):
                     )
                 )
 
-        self.assertIn("ChatDome audit", result)
+        self.assertIn("ChatDome internal audit", result)
+        self.assertIn("not SSH user session commands", result)
         self.assertIn("last -n 5", result)
         self.assertNotIn("history | tail -5", result)
         self.assertNotIn("whoami", result)
+
+    def test_manual_index_and_tools_separate_chatdome_and_ssh_sources(self):
+        prompt = build_system_prompt()
+        tools = build_tools()
+        manual_tool = next(
+            tool
+            for tool in tools
+            if tool["function"]["name"] == "read_chatdome_manual"
+        )
+        audit_tool = next(
+            tool
+            for tool in tools
+            if tool["function"]["name"] == "get_command_audit_events"
+        )
+        manual_section_ids = (
+            manual_tool["function"]["parameters"]["properties"]["section_id"]["enum"]
+        )
+        description = audit_tool["function"]["description"]
+
+        self.assertIn("read_chatdome_manual(section_id)", prompt)
+        self.assertIn("command_audit", prompt)
+        self.assertIn("ssh_session_commands", prompt)
+        self.assertIn("host_exec_audit", prompt)
+        self.assertIn("command_audit", manual_section_ids)
+        self.assertIn("ssh_session_commands", manual_section_ids)
+        self.assertIn("Do not use for generic host/user/SSH command history", description)
+        self.assertIn("auditd_status", description)
+        self.assertIn("ssh_session_commands", description)
+
+    def test_read_chatdome_manual_returns_curated_section(self):
+        dispatcher = ToolDispatcher(SimpleNamespace())
+        result = asyncio.run(
+            dispatcher.dispatch(
+                "read_chatdome_manual",
+                '{"section_id": "ssh_session_commands"}',
+                tool_call_id="manual-call",
+                chat_id=123,
+            )
+        )
+
+        self.assertIn("ChatDome manual section: ssh_session_commands", result)
+        self.assertIn("auditd_status", result)
+        self.assertIn("ssh_session_commands", result)
+        self.assertIn("last -i -F -n", result)
 
     def test_summary_skips_old_persisted_tool_like_followups(self):
         session = _pending_session()
