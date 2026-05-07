@@ -1,7 +1,7 @@
 sections:
   - id: command_audit
     title: ChatDome 内部命令审计
-    summary: 区分 ChatDome 自己执行的工具命令、审批记录和拦截记录。
+    summary: 区分 ChatDome 自己执行的工具命令、审批记录和拦截记录。包含返回值格式说明和歧义意图消解矩阵。
     when_to_read:
       - 用户询问 ChatDome、机器人、助手、你最近执行过哪些命令
       - 用户询问 /audit、审批记录、拦截记录或命令审计
@@ -11,7 +11,7 @@ sections:
 
   - id: host_exec_audit
     title: 主机级 execve 审计
-    summary: 查询整台 Linux 主机的 auditd execve 记录，并说明其混合来源和追溯限制。
+    summary: 查询整台 Linux 主机的 auditd execve 记录，包含 auditd 缺失降级方案、字段解读和自身命令过滤技巧。
     when_to_read:
       - 用户明确询问整台服务器或主机最近执行过哪些命令
       - 用户询问 auditd、execve、主机级命令历史
@@ -23,7 +23,7 @@ sections:
 
   - id: ssh_session_commands
     title: SSH 会话命令追踪
-    summary: 根据 SSH 登录上下文和 audit session ID 查询某个 SSH 会话内执行过的命令。
+    summary: 根据 SSH 登录上下文和 audit session ID 查询某个 SSH 会话内执行过的命令。包含四步流程的参数/输出说明和排错决策树。
     when_to_read:
       - 用户询问 SSH 登录后执行了什么命令
       - 用户要求查看某个登录会话、某个 IP、某个 sshd 进程对应的命令
@@ -37,17 +37,18 @@ sections:
 
   - id: approvals
     title: 命令审批与风险解释
-    summary: 解释 pending approval、命令风险、用户确认和拒绝后的处理边界。
+    summary: 解释审批流程全貌、三级风险判定标准、god_mode 差异和标准回答模板。
     when_to_read:
       - 用户询问为什么需要确认
       - 用户询问命令是否安全、审批后会发生什么
+      - 用户在 pending approval 状态下追问
     tools:
       - run_shell_command
     file: approvals.md
 
   - id: sentinel
     title: Sentinel 巡检与告警解释
-    summary: 处理哨兵巡检、告警含义、误报判断、用户上下文和静默边界。
+    summary: 处理哨兵巡检和告警。包含状态机六态流转、指纹去重规则、add_user_context 参数详解和误报判别指南。
     when_to_read:
       - 用户询问哨兵告警、巡检命令、为什么一直提醒
       - 用户要求解释或处理疑似误报
@@ -55,3 +56,34 @@ sections:
       - run_security_check
       - add_user_context
     file: sentinel.md
+
+  - id: threat_intel
+    title: IP 威胁情报查询
+    summary: 查询 IP 归属信息（地理位置、ISP、AS），与 Sentinel 告警联动补充攻击来源情报。
+    when_to_read:
+      - 用户要求查询某个 IP 的归属信息或地理位置
+      - Sentinel 告警中涉及的来源 IP 需要情报补充
+    tools:
+      - whois_lookup
+    file: threat_intel.md
+
+  - id: shell_commands
+    title: 动态 Shell 命令使用规范
+    summary: run_shell_command 的通用使用规范，包含工具优先级、参数格式约束、常用命令模式和普通/god_mode 差异。
+    when_to_read:
+      - 需要通过 run_shell_command 执行自定义命令时
+      - 不确定应该用 run_security_check 还是 run_shell_command 时
+    tools:
+      - run_shell_command
+      - run_security_check
+    file: shell_commands.md
+
+  - id: intent_disambiguation
+    title: 用户意图消歧指南
+    summary: 面对模糊请求的消歧决策树和追问模板。覆盖"最近执行了哪些命令"、"检查安全状况"等常见宽泛请求。
+    when_to_read:
+      - 用户请求主体不明确或范围模糊
+      - 用户说"检查一下安全状况"等宽泛请求
+      - 不确定应该读取哪个手册章节
+    tools: []
+    file: intent_disambiguation.md
