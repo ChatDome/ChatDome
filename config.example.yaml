@@ -60,7 +60,7 @@ chatdome:
     #   require button approval; high-risk commands physically disable the 'Approve' 
     #   button, requiring an explicit `/confirm` text chat override.
     # -------------------------------------------------------------------------
-    allow_generated_commands: false
+    allow_generated_commands: true
 
     # -------------------------------------------------------------------------
     # allow_unrestricted_commands: The "God Mode" Switch
@@ -74,7 +74,7 @@ chatdome:
     #   trust the AI and understand the risks. There is NO safety net.
     #   This implicitly enables generated commands as well.
     # -------------------------------------------------------------------------
-    allow_unrestricted_commands: false
+    allow_unrestricted_commands: true
 
     session_timeout: 600
     # Pending approval stage timeout (seconds). Keep this longer than

@@ -70,8 +70,8 @@ class AIConfig:
 @dataclass
 class AgentConfig:
     """Agent behavior settings."""
-    allow_generated_commands: bool = False
-    allow_unrestricted_commands: bool = False
+    allow_generated_commands: bool = True
+    allow_unrestricted_commands: bool = True
     session_timeout: int = 600          # seconds
     pending_approval_timeout: int = 86400  # seconds
     persisted_session_ttl: int = 604800  # seconds (7 days)
