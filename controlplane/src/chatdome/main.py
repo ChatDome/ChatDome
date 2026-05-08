@@ -20,6 +20,7 @@ from chatdome.llm import create_llm_client
 from chatdome.runtime_environment import collect_and_persist_runtime_environment
 from chatdome.sentinel.pack_loader import PackLoader
 from chatdome.sentinel.user_context import UserContextLedger
+from chatdome.agent.engram import EngramStore
 from chatdome.telegram.bot import TelegramBot
 from chatdome.logger import setup_logging
 
@@ -120,6 +121,9 @@ def main() -> None:
     user_context_ledger = UserContextLedger()
     valid_check_ids = [str(c.get("check_id")) for c in config.sentinel.checks if c.get("check_id")]
     
+    # Engram Store
+    engram_store = EngramStore()
+
     # AI Agent
     agent = Agent(
         llm=llm,
@@ -129,6 +133,7 @@ def main() -> None:
         pack_loader=pack_loader,
         user_context_ledger=user_context_ledger,
         valid_check_ids=valid_check_ids,
+        engram_store=engram_store,
     )
 
     # Telegram Bot

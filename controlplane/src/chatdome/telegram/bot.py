@@ -144,6 +144,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("sentinel_trigger", self._handle_sentinel_trigger))
         self._app.add_handler(CommandHandler("sentinel_history", self._handle_sentinel_history))
         self._app.add_handler(CommandHandler("sentinel_packs", self._handle_sentinel_packs))
+        self._app.add_handler(CommandHandler("engram", self._handle_engram))
         self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
@@ -516,6 +517,43 @@ class TelegramBot:
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
+
+    async def _handle_engram(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /engram command."""
+        if not self._check_auth(update):
+            return
+            
+        args = context.args or []
+        store = getattr(self.agent.tool_dispatcher, "engram_store", None)
+        
+        if not store:
+            await self._send_text(update, "❌ EngramStore 未初始化。")
+            return
+            
+        if len(args) == 2 and args[0].lower() == "delete":
+            engram_id = args[1]
+            if store.remove(engram_id):
+                await self._send_text(update, f"✅ 已删除 Engram: {engram_id}")
+            else:
+                await self._send_text(update, f"❌ 未找到有效记录: {engram_id}")
+            return
+            
+        active = store.list(include_superseded=False)
+        if not active:
+            await self._send_text(update, "📭 当前没有任何有效的 Engram 记录。")
+            return
+            
+        lines = ["🧠 *ChatDome 主机记忆印迹 (Engrams)*", ""]
+        import datetime
+        for e in active:
+            dt = datetime.datetime.fromtimestamp(e.created_at).strftime('%Y-%m-%d %H:%M')
+            lines.append(f"• `[{e.category}]` {e.fact}")
+            lines.append(f"  _ID: `{e.id}` | {dt}_")
+            
+        lines.append("")
+        lines.append("🗑️ _删除记录: `/engram delete <id>`_")
+        
+        await self._send_text(update, "\n".join(lines))
 
     async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline keyboard button clicks."""

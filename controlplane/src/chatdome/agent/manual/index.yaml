@@ -78,6 +78,18 @@ sections:
       - run_security_check
     file: shell_commands.md
 
+  - id: engram
+    title: Engram 记忆印迹管理
+    summary: 管理用户声明的主机环境事实、运维偏好和操作约束。包含判定决策树、分类指南、冲突检测流程、通知规范和禁止行为。
+    when_to_read:
+      - 用户声明了关于主机环境、运维习惯或操作约束的事实
+      - 不确定是否应该调用 save_engram 记录用户信息
+      - save_engram 返回了冲突警告
+    tools:
+      - save_engram
+      - recall_engrams
+    file: engram.md
+
   - id: intent_disambiguation
     title: 用户意图消歧指南
     summary: 面对模糊请求的消歧决策树和追问模板。覆盖"最近执行了哪些命令"、"检查安全状况"等常见宽泛请求。

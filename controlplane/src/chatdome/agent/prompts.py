@@ -360,6 +360,59 @@ def build_tools(
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "save_engram",
+                "description": (
+                    "保存用户声明的环境事实、运维偏好或操作约束到长期记忆（Engram）中。"
+                    "用于用户主动告知持久性信息时，必须严格遵守 engram 手册的决策树。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "category": {
+                            "type": "string",
+                            "enum": ["environment", "preference", "constraint", "topology"],
+                            "description": "记忆分类",
+                        },
+                        "fact": {
+                            "type": "string",
+                            "description": "精简、无歧义的事实描述（例如：'防火墙使用 iptables，不用 ufw'）",
+                        },
+                        "source_context": {
+                            "type": "string",
+                            "description": "提取该事实的原始对话上下文简述",
+                        },
+                        "supersedes_id": {
+                            "type": "string",
+                            "description": "如果此记录是用于覆盖之前的冲突记录，填写被覆盖的记录ID",
+                        },
+                    },
+                    "required": ["category", "fact", "source_context"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "recall_engrams",
+                "description": (
+                    "查询已保存的长期记忆（Engram）。"
+                    "当不确定系统架构、约束条件或偏好时，可以主动调用此工具提取记忆。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "category": {
+                            "type": "string",
+                            "enum": ["environment", "preference", "constraint", "topology"],
+                            "description": "按分类筛选。不填则返回所有有效记录",
+                        },
+                    },
+                },
+            },
+        },
     ]
 
 

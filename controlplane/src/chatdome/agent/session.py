@@ -372,12 +372,14 @@ class SessionManager:
         persisted_session_ttl: int = 604800,
         max_history_tokens: int = 16000,
         system_prompt: str = "",
+        engram_store: 'Any' = None,
     ):
         self.session_timeout = session_timeout
         self.pending_approval_timeout = pending_approval_timeout
         self.persisted_session_ttl = max(0, persisted_session_ttl)
         self.max_history_tokens = max_history_tokens
         self.system_prompt = system_prompt
+        self.engram_store = engram_store
         self._sessions: dict[int, AgentSession] = {}
         self._cleanup_task: asyncio.Task | None = None
         self._chat_data_dir = Path("chat_data")
@@ -415,8 +417,12 @@ class SessionManager:
 
     def _build_memory_prompt(self, chat_id: int) -> str:
         """Build system prompt + local memory vault summary."""
-        memory_file = self._chat_data_dir / f"{chat_id}_memory.json"
         memory_prompt = self.system_prompt
+        if getattr(self, "engram_store", None):
+            engram_str = self.engram_store.build_engram_prompt()
+            if engram_str:
+                memory_prompt += "\n\n" + engram_str
+        memory_file = self._chat_data_dir / f"{chat_id}_memory.json"
         if memory_file.exists():
             try:
                 with open(memory_file, "r", encoding="utf-8") as f:

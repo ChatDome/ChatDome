@@ -43,7 +43,8 @@ class Agent:
         runtime_environment_context: str = "",
         pack_loader: Any = None,
         user_context_ledger: Any = None,
-        valid_check_ids: list[str] | None = None,
+        valid_check_ids: 'list[str] | None' = None,
+        engram_store: 'Any' = None,
     ):
         self.llm = llm
         self.config = config
@@ -52,7 +53,7 @@ class Agent:
             pack_loader=pack_loader,
             valid_check_ids=valid_check_ids,
         )
-        self.tool_dispatcher = ToolDispatcher(sandbox, llm=llm, user_context_ledger=user_context_ledger)
+        self.tool_dispatcher = ToolDispatcher(sandbox, llm=llm, user_context_ledger=user_context_ledger, engram_store=engram_store)
         self.session_manager = SessionManager(
             session_timeout=config.session_timeout,
             pending_approval_timeout=config.pending_approval_timeout,
@@ -63,6 +64,7 @@ class Agent:
                 runtime_environment_context=runtime_environment_context,
                 pack_loader=pack_loader,
             ),
+            engram_store=engram_store,
         )
 
     def _persist_session(self, session: Any) -> None:
