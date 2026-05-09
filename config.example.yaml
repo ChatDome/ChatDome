@@ -93,7 +93,7 @@ chatdome:
   # Sentinel — 7×24 Security Monitoring (哨兵模式)
   # ---------------------------------------------------------------------------
   sentinel:
-    enabled: false                         # 显式开启
+    enabled: true                         # 哨兵模式开关
 
     # 告警推送目标（空 = 使用 telegram.allowed_chat_ids）
     alert_chat_ids: []
