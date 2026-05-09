@@ -95,7 +95,7 @@ chatdome:
   sentinel:
     enabled: true                         # 哨兵模式开关
 
-    # 告警推送目标（空 = 使用 telegram.allowed_chat_ids）
+    # 告警推送目标（空 = 使用 telegram.allowed_chat_ids；如果两者都为空，则 Sentinel 只巡检/记录，不会主动推送到手机）
     alert_chat_ids: []
     alert_retention_days: 30             # sentinel_alerts.jsonl 按天保留窗口
 

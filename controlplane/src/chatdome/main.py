@@ -146,6 +146,14 @@ def main() -> None:
 
         # Determine alert targets: sentinel.alert_chat_ids or fallback to telegram.allowed_chat_ids
         alert_targets = config.sentinel.alert_chat_ids or config.telegram.allowed_chat_ids
+        if alert_targets:
+            logger.info("  Sentinel alert targets: %s", alert_targets)
+        else:
+            logger.warning(
+                "  Sentinel is enabled but no alert chat targets are configured. "
+                "Set chatdome.sentinel.alert_chat_ids in config.yaml or "
+                "CHATDOME_ALLOWED_CHAT_IDS to receive Telegram pushes."
+            )
 
         sentinel_scheduler = SentinelScheduler(
             config=config.sentinel,

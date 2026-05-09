@@ -61,10 +61,23 @@ class CommandSandbox:
         self.allow_unrestricted_commands = allow_unrestricted_commands
         self._pack_loader = pack_loader
 
+    @staticmethod
+    def _command_log_excerpt(command: str, max_chars: int = 240) -> str:
+        """Return a compact one-line command excerpt for INFO/WARNING logs."""
+        excerpt = " ".join((command or "").split())
+        if len(excerpt) > max_chars:
+            excerpt = excerpt[: max_chars - 3].rstrip() + "..."
+        return excerpt
+
+    @staticmethod
+    def _command_log_hash(command: str) -> str:
+        return CommandAuditTracker.sha256_text(command or "")[:12]
+
     async def _execute(
         self,
         command: str,
         timeout: int | None = None,
+        log_label: str = "command",
     ) -> CommandResult:
         """
         Low-level command execution with timeout and output truncation.
@@ -74,7 +87,17 @@ class CommandSandbox:
         layers (registry templates + validator).
         """
         effective_timeout = timeout or self.default_timeout
-        logger.info("Executing command (timeout=%ds): %s", effective_timeout, command)
+        command_hash = self._command_log_hash(command)
+        command_excerpt = self._command_log_excerpt(command)
+        logger.info(
+            "Executing command (label=%s, timeout=%ds, chars=%d, sha256=%s): %s",
+            log_label,
+            effective_timeout,
+            len(command or ""),
+            command_hash,
+            command_excerpt,
+        )
+        logger.debug("Full command (label=%s, sha256=%s):\n%s", log_label, command_hash, command)
 
         try:
 
@@ -104,7 +127,13 @@ class CommandSandbox:
                 else:
                     proc.kill()
                 await proc.wait()
-                logger.warning("Command timed out after %ds: %s", effective_timeout, command)
+                logger.warning(
+                    "Command timed out after %ds (label=%s, sha256=%s): %s",
+                    effective_timeout,
+                    log_label,
+                    command_hash,
+                    command_excerpt,
+                )
                 return CommandResult(
                     stdout="",
                     stderr=f"命令执行超时 ({effective_timeout}s)",
@@ -135,8 +164,11 @@ class CommandSandbox:
 
         except Exception as e:
             logger.error(
-                "Command execution failed!\n  [Command]: %s\n  [Error]: %s", 
-                command, e
+                "Command execution failed (label=%s, sha256=%s): %s\n  [Error]: %s",
+                log_label,
+                command_hash,
+                command_excerpt,
+                e,
             )
             return CommandResult(
                 stdout="",
@@ -236,7 +268,11 @@ class CommandSandbox:
 
         logger.info("Running security check: %s (%s)", rendered.name, rendered.check_id)
         started = time.monotonic()
-        result = await self._execute(rendered.command, timeout=rendered.timeout)
+        result = await self._execute(
+            rendered.command,
+            timeout=rendered.timeout,
+            log_label=f"security_check:{rendered.check_id}",
+        )
         duration_ms = int((time.monotonic() - started) * 1000)
         self._record_execution_audit(
             event_type="security_check_executed",
@@ -275,9 +311,14 @@ class CommandSandbox:
             CommandResult with execution output.
         """
         if self.allow_unrestricted_commands:
-            logger.warning("UNRESTRICTED execution (reason: %s): %s", reason, command)
+            logger.warning(
+                "UNRESTRICTED execution (reason: %s, sha256=%s): %s",
+                reason,
+                self._command_log_hash(command),
+                self._command_log_excerpt(command),
+            )
             started = time.monotonic()
-            executed = await self._execute(command)
+            executed = await self._execute(command, log_label="ai_command:unrestricted")
             self._record_execution_audit(
                 event_type="command_executed",
                 chat_id=chat_id,
@@ -309,8 +350,10 @@ class CommandSandbox:
         validation = validate_command(command, check_allowlist=True)
         if not validation.is_safe:
             logger.warning(
-                "AI-generated command blocked: %s (validator reason: %s, AI reason: %s)",
-                command,
+                "AI-generated command blocked (sha256=%s): %s "
+                "(validator reason: %s, AI reason: %s)",
+                self._command_log_hash(command),
+                self._command_log_excerpt(command),
                 validation.reason,
                 reason,
             )
@@ -329,9 +372,14 @@ class CommandSandbox:
                 command=command,
             )
 
-        logger.info("Executing AI-generated command (reason: %s): %s", reason, command)
+        logger.info(
+            "Executing AI-generated command (reason: %s, sha256=%s): %s",
+            reason,
+            self._command_log_hash(command),
+            self._command_log_excerpt(command),
+        )
         started = time.monotonic()
-        executed = await self._execute(command)
+        executed = await self._execute(command, log_label="ai_command:validated")
         self._record_execution_audit(
             event_type="command_executed",
             chat_id=chat_id,

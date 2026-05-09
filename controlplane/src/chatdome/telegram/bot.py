@@ -1022,6 +1022,7 @@ class TelegramBot:
         from chatdome.sentinel.alerter import format_status_message
         status = "运行中" if self._sentinel.is_running else "未运行"
         check_count = len(self._sentinel.checks)
+        alert_target_count = len(self._sentinel.alert_chat_ids)
         loaded_commands = self._pack_loader.command_count if self._pack_loader is not None else 0
         learning = "是" if self._sentinel.suppressor.is_learning else "否"
 
@@ -1030,8 +1031,11 @@ class TelegramBot:
             f"  - 运行状态: {status}",
             f"  - 检查项数量: {check_count}",
             f"  - 已加载命令: {loaded_commands}",
+            f"  - 告警推送目标: {alert_target_count} 个",
             f"  - 基线学习中: {learning}",
         ]
+        if alert_target_count == 0:
+            runtime_lines.append("  - ⚠️ 未配置推送目标，告警只会记录，不会发到手机")
         text = format_status_message(self._sentinel.history)
         await update.message.reply_text("\n".join(runtime_lines) + "\n\n" + text)
 

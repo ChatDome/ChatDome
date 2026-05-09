@@ -106,6 +106,10 @@ class SentinelScheduler:
         return self._suppressor
 
     @property
+    def alert_chat_ids(self) -> list[int]:
+        return list(self._alert_chat_ids)
+
+    @property
     def checks(self) -> list[CheckDefinition]:
         return self._checks
 
@@ -907,10 +911,27 @@ class SentinelScheduler:
     # -- Alert recording ---------------------------------------------------
 
     async def _record_and_maybe_push(self, event: AlertEvent) -> bool:
-        self._history.record(event)
         if event.suppressed:
+            self._history.record(event)
             return False
 
+        if not self._alert_chat_ids:
+            event.pushed = False
+            if event.action_reason:
+                event.action_reason += "; no_alert_targets"
+            else:
+                event.action_reason = "no_alert_targets"
+            self._history.record(event)
+            logger.warning(
+                "Sentinel alert generated but no alert chat targets are configured "
+                "(check_id=%s, severity=%s)",
+                event.check_id,
+                event.severity,
+            )
+            return False
+
+        event.pushed = True
+        self._history.record(event)
         message = format_alert_message(event)
         for chat_id in self._alert_chat_ids:
             try:

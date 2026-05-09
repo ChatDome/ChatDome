@@ -113,8 +113,42 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
         )
         self.assertEqual(fingerprints, {"203.0.113.10|root|22|12345"})
 
+    def test_alert_without_targets_is_recorded_as_not_pushed(self):
+        asyncio.run(self._run_alert_without_targets_is_recorded_as_not_pushed())
+
     def test_ssh_session_commands_patrol_alerts_only_on_new_commands(self):
         asyncio.run(self._run_ssh_session_commands_patrol_alerts_only_on_new_commands())
+
+    async def _run_alert_without_targets_is_recorded_as_not_pushed(self):
+        from chatdome.sentinel.alerter import AlertEvent
+
+        scheduler = SentinelScheduler(
+            config=FakeConfig(),
+            pack_loader=None,
+            sandbox=FakeSandbox([]),
+            send_alert_fn=lambda *args, **kwargs: None,
+            alert_chat_ids=[],
+        )
+        event = AlertEvent(
+            timestamp="2026-05-09 13:41:23",
+            check_name="SSH success login",
+            check_id="ssh_success_login",
+            mode="differential",
+            severity=9,
+            severity_label="critical",
+            rule="new login",
+            current_value=1,
+            raw_output="login",
+            pushed=True,
+            suppressed=False,
+        )
+
+        pushed = await scheduler._record_and_maybe_push(event)
+        recent = scheduler.history.recent(1)
+
+        self.assertFalse(pushed)
+        self.assertFalse(recent[0].pushed)
+        self.assertEqual(recent[0].action_reason, "no_alert_targets")
 
     async def _run_repeated_new_ssh_success_login_deltas_are_pushed(self):
         baseline = "Apr 23 10:00:00 root 203.0.113.10 22 publickey\n"
