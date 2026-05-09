@@ -85,6 +85,7 @@ class TelegramBot:
         self._alert_analysis_cache: dict[str, dict[str, Any]] = {}
         self._alert_analysis_cache_max = 200
         self._approval_detail_tasks: dict[str, asyncio.Task] = {}
+        self._round_limit_tasks: dict[int, asyncio.Task] = {}
         # Default policy: plain text output; markdown can be enabled per message.
         self._formatter = TelegramMessageFormatter(enable_markdown=True)
 
@@ -518,6 +519,77 @@ class TelegramBot:
         )
         return
 
+    async def _start_round_limit_resolution(self, message, chat_id: int, action: str) -> None:
+        """Continue a round-limited task in the background after a callback click."""
+        normalized_action = (action or "").strip().upper()
+        if normalized_action != "CONTINUE":
+            final_response = await self.agent.resolve_round_limit(chat_id, normalized_action)
+            await self._send_long_message(message, final_response)
+            return
+
+        existing_task = self._round_limit_tasks.get(chat_id)
+        if existing_task and not existing_task.done():
+            await self._send_long_message(
+                message,
+                "当前任务已经在后台继续执行，完成后会自动发送结果。",
+            )
+            return
+
+        status_msg = await message.reply_text("已收到继续执行请求，正在后台处理。完成后会自动发送结果。")
+        coroutine = self._run_round_limit_resolution(
+            message=message,
+            status_message=status_msg,
+            chat_id=chat_id,
+            action=normalized_action,
+        )
+        if self._app is not None:
+            task = self._app.create_task(coroutine)
+        else:
+            task = asyncio.create_task(coroutine)
+
+        self._round_limit_tasks[chat_id] = task
+
+        def _drop_finished_task(done_task: asyncio.Task) -> None:
+            if self._round_limit_tasks.get(chat_id) is done_task:
+                self._round_limit_tasks.pop(chat_id, None)
+
+        task.add_done_callback(_drop_finished_task)
+
+    async def _run_round_limit_resolution(
+        self,
+        message,
+        status_message,
+        chat_id: int,
+        action: str,
+    ) -> None:
+        """Run round-limit continuation without tying it to callback query timeout."""
+        try:
+            final_response = await self.agent.resolve_round_limit(chat_id, action)
+        except asyncio.CancelledError:
+            logger.warning("Round-limit continuation task cancelled for chat_id=%s", chat_id)
+            raise
+        except Exception as e:
+            logger.exception("Round-limit continuation failed for chat_id=%s", chat_id)
+            await self._send_long_message(
+                message,
+                f"继续执行失败: {type(e).__name__}: {e or '无详细错误信息'}",
+            )
+            return
+        finally:
+            try:
+                await status_message.delete()
+            except Exception:
+                pass
+
+        if final_response.startswith("__ROUND_LIMIT_CONFIRM__:"):
+            data = json.loads(final_response.split(":", 1)[1])
+            await self._send_round_limit_prompt(message, data)
+        elif final_response.startswith("__PENDING_APPROVAL__:"):
+            data = json.loads(final_response.split(":", 1)[1])
+            await self._send_approval_request(message, data)
+        else:
+            await self._send_long_message(message, final_response)
+
     async def _handle_engram(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /engram command."""
         if not self._check_auth(update):
@@ -597,26 +669,7 @@ class TelegramBot:
                 except Exception:
                     logger.exception("Failed to edit round-limit callback message markup")
 
-                thinking_msg = await query.message.reply_text("Processing...")
-                try:
-                    final_response = await asyncio.wait_for(
-                        self.agent.resolve_round_limit(chat_id, action),
-                        timeout=120,
-                    )
-                finally:
-                    try:
-                        await thinking_msg.delete()
-                    except Exception:
-                        pass
-
-                if final_response.startswith("__ROUND_LIMIT_CONFIRM__:"):
-                    data = json.loads(final_response.split(":", 1)[1])
-                    await self._send_round_limit_prompt(query.message, data)
-                elif final_response.startswith("__PENDING_APPROVAL__:"):
-                    data = json.loads(final_response.split(":", 1)[1])
-                    await self._send_approval_request(query.message, data)
-                else:
-                    await self._send_long_message(query.message, final_response)
+                await self._start_round_limit_resolution(query.message, chat_id, action)
                 return
 
             if callback_data == "show_cmd_details" or approval_action == "details":
@@ -672,14 +725,16 @@ class TelegramBot:
                 await self._send_round_limit_prompt(query.message, data)
             else:
                 await self._send_long_message(query.message, final_response)
-        except TimeoutError:
+        except asyncio.TimeoutError:
             await self._send_long_message(
                 query.message,
-                "Approval action timed out. Command is still pending. Please retry or send /confirm.",
+                "操作处理超时，当前任务状态已保留。请稍后重试，或发送 /confirm 继续处理待确认命令。",
             )
         except Exception as e:
             logger.exception("Callback query handling failed")
-            await query.message.reply_text(f"Resume session failed: {e}")
+            await query.message.reply_text(
+                f"按钮操作处理失败: {type(e).__name__}: {e or '无详细错误信息'}"
+            )
 
     async def _handle_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /confirm command for high-risk executions."""
