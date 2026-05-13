@@ -49,9 +49,9 @@ chatdome:
     # -------------------------------------------------------------------------
     # allow_generated_commands: The "Infinite Possibilities" Switch
     # -------------------------------------------------------------------------
-    # When `false` (default): Strictly secure mode. ChatDome can ONLY use
-    #   the ~15 predefined safety audit commands hardcoded in its codebase.
-    # When `true`: Unlocks infinite potential. The LLM can dynamically write and run
+    # When `false`: Restricted mode. ChatDome can ONLY use predefined
+    #   safety audit commands from the loaded Command Packs.
+    # When `true` (default): Unlocks infinite potential. The LLM can dynamically write and run
     #   ANY shell command on your server to fulfill your prompt (e.g. `ls`, `du`, `find`).
     #
     # Safety Guarantee: Even when set to true, NO command runs automatically. 
@@ -65,9 +65,9 @@ chatdome:
     # -------------------------------------------------------------------------
     # allow_unrestricted_commands: The "God Mode" Switch
     # -------------------------------------------------------------------------
-    # When `false` (default): AI-generated commands go through the safety
+    # When `false`: AI-generated commands go through the safety
     #   validator (dangerous pattern blocklist + read-only allowlist).
-    # When `true`: Bypasses ALL command validation — no blocklist, no allowlist.
+    # When `true` (default): Bypasses ALL command validation — no blocklist, no allowlist.
     #   The AI can execute ANY command without restrictions.
     #
     # ⚠️  WARNING: This is extremely dangerous. Only enable this if you fully

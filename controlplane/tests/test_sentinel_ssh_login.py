@@ -1,6 +1,8 @@
 import asyncio
+import contextlib
 import os
 import tempfile
+import time
 import unittest
 from dataclasses import dataclass
 from datetime import datetime
@@ -88,7 +90,35 @@ class PatrolConfig:
     ]
 
 
+class DuplicateCheckIdLearningConfig:
+    alert_retention_days = 30
+    global_rate_limit = 100
+    global_rate_window = 300
+    learning_rounds = 1
+    checks = [
+        {
+            "name": "SSH failed burst short window",
+            "check_id": "ssh_failed_burst",
+            "interval": 60,
+            "mode": "snapshot",
+            "severity": 8,
+            "rule": {"type": "line_count", "operator": ">=", "threshold": 999},
+        },
+        {
+            "name": "SSH failed burst long window",
+            "check_id": "ssh_failed_burst",
+            "interval": 300,
+            "mode": "snapshot",
+            "severity": 7,
+            "rule": {"type": "line_count", "operator": ">=", "threshold": 999},
+        },
+    ]
+
+
 class SentinelSSHLoginRegressionTests(unittest.TestCase):
+    def test_learning_round_completes_with_duplicate_check_ids(self):
+        asyncio.run(self._run_learning_round_completes_with_duplicate_check_ids())
+
     def test_repeated_new_ssh_success_login_deltas_are_pushed(self):
         asyncio.run(self._run_repeated_new_ssh_success_login_deltas_are_pushed())
 
@@ -149,6 +179,49 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
         self.assertFalse(pushed)
         self.assertFalse(recent[0].pushed)
         self.assertEqual(recent[0].action_reason, "no_alert_targets")
+
+    async def _run_learning_round_completes_with_duplicate_check_ids(self):
+        calls: list[str] = []
+
+        async def send_alert(*args, **kwargs) -> None:
+            del args, kwargs
+
+        async def fake_run_single_check(check) -> str:
+            calls.append(check.name)
+            return "✅ no alert"
+
+        old_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.chdir(temp_dir)
+            scheduler = None
+            task = None
+            try:
+                scheduler = SentinelScheduler(
+                    config=DuplicateCheckIdLearningConfig(),
+                    pack_loader=None,
+                    sandbox=FakeSandbox([]),
+                    send_alert_fn=send_alert,
+                    alert_chat_ids=[],
+                )
+                scheduler._run_single_check = fake_run_single_check
+                scheduler.start()
+                task = scheduler._task
+                deadline = time.monotonic() + 1.0
+                while scheduler.suppressor.is_learning and time.monotonic() < deadline:
+                    await asyncio.sleep(0.01)
+
+                self.assertFalse(scheduler.suppressor.is_learning)
+                self.assertEqual(calls, [
+                    "SSH failed burst short window",
+                    "SSH failed burst long window",
+                ])
+            finally:
+                if scheduler is not None:
+                    scheduler.stop()
+                if task is not None:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+                os.chdir(old_cwd)
 
     async def _run_repeated_new_ssh_success_login_deltas_are_pushed(self):
         baseline = "Apr 23 10:00:00 root 203.0.113.10 22 publickey\n"

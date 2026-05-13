@@ -162,8 +162,8 @@ class SentinelScheduler:
 
     async def _run_loop(self) -> None:
         check_timers: dict[str, float] = {}
-        for check in self._checks:
-            check_timers[check.check_id or check.name] = 0.0
+        for index, _check in enumerate(self._checks):
+            check_timers[str(index)] = 0.0
         checks_seen_in_round: set[str] = set()
 
         tick_interval = 10
@@ -182,8 +182,8 @@ class SentinelScheduler:
             while self._running:
                 now = time.monotonic()
 
-                for check in self._checks:
-                    key = check.check_id or check.name
+                for index, check in enumerate(self._checks):
+                    key = str(index)
                     if now < check_timers.get(key, 0.0):
                         continue
 
