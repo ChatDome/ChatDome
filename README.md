@@ -72,9 +72,9 @@ ChatDome is positioned as a **host-security sub-agent**, not a generic main-agen
 - **Zero Infrastructure & Low Intrusion** — Single Python process, no database, no agent installation on target filespaces, requiring just a Telegram bot token and an LLM API key.
 - **Sub-Agent Direction** — Evolving into a security module that main-agents can call, orchestrate, and audit.
 
-### 🛡️ Sentinel — 7×24 Autonomous Guardian (Planned)
+### 🛡️ Sentinel — 7×24 Autonomous Guardian (Core Implemented, Advanced Capabilities Evolving)
 
-ChatDome is evolving beyond a reactive assistant into an **always-on security guardian**. The upcoming Sentinel module introduces proactive monitoring capabilities that set it apart from traditional host security tools:
+ChatDome is evolving beyond a reactive assistant into an **always-on security guardian**. The current codebase already includes Command Packs, scheduled patrols, rule evaluation, alert history, and Telegram push notifications; the following capabilities describe Sentinel's advanced roadmap:
 
 - **Threat Envelope — Dual-Layer Situational Awareness** — A novel architecture that unifies attack chain correlation and threat state modeling into a single mechanism. The **index layer** (multi-dimensional Counter) performs zero-token set-intersection matching to determine if a new alert relates to an existing threat. The **narrative layer** (AI-generated natural language) dynamically evolves a compressed story of "what is actually happening." No preset attack patterns—ATT&CK tactical stage coverage triggers AI analysis only when genuinely needed.
 - **Threat State as Compressed Narrative** — Instead of firing the same alert every 5 minutes during an ongoing attack, threats are modeled as living envelopes that absorb new evidence, auto-escalate severity on stage transitions, and push recovery notifications when the threat subsides.
@@ -83,7 +83,7 @@ ChatDome is evolving beyond a reactive assistant into an **always-on security gu
 
 ### 🔓 The "Infinite Possibilities" Mode
 
-ChatDome ships with a robust set of predefined safety checks. However, **the true power of ChatDome is unleashed when you set `allow_generated_commands: true` in your config**.
+ChatDome ships with a robust set of predefined safety checks. In the current default configuration, `allow_generated_commands` is `true`, allowing ChatDome to generate command-line inspections from natural language. For the most conservative posture, set it to `false` so the AI only uses predefined audit commands.
 
 When enabled, the AI is no longer bound by predefined rules. If you ask *"Show me the 3 largest files in `/var/log`"*, the LLM will dynamically generate the correct Linux shell commands (`du`, `sort`, `head`, etc.) from its vast knowledge base. 
 
@@ -205,19 +205,19 @@ All sensitive parameters are configured via environment variables. They are neve
 
 ### 🎛️ Core Capability Switches (Advanced)
 
-Beyond basic token configuration, ChatDome offers three advanced privilege switches that alter its core operating logic. It is highly recommended to understand their implications before using them. They are **all disabled by default** and must be explicitly enabled by passing `"true"` in your environment variables:
+Beyond basic token configuration, ChatDome offers three advanced privilege switches that alter its core operating logic. It is highly recommended to understand their implications before using them. In the current `config.example.yaml` and code defaults, Sentinel, generated commands, and unrestricted mode are enabled; set them to `"false"` in config or environment variables for a conservative deployment:
 
 #### 1. Sentinel Proactive Monitoring Mode (`CHATDOME_SENTINEL_ENABLED`)
 - **What it does**: Upgrades ChatDome from a "passive Q&A assistant" to a "7x24 proactive patrolling sentinel". It quietly performs periodic system security audits in the background and employs an innovative dual-layer situational awareness architecture to aggregate and denoise alerts.
 - **Recommended for**: Administrators who want to receive refined, proactive alert notifications on Telegram the moment an anomaly occurs, without needing to ask manually.
 
 #### 2. Infinite Possibilities Mode (`CHATDOME_ALLOW_GENERATED_COMMANDS`)
-- **What it does**: Removes the strict limitation of "only executing pre-installed official read-only commands"! When enabled, the AI will use its vast Linux knowledge base to dynamically forge and execute entirely new shell composite queries on-the-fly in response to your complex or vague requests.
-- **Security Guarantee**: You don't need to worry about the AI going rogue. All dynamically generated commands at this level remain strictly constrained by "Read-Only" rules, and any mutating actions will be immediately intercepted and blocked by the sandbox.
+- **What it does**: Removes the strict limitation of "only executing pre-installed official commands". When enabled, the AI can generate new shell queries for complex or vague inspection requests.
+- **Security Guarantee**: Dynamic commands are reviewed before execution. With unrestricted mode disabled, they also pass through the read-only allowlist/blocklist validator.
 
 #### 3. God Mode (`CHATDOME_ALLOW_UNRESTRICTED_COMMANDS`)
-- **What it does**: **[DANGER! GOD PRIVILEGES]** Enabling this completely shatters the sandbox's "Read-Only" seal. The AI is now authorized to issue destructive or state-mutating OS commands (like `rm` or `iptables`) to fulfill operational requests such as "clean up all my redundant log files" or "ban the IP of that hacker in the firewall".
-- **Security Guarantee**: Any jailbroken command independently flagged as high-risk (involving writing, deleting, or high-risk state changes) will **never** execute autonomously! Instead, it pauses at the very last moment and pushes a high-visibility alert card to your Telegram (the **Human-in-the-loop** defense line). The AI will only pull the trigger after you review the command and explicitly tap the approve button or send `/confirm`.
+- **What it does**: **[DANGER! GOD PRIVILEGES]** Enabling this bypasses the deterministic command validator, removing the read-only allowlist/blocklist as a hard boundary.
+- **Security Guarantee**: ToolDispatcher still performs a pre-execution review. Static-safe commands with no write/delete signal may run automatically; risky, mutating, or deleting commands enter the Telegram approval flow and may require `/confirm`. This remains a high-risk mode and should be used cautiously in production.
 
 ### Config File (Non-Sensitive / Optional)
 
@@ -234,7 +234,8 @@ chatdome:
     max_tokens: 2000
 
   agent:
-    allow_generated_commands: false           # true = AI can run arbitrary read-only commands
+    allow_generated_commands: true            # true = AI can generate ad-hoc commands
+    allow_unrestricted_commands: true         # true = bypass deterministic command validation (high risk)
     session_timeout: 600                      # seconds of inactivity before session expires
     max_rounds_per_turn: 10                   # max tool calls per user message
     command_timeout: 10                       # seconds before a command is killed
@@ -274,7 +275,7 @@ The AI uses **function calling** (tool use) to interact with the host. It can:
 | Tool | Description |
 |------|-------------|
 | `run_security_check` | Execute a pre-defined security audit command by ID |
-| `run_shell_command` | Execute shell commands (read-only by default; maintenance write operations when `allow_unrestricted_commands=true`) |
+| `run_shell_command` | Execute shell commands (current defaults allow generated commands and unrestricted mode; risky/mutating/deleting commands enter approval flow) |
 | `whois_lookup` | Look up IP geolocation and ownership |
 
 ### Built-in Security Checks
@@ -327,7 +328,7 @@ No rigid command syntax — just talk to it.
 ChatDome executes commands on your server — security is taken seriously:
 
 1. **Telegram Auth** — Only messages from whitelisted Chat IDs are processed. All others are silently dropped.
-2. **Safe-by-Default Mode** — By default, AI sticks to curated audit commands with immutable templates.
+2. **Curated Commands First** — Predefined audit command templates are immutable at runtime; disable `allow_generated_commands` and `allow_unrestricted_commands` for a minimum-privilege posture.
 3. **Generated Command Review** — With `allow_generated_commands`, generated commands go through review and confirmation flow.
 4. **Unrestricted Mode Warning** — `allow_unrestricted_commands` bypasses command validation; high-risk commands still go through explicit human confirmation and `/confirm` for critical actions.
 5. **Execution Sandbox** — Command execution still has timeout and output-bound controls to reduce blast radius.
@@ -382,7 +383,8 @@ Additional implementation modules (current codebase):
 - [ ] **Phase 2 — Usable**: Multi-turn sessions, more checks, error handling, whois
 - [ ] **Phase 3 — Polished**: Scheduled patrols, auto-alerts, session history
 - [ ] **Phase 4 — Extensible**: Custom command plugins, multi-server, data plane integration
-- [ ] **Phase 5 — Sentinel**: 7×24 proactive monitoring, threat envelope (dual-layer situational awareness), interactive whitelist, AI memory vault
+- [x] **Sentinel Core**: Command Packs, scheduled patrols, rule evaluation, alert history, Telegram push
+- [ ] **Sentinel Advanced**: threat envelope (dual-layer situational awareness), interactive whitelist, AI memory vault
 
 ## Contributing
 

@@ -51,14 +51,13 @@ chatdome:
     # -------------------------------------------------------------------------
     # When `false`: Restricted mode. ChatDome can ONLY use predefined
     #   safety audit commands from the loaded Command Packs.
-    # When `true` (default): Unlocks infinite potential. The LLM can dynamically write and run
-    #   ANY shell command on your server to fulfill your prompt (e.g. `ls`, `du`, `find`).
+    # When `true` (current default): Unlocks flexible host inspection. The LLM can dynamically
+    #   write shell commands to fulfill your prompt (e.g. `ls`, `du`, `find`).
     #
-    # Safety Guarantee: Even when set to true, NO command runs automatically. 
-    #   It goes through a strict AI Reviewer for impact assessment, and presents 
-    #   a mandatory Human-in-the-loop dual-confirmation UI in Telegram. Safe commands
-    #   require button approval; high-risk commands physically disable the 'Approve' 
-    #   button, requiring an explicit `/confirm` text chat override.
+    # Safety flow: dynamic commands are reviewed before execution. In restricted mode they
+    #   still pass through the read-only validator and approval flow; if unrestricted mode is
+    #   also enabled, static-safe read-only commands may run automatically, while risky,
+    #   mutating, or deleting commands enter Human-in-the-loop confirmation.
     # -------------------------------------------------------------------------
     allow_generated_commands: true
 
@@ -67,11 +66,13 @@ chatdome:
     # -------------------------------------------------------------------------
     # When `false`: AI-generated commands go through the safety
     #   validator (dangerous pattern blocklist + read-only allowlist).
-    # When `true` (default): Bypasses ALL command validation — no blocklist, no allowlist.
-    #   The AI can execute ANY command without restrictions.
+    # When `true` (current default): Bypasses the command validator — no blocklist,
+    #   no allowlist at the sandbox validation layer.
     #
     # ⚠️  WARNING: This is extremely dangerous. Only enable this if you fully
-    #   trust the AI and understand the risks. There is NO safety net.
+    #   trust the deployment context and understand the risks. The ToolDispatcher still
+    #   performs a pre-execution review and sends risky/mutating/deleting commands to
+    #   approval, but unrestricted execution removes the deterministic validator guardrail.
     #   This implicitly enables generated commands as well.
     # -------------------------------------------------------------------------
     allow_unrestricted_commands: true
