@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import logging
 import re
 import time
@@ -76,6 +77,13 @@ class SentinelScheduler:
             alerts_path=Path("chat_data/sentinel_alerts.jsonl"),
             retention_days=config.alert_retention_days,
         )
+        self._alert_push_state_path = Path("chat_data/sentinel_alert_push_state.json")
+        self._alert_push_muted = False
+        self._alert_push_muted_until: datetime | None = None
+        self._alert_push_mute_reason = ""
+        self._alert_push_updated_by: int | None = None
+        self._alert_push_updated_at: datetime | None = None
+        self._load_alert_push_state()
 
         self._task: asyncio.Task | None = None
         self._running = False
@@ -116,6 +124,54 @@ class SentinelScheduler:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def alert_push_muted(self) -> bool:
+        return self._is_alert_push_muted()
+
+    def mute_alert_push(
+        self,
+        *,
+        until: datetime | None = None,
+        reason: str = "",
+        chat_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Mute Sentinel-initiated Telegram pushes while keeping checks/history active."""
+        self._alert_push_muted = True
+        self._alert_push_muted_until = self._normalize_datetime(until)
+        self._alert_push_mute_reason = reason.strip() or "user_request"
+        self._alert_push_updated_by = chat_id
+        self._alert_push_updated_at = datetime.now().astimezone()
+        self._save_alert_push_state()
+        logger.info(
+            "Sentinel alert push muted until=%s by chat_id=%s reason=%s",
+            self._alert_push_muted_until.isoformat() if self._alert_push_muted_until else "manual_resume",
+            chat_id,
+            self._alert_push_mute_reason,
+        )
+        return self.alert_push_status()
+
+    def resume_alert_push(self, *, chat_id: int | None = None) -> dict[str, Any]:
+        """Re-enable Sentinel-initiated Telegram pushes."""
+        self._alert_push_muted = False
+        self._alert_push_muted_until = None
+        self._alert_push_mute_reason = ""
+        self._alert_push_updated_by = chat_id
+        self._alert_push_updated_at = datetime.now().astimezone()
+        self._save_alert_push_state()
+        logger.info("Sentinel alert push resumed by chat_id=%s", chat_id)
+        return self.alert_push_status()
+
+    def alert_push_status(self) -> dict[str, Any]:
+        muted = self._is_alert_push_muted()
+        return {
+            "muted": muted,
+            "muted_until": self._alert_push_muted_until if muted else None,
+            "reason": self._alert_push_mute_reason if muted else "",
+            "updated_by": self._alert_push_updated_by,
+            "updated_at": self._alert_push_updated_at,
+            "target_count": len(self._alert_chat_ids),
+        }
 
     def _pack_command_available(self, check_id: str) -> bool:
         if self._pack_loader is None or not hasattr(self._pack_loader, "get_command"):
@@ -158,6 +214,92 @@ class SentinelScheduler:
                 results.append(f"❌ {check.name}: {exc}")
         return "\n".join(results) if results else "No checks configured"
 
+    # -- Alert push state --------------------------------------------------
+
+    @staticmethod
+    def _normalize_datetime(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.astimezone()
+        return value.astimezone()
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return SentinelScheduler._normalize_datetime(parsed)
+
+    def _load_alert_push_state(self) -> None:
+        if not self._alert_push_state_path.exists():
+            return
+
+        try:
+            data = json.loads(self._alert_push_state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.exception("Failed to load Sentinel alert push state")
+            return
+
+        self._alert_push_muted = bool(data.get("muted"))
+        self._alert_push_muted_until = self._parse_datetime(data.get("muted_until"))
+        self._alert_push_mute_reason = str(data.get("reason") or "")
+
+        updated_by = data.get("updated_by")
+        try:
+            self._alert_push_updated_by = int(updated_by) if updated_by is not None else None
+        except (TypeError, ValueError):
+            self._alert_push_updated_by = None
+        self._alert_push_updated_at = self._parse_datetime(data.get("updated_at"))
+
+        if self._alert_push_muted and not self._is_alert_push_muted():
+            self._save_alert_push_state()
+
+    def _save_alert_push_state(self) -> None:
+        payload = {
+            "muted": self._alert_push_muted,
+            "muted_until": self._alert_push_muted_until.isoformat() if self._alert_push_muted_until else None,
+            "reason": self._alert_push_mute_reason,
+            "updated_by": self._alert_push_updated_by,
+            "updated_at": self._alert_push_updated_at.isoformat() if self._alert_push_updated_at else None,
+        }
+        try:
+            self._alert_push_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._alert_push_state_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            logger.exception("Failed to persist Sentinel alert push state")
+
+    def _is_alert_push_muted(self, now: datetime | None = None) -> bool:
+        if not self._alert_push_muted:
+            return False
+
+        now = now or datetime.now().astimezone()
+        if self._alert_push_muted_until is not None and now >= self._alert_push_muted_until:
+            self._alert_push_muted = False
+            self._alert_push_muted_until = None
+            self._alert_push_mute_reason = ""
+            self._save_alert_push_state()
+            return False
+        return True
+
+    def _append_action_reason(self, event: AlertEvent, reason: str) -> None:
+        if event.action_reason:
+            event.action_reason += f"; {reason}"
+        else:
+            event.action_reason = reason
+
+    def _alert_push_mute_reason_for_history(self) -> str:
+        if self._alert_push_muted_until is None:
+            return "alert_push_muted"
+        return f"alert_push_muted_until={self._alert_push_muted_until.isoformat()}"
+
     # -- Loop --------------------------------------------------------------
 
     async def _run_loop(self) -> None:
@@ -172,11 +314,12 @@ class SentinelScheduler:
 
         if self._suppressor.is_learning:
             logger.info("Sentinel cold-start learning (%d rounds)", self._config.learning_rounds)
-            for chat_id in self._alert_chat_ids:
-                try:
-                    await self._send_alert(chat_id, "Sentinel is learning baseline. Alerts are muted temporarily.")
-                except Exception:
-                    logger.exception("Failed to send cold-start notification")
+            if not self._is_alert_push_muted():
+                for chat_id in self._alert_chat_ids:
+                    try:
+                        await self._send_alert(chat_id, "Sentinel is learning baseline. Alerts are muted temporarily.")
+                    except Exception:
+                        logger.exception("Failed to send cold-start notification")
 
         try:
             while self._running:
@@ -243,7 +386,7 @@ class SentinelScheduler:
         self._auditd_has_execve_rule = "execve" in lowered and "no execve rules found" not in lowered
 
     async def _maybe_send_auditd_setup_notice(self) -> None:
-        if self._auditd_notice_sent or not self._alert_chat_ids:
+        if self._auditd_notice_sent or not self._alert_chat_ids or self._is_alert_push_muted():
             return
         if self._auditd_available and self._auditd_has_execve_rule:
             return
@@ -915,12 +1058,20 @@ class SentinelScheduler:
             self._history.record(event)
             return False
 
+        if self._is_alert_push_muted():
+            event.pushed = False
+            self._append_action_reason(event, self._alert_push_mute_reason_for_history())
+            self._history.record(event)
+            logger.info(
+                "Sentinel alert recorded but push is muted (check_id=%s, severity=%s)",
+                event.check_id,
+                event.severity,
+            )
+            return False
+
         if not self._alert_chat_ids:
             event.pushed = False
-            if event.action_reason:
-                event.action_reason += "; no_alert_targets"
-            else:
-                event.action_reason = "no_alert_targets"
+            self._append_action_reason(event, "no_alert_targets")
             self._history.record(event)
             logger.warning(
                 "Sentinel alert generated but no alert chat targets are configured "
@@ -942,6 +1093,8 @@ class SentinelScheduler:
 
     async def _send_baseline_summary_if_needed(self) -> None:
         if self._baseline_report_sent or not self._baseline_notes:
+            return
+        if self._is_alert_push_muted():
             return
 
         lines = [

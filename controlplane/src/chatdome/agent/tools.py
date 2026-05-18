@@ -11,6 +11,7 @@ Handles:
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -19,6 +20,7 @@ from chatdome.agent.audit import CommandAuditTracker
 from chatdome.agent.manual import read_manual_section
 from chatdome.executor.sandbox import CommandSandbox, CommandResult
 from chatdome.llm.client import LLMClient
+from chatdome.sentinel.alert_controls import format_alert_push_status, parse_alert_mute_until
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +55,24 @@ class ToolDispatcher:
     and formats results as strings for the conversation.
     """
 
-    def __init__(self, sandbox: CommandSandbox, llm: Any = None, user_context_ledger: Any = None, engram_store: Any = None):
+    def __init__(
+        self,
+        sandbox: CommandSandbox,
+        llm: Any = None,
+        user_context_ledger: Any = None,
+        engram_store: Any = None,
+        sentinel: Any = None,
+    ):
         self.sandbox = sandbox
         self.llm = llm
         self.user_context_ledger = user_context_ledger
         self.engram_store = engram_store
+        self.sentinel = sentinel
         self._http_client: httpx.AsyncClient | None = None
+
+    def set_sentinel(self, sentinel: Any) -> None:
+        """Inject the Sentinel scheduler after runtime wiring."""
+        self.sentinel = sentinel
 
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Lazy-init the HTTP client."""
@@ -110,6 +124,8 @@ class ToolDispatcher:
                 return await self._handle_whois_lookup(args)
             elif tool_name == "add_user_context":
                 return await self._handle_add_user_context(args)
+            elif tool_name == "set_sentinel_alert_push_policy":
+                return self._handle_sentinel_alert_push_policy(args, chat_id)
             elif tool_name == "save_engram":
                 return self._handle_save_engram(args)
             elif tool_name == "recall_engrams":
@@ -127,6 +143,65 @@ class ToolDispatcher:
     def _handle_read_chatdome_manual(self, args: dict[str, Any]) -> str:
         """Return one curated operating manual section."""
         return read_manual_section(str(args.get("section_id", "")))
+
+    @staticmethod
+    def _parse_until_iso(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed.astimezone() if parsed.tzinfo is not None else parsed.astimezone()
+
+    def _resolve_alert_push_until(self, args: dict[str, Any]) -> tuple[datetime | None, str]:
+        until_iso = str(args.get("until_iso") or "").strip()
+        if until_iso:
+            parsed = self._parse_until_iso(until_iso)
+            if parsed is None:
+                return None, f"无法解析 until_iso: {until_iso}"
+            return parsed, ""
+
+        duration = str(args.get("duration") or "").strip()
+        if not duration:
+            return None, ""
+
+        if duration.lower() in {"manual", "until_resume", "forever", "indefinite"}:
+            return None, ""
+
+        parsed = parse_alert_mute_until(duration)
+        if parsed is None:
+            return None, f"无法解析 duration: {duration}"
+        return parsed, ""
+
+    def _handle_sentinel_alert_push_policy(self, args: dict[str, Any], chat_id: int = 0) -> str:
+        """Control Sentinel Telegram alert push policy through an explicit tool call."""
+        if not self.sentinel:
+            return "Sentinel 未启用，无法调整告警推送策略。"
+
+        action = str(args.get("action") or "").strip().lower()
+        if action not in {"mute", "resume", "status"}:
+            return "缺少或不支持的 action。请使用 mute、resume 或 status。"
+
+        if action == "status":
+            return format_alert_push_status(self.sentinel.alert_push_status())
+
+        if action == "resume":
+            status = self.sentinel.resume_alert_push(chat_id=chat_id or None)
+            return format_alert_push_status(status, prefix="已恢复 Sentinel 告警推送。")
+
+        until, error = self._resolve_alert_push_until(args)
+        if error:
+            return error
+
+        reason = str(args.get("reason") or "agent_tool_request").strip()
+        status = self.sentinel.mute_alert_push(
+            until=until,
+            reason=f"agent_tool:{reason[:160]}",
+            chat_id=chat_id or None,
+        )
+        return format_alert_push_status(status, prefix="已暂停 Sentinel 告警推送。")
 
     def _handle_save_engram(self, args: dict[str, Any]) -> str:
         if not self.engram_store:

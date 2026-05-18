@@ -67,6 +67,10 @@ class Agent:
             engram_store=engram_store,
         )
 
+    def set_sentinel(self, sentinel: Any) -> None:
+        """Inject Sentinel scheduler tools after runtime wiring."""
+        self.tool_dispatcher.set_sentinel(sentinel)
+
     def _persist_session(self, session: Any) -> None:
         """Best-effort persistence for session durability."""
         try:

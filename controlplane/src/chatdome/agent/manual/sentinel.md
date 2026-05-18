@@ -84,6 +84,76 @@ add_user_context(
 - 不要因为告警频繁就自动调用此工具
 - 每次调用都会持久化写入记录，后续巡检自动静默匹配的事件
 
+## `set_sentinel_alert_push_policy` 工具使用指南
+
+当用户用自然语言要求暂停、静默、关闭、恢复或查看 Sentinel 主动 Telegram 告警推送时，使用此工具。该工具只控制“主动推送”，不会停止 Sentinel 巡检，也不会停止写入告警历史。
+
+精准命令仍可直接提示用户使用：
+
+- `/sentinel_mute`
+- `/sentinel_mute 本周`
+- `/sentinel_mute 7d`
+- `/sentinel_resume`
+
+### 参数说明
+
+- `action`（必填）：`mute`、`resume` 或 `status`
+- `duration`（可选，仅 `mute`）：规范化时长
+  - `manual` 或 `until_resume`：静默到用户手动恢复
+  - `today`：静默到今天结束
+  - `this_week`：静默到本周结束
+  - `7d`、`24h`、`30min`、`2weeks`：相对时长
+- `until_iso`（可选，仅 `mute`）：明确恢复时间，ISO-8601 格式；提供时优先于 `duration`
+- `reason`（可选）：一句话记录用户为什么调整推送策略
+
+### 使用示例
+
+用户说："我不希望收到 Sentinel 的告警了"
+
+```
+set_sentinel_alert_push_policy(
+  action="mute",
+  duration="manual",
+  reason="用户要求暂停 Sentinel 主动告警推送，直到手动恢复"
+)
+```
+
+用户说："本周不希望再收到告警了"
+
+```
+set_sentinel_alert_push_policy(
+  action="mute",
+  duration="this_week",
+  reason="用户要求本周静默 Sentinel 主动告警推送"
+)
+```
+
+用户说："一周不进行告警推送"
+
+```
+set_sentinel_alert_push_policy(
+  action="mute",
+  duration="7d",
+  reason="用户要求未来一周静默 Sentinel 主动告警推送"
+)
+```
+
+用户说："恢复 Sentinel 告警推送"
+
+```
+set_sentinel_alert_push_policy(
+  action="resume",
+  reason="用户要求恢复 Sentinel 主动告警推送"
+)
+```
+
+### 使用约束
+
+- 不要用 `run_shell_command` 修改 Sentinel 推送策略。
+- 不要把“静默推送”解释成停止巡检；必须说明巡检和历史记录仍会继续。
+- 如果用户表达模糊，例如“最近别烦我”，先追问是否指 Sentinel 告警推送，以及希望静默多久。
+- 长期静默或永久静默前，回复中应提醒用户可以用 `/sentinel_resume` 或自然语言恢复。
+
 ## 常见误报判别
 
 | 场景 | 判别方法 | 处理建议 |

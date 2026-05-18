@@ -48,13 +48,14 @@ sections:
 
   - id: sentinel
     title: Sentinel 巡检与告警解释
-    summary: 处理哨兵巡检和告警。包含状态机六态流转、指纹去重规则、add_user_context 参数详解和误报判别指南。
+    summary: 处理哨兵巡检和告警。包含状态机六态流转、指纹去重规则、告警推送策略工具、add_user_context 参数详解和误报判别指南。
     when_to_read:
       - 用户询问哨兵告警、巡检命令、为什么一直提醒
       - 用户要求解释或处理疑似误报
     tools:
       - run_security_check
       - add_user_context
+      - set_sentinel_alert_push_policy
     file: sentinel.md
 
   - id: threat_intel

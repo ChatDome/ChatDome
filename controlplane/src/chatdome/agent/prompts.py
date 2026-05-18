@@ -396,6 +396,44 @@ def build_tools(
         {
             "type": "function",
             "function": {
+                "name": "set_sentinel_alert_push_policy",
+                "description": (
+                    "控制 Sentinel 主动 Telegram 告警推送策略。"
+                    "当用户用自然语言明确要求暂停、静默、关闭、恢复或查看 Sentinel 告警推送时使用。"
+                    "该工具只影响主动推送，不停止 Sentinel 巡检，也不停止告警历史记录。"
+                    "模糊表达或可能误解时先追问确认；精确控制也可提示用户使用 /sentinel_mute 或 /sentinel_resume。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["mute", "resume", "status"],
+                            "description": "mute=暂停主动推送；resume=恢复主动推送；status=查看当前推送状态",
+                        },
+                        "duration": {
+                            "type": "string",
+                            "description": (
+                                "仅 action=mute 时使用。使用规范化时长，如 manual/until_resume 表示手动恢复前，"
+                                "today 表示今天结束，this_week 表示本周结束，7d/24h/30min/2weeks 表示相对时长。"
+                            ),
+                        },
+                        "until_iso": {
+                            "type": "string",
+                            "description": "仅 action=mute 时使用。明确的恢复时间，ISO-8601 格式；如果提供则优先于 duration。",
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "简短记录用户为什么调整告警推送策略，写入本地状态用于审计。",
+                        },
+                    },
+                    "required": ["action"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "recall_engrams",
                 "description": (
                     "查询已保存的长期记忆（Engram）。"

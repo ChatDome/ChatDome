@@ -97,6 +97,8 @@ chatdome:
     enabled: true                         # 哨兵模式开关
 
     # 告警推送目标（空 = 使用 telegram.allowed_chat_ids；如果两者都为空，则 Sentinel 只巡检/记录，不会主动推送到手机）
+    # 运行时可在 Telegram 中用自然语言或 /sentinel_mute、/sentinel_resume 暂停/恢复推送；
+    # 静默状态保存在 chat_data/sentinel_alert_push_state.json，不影响巡检和历史记录。
     alert_chat_ids: []
     alert_retention_days: 30             # sentinel_alerts.jsonl 按天保留窗口
 

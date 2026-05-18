@@ -12,6 +12,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,10 @@ from telegram.ext import (
 
 from chatdome.agent.core import Agent
 from chatdome.config import ChatDomeConfig
+from chatdome.sentinel.alert_controls import (
+    format_alert_push_status,
+    parse_alert_mute_until,
+)
 from chatdome.telegram.auth import Authenticator
 from chatdome.telegram.formatting import MessageMarkup, TelegramMessageFormatter
 
@@ -59,6 +64,8 @@ HELP_TEXT = """\
 /sentinel\\_trigger \\- 手动触发全量巡检
 /sentinel\\_history \\- 查看告警历史
 /sentinel\\_packs \\- 查看已加载的命令包
+/sentinel\\_mute \\[时长\\] \\- 暂停 Sentinel 告警推送
+/sentinel\\_resume \\- 恢复 Sentinel 告警推送
 
 _直接发送你的问题即可，无需命令前缀。_
 """
@@ -93,6 +100,8 @@ class TelegramBot:
         """Inject Sentinel scheduler after construction (avoids circular deps)."""
         self._sentinel = scheduler
         self._pack_loader = pack_loader
+        if hasattr(self.agent, "set_sentinel"):
+            self.agent.set_sentinel(scheduler)
 
     async def post_init(self, app: Application) -> None:
         """Called by the Telegram application after initialization, inside the event loop."""
@@ -145,6 +154,8 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("sentinel_trigger", self._handle_sentinel_trigger))
         self._app.add_handler(CommandHandler("sentinel_history", self._handle_sentinel_history))
         self._app.add_handler(CommandHandler("sentinel_packs", self._handle_sentinel_packs))
+        self._app.add_handler(CommandHandler("sentinel_mute", self._handle_sentinel_mute))
+        self._app.add_handler(CommandHandler("sentinel_resume", self._handle_sentinel_resume))
         self._app.add_handler(CommandHandler("engram", self._handle_engram))
         self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self._app.add_handler(
@@ -1065,6 +1076,44 @@ class TelegramBot:
 
     # ----- Sentinel command handlers -----
 
+    async def _handle_sentinel_mute(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /sentinel_mute — pause Sentinel alert pushes."""
+        if not self._check_auth(update):
+            return
+        if self._sentinel is None:
+            await update.message.reply_text("ℹ️ 哨兵模式未启用。")
+            return
+
+        raw_args = " ".join(context.args or []).strip()
+        until = parse_alert_mute_until(raw_args)
+        chat_id = update.effective_chat.id
+        status = self._sentinel.mute_alert_push(
+            until=until,
+            reason=f"telegram_command:/sentinel_mute {raw_args}".strip(),
+            chat_id=chat_id,
+        )
+        await update.message.reply_text(
+            format_alert_push_status(status, prefix="✅ 已暂停 Sentinel 告警推送。")
+        )
+
+    async def _handle_sentinel_resume(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /sentinel_resume — resume Sentinel alert pushes."""
+        if not self._check_auth(update):
+            return
+        if self._sentinel is None:
+            await update.message.reply_text("ℹ️ 哨兵模式未启用。")
+            return
+
+        chat_id = update.effective_chat.id
+        status = self._sentinel.resume_alert_push(chat_id=chat_id)
+        await update.message.reply_text(
+            format_alert_push_status(status, prefix="✅ 已恢复 Sentinel 告警推送。")
+        )
+
     async def _handle_sentinel_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1080,6 +1129,15 @@ class TelegramBot:
         alert_target_count = len(self._sentinel.alert_chat_ids)
         loaded_commands = self._pack_loader.command_count if self._pack_loader is not None else 0
         learning = "是" if self._sentinel.suppressor.is_learning else "否"
+        push_status = self._sentinel.alert_push_status()
+        if push_status.get("muted"):
+            muted_until = push_status.get("muted_until")
+            if isinstance(muted_until, datetime):
+                push_line = f"已静默至 {muted_until.strftime('%Y-%m-%d %H:%M %Z').strip()}"
+            else:
+                push_line = "已静默至手动恢复"
+        else:
+            push_line = "开启"
 
         runtime_lines = [
             "🧭 调度器状态",
@@ -1087,6 +1145,7 @@ class TelegramBot:
             f"  - 检查项数量: {check_count}",
             f"  - 已加载命令: {loaded_commands}",
             f"  - 告警推送目标: {alert_target_count} 个",
+            f"  - 告警推送状态: {push_line}",
             f"  - 基线学习中: {learning}",
         ]
         if alert_target_count == 0:

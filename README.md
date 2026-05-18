@@ -74,7 +74,7 @@ ChatDome is positioned as a **host-security sub-agent**, not a generic main-agen
 
 ### 🛡️ Sentinel — 7×24 Autonomous Guardian (Core Implemented, Advanced Capabilities Evolving)
 
-ChatDome is evolving beyond a reactive assistant into an **always-on security guardian**. The current codebase already includes Command Packs, scheduled patrols, rule evaluation, alert history, and Telegram push notifications; the following capabilities describe Sentinel's advanced roadmap:
+ChatDome is evolving beyond a reactive assistant into an **always-on security guardian**. The current codebase already includes Command Packs, scheduled patrols, rule evaluation, alert history, Telegram push notifications, and runtime alert mute/resume controls via natural language or `/sentinel_mute` / `/sentinel_resume`; the following capabilities describe Sentinel's advanced roadmap:
 
 - **Threat Envelope — Dual-Layer Situational Awareness** — A novel architecture that unifies attack chain correlation and threat state modeling into a single mechanism. The **index layer** (multi-dimensional Counter) performs zero-token set-intersection matching to determine if a new alert relates to an existing threat. The **narrative layer** (AI-generated natural language) dynamically evolves a compressed story of "what is actually happening." No preset attack patterns—ATT&CK tactical stage coverage triggers AI analysis only when genuinely needed.
 - **Threat State as Compressed Narrative** — Instead of firing the same alert every 5 minutes during an ongoing attack, threats are modeled as living envelopes that absorb new evidence, auto-escalate severity on stage transitions, and push recovery notifications when the threat subsides.
@@ -383,7 +383,7 @@ Additional implementation modules (current codebase):
 - [ ] **Phase 2 — Usable**: Multi-turn sessions, more checks, error handling, whois
 - [ ] **Phase 3 — Polished**: Scheduled patrols, auto-alerts, session history
 - [ ] **Phase 4 — Extensible**: Custom command plugins, multi-server, data plane integration
-- [x] **Sentinel Core**: Command Packs, scheduled patrols, rule evaluation, alert history, Telegram push
+- [x] **Sentinel Core**: Command Packs, scheduled patrols, rule evaluation, alert history, Telegram push, runtime alert mute/resume
 - [ ] **Sentinel Advanced**: threat envelope (dual-layer situational awareness), interactive whitelist, AI memory vault
 
 ## Contributing
