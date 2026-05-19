@@ -248,51 +248,6 @@ class ToolDispatcher:
             lines.append(f"[{e.id}] [{e.category}] {e.fact}")
         return "\n".join(lines)
 
-    def _handle_save_engram(self, args: dict[str, Any]) -> str:
-        if not self.engram_store:
-            return "❌ EngramStore 未初始化，保存失败。"
-        category = args.get("category", "")
-        fact = args.get("fact", "")
-        source_context = args.get("source_context", "")
-        supersedes_id = args.get("supersedes_id")
-
-        if supersedes_id:
-            try:
-                engram = self.engram_store.supersede(supersedes_id, category, fact, source_context)
-                return f"🧠 已更新 Engram 记录 (覆盖了 {supersedes_id})：[{category}] {fact} (记录 ID: {engram.id})"
-            except ValueError as e:
-                return f"❌ 更新失败：{e}"
-                
-        conflicts = self.engram_store.find_conflicts(category, fact)
-        if conflicts:
-            c = conflicts[0]
-            # 返回明确的冲突错误给 LLM，要求 LLM 追问用户
-            import datetime
-            time_str = datetime.datetime.fromtimestamp(c.created_at).strftime('%Y-%m-%d %H:%M:%S')
-            return (
-                f"⚠️ 发现与已有 Engram 冲突：\n"
-                f"在 {time_str} 你曾记录：\"{c.fact}\" (记录 ID: {c.id})\n"
-                f"你现在想保存的 \"{fact}\" 与此矛盾。\n"
-                f"请立即向用户指出矛盾并确认：是否要更新为新的事实？\n"
-                f"如果用户确认更新，请带上 supersedes_id=\"{c.id}\" 再次调用 save_engram 进行覆盖。"
-            )
-            
-        engram = self.engram_store.add(category, fact, source_context)
-        return f"🧠 已录入 Engram：[{category}] {fact} (记录 ID: {engram.id})"
-
-    def _handle_recall_engrams(self, args: dict[str, Any]) -> str:
-        if not self.engram_store:
-            return "❌ EngramStore 未初始化。"
-        category = args.get("category")
-        engrams = self.engram_store.list(category=category)
-        if not engrams:
-            return "未找到相关的 Engram 记忆记录。"
-            
-        lines = [f"共找到 {len(engrams)} 条有效记录："]
-        for e in engrams:
-            lines.append(f"[{e.id}] [{e.category}] {e.fact}")
-        return "\n".join(lines)
-
     async def _handle_security_check(
         self,
         args: dict[str, Any],

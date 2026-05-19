@@ -209,7 +209,7 @@ https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 
 ### 🎛️ 核心能力控制开关（进阶）
 
-除了基础的 Token 配置外，ChatDome 提供了三个改变核心运行逻辑的进阶能力开关。在使用进阶功能前，强烈建议你了解它们的作用。当前 `config.example.yaml` 与代码默认值中，Sentinel、动态命令和 unrestricted 模式均为开启；如需保守部署，请在配置文件或环境变量中显式设置为 `"false"`：
+除了基础的 Token 配置外，ChatDome 提供了三个改变核心运行逻辑的进阶能力开关。在使用进阶功能前，强烈建议你了解它们的作用。当前随仓库提供的默认配置（`config.example.yaml`）中，Sentinel 与动态命令执行默认开启；如需保守部署，请在配置文件或环境变量中显式设置对应选项为 `"false"`：
 
 #### 1. 哨兵主动监控模式 (`CHATDOME_SENTINEL_ENABLED`)
 - **功能说明**：将 ChatDome 从“被动的一问一答助手”升级为“7x24 小时主动巡更的哨兵”。它会在后台静默定期执行系统安全审计，并通过独创的双层态势感知架构对告警进行降噪聚合。

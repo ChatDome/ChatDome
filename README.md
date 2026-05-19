@@ -205,7 +205,7 @@ All sensitive parameters are configured via environment variables. They are neve
 
 ### 🎛️ Core Capability Switches (Advanced)
 
-Beyond basic token configuration, ChatDome offers three advanced privilege switches that alter its core operating logic. It is highly recommended to understand their implications before using them. In the current `config.example.yaml` and code defaults, Sentinel, generated commands, and unrestricted mode are enabled; set them to `"false"` in config or environment variables for a conservative deployment:
+Beyond basic token configuration, ChatDome offers three advanced privilege switches that alter its core operating logic. It is highly recommended to understand their implications before using them. In the shipped default configuration (`config.example.yaml`), Sentinel and dynamic command execution are enabled by default; set the corresponding options to `"false"` in config or environment variables for a conservative deployment:
 
 #### 1. Sentinel Proactive Monitoring Mode (`CHATDOME_SENTINEL_ENABLED`)
 - **What it does**: Upgrades ChatDome from a "passive Q&A assistant" to a "7x24 proactive patrolling sentinel". It quietly performs periodic system security audits in the background and employs an innovative dual-layer situational awareness architecture to aggregate and denoise alerts.
