@@ -215,31 +215,43 @@ def _state_card(state: str) -> dict[str, str]:
             "label": "新威胁首次出现",
             "risk": "中",
             "next_watch": "关注 10 分钟内是否继续出现同类异常，决定是否进入升级态。",
+            "condition": "10分钟内事件数>=5或独立指纹数>=3 → 一级升级 (ESCALATED_L1)",
+            "recovery": "20分钟内无新事件 → 观察期 (RECOVERED_CANDIDATE)",
         },
         "ESCALATED_L1": {
             "label": "一级升级",
             "risk": "中-高",
             "next_watch": "关注 20 分钟窗口内异常是否继续增多，判断是否升级到 L2。",
+            "condition": "20分钟内事件数>=12或独立指纹数>=6 → 二级升级 (ESCALATED_L2)",
+            "recovery": "20分钟内无新事件 → 观察期 (RECOVERED_CANDIDATE)",
         },
         "ESCALATED_L2": {
             "label": "二级升级",
             "risk": "高",
             "next_watch": "关注 30 分钟窗口内是否达到高强度持续异常，可能升级到 L3。",
+            "condition": "30分钟内事件数>=25或独立指纹数>=10 → 三级升级 (ESCALATED_L3)",
+            "recovery": "20分钟内无新事件 → 观察期 (RECOVERED_CANDIDATE)",
         },
         "ESCALATED_L3": {
             "label": "三级升级",
             "risk": "严重",
             "next_watch": "持续监控关键指标，直至进入观察期并确认威胁收敛。",
+            "condition": "已达最高升级状态 (ESCALATED_L3)",
+            "recovery": "20分钟内无新事件 → 观察期 (RECOVERED_CANDIDATE)",
         },
         "RECOVERED_CANDIDATE": {
             "label": "进入观察期",
             "risk": "中（待确认）",
             "next_watch": "观察期内若再次出现异常，将回弹到 ESCALATED_L1。",
+            "condition": "有任何新事件 → 重新进入 一级升级 (ESCALATED_L1)",
+            "recovery": "观察期满 15 分钟无新事件 → 威胁归档 (RECOVERED)",
         },
         "RECOVERED": {
             "label": "观察期通过，威胁归档",
             "risk": "低",
             "next_watch": "后续若同类异常再次出现，将按新一轮威胁重新进入状态机。",
+            "condition": "有新事件 → 重新进入 新威胁首次出现 (NEW)",
+            "recovery": "已归档",
         },
     }
     return cards.get(
@@ -248,6 +260,8 @@ def _state_card(state: str) -> dict[str, str]:
             "label": "状态更新",
             "risk": "未知",
             "next_watch": "继续观察后续是否出现新的状态迁移。",
+            "condition": "无",
+            "recovery": "无",
         },
     )
 
@@ -383,12 +397,12 @@ def _unique_summary(values: list[str], max_items: int = 6) -> str:
     return ", ".join(seen[:max_items]) + suffix
 
 
-def _ssh_sample_lines(records: list[dict[str, str]], max_items: int = 5) -> list[str]:
+def _ssh_sample_lines(records: list[dict[str, str]], max_items: int = 3) -> list[str]:
     samples: list[str] = []
     for record in records[:max_items]:
         samples.append(
             f"- {record['time']} {record['result']}: "
-            f"{record['user']}@{record['ip']}:{record['port']} via {record['method']}"
+            f"{record['user']}@{record['ip']}"
         )
     return samples
 
@@ -498,8 +512,17 @@ def _format_ssh_session_commands_alert(event: AlertEvent) -> str:
     ]
 
     if card:
-        lines.append(f"威胁状态: {card['label']} ({_alert_transition(event)})")
-        lines.append(f"风险判断: {card['risk']}")
+        lines.extend(
+            [
+                f"[DEBUG] 威胁状态: {card['label']} ({_alert_transition(event)})",
+                f"[DEBUG] 风险判断: {card['risk']}",
+                f"[DEBUG] 触发原因: {event.rule}",
+                f"[DEBUG] 变更条件: {card.get('condition', '')}",
+                f"[DEBUG] 降级条件: {card.get('recovery', '')}",
+                f"[DEBUG] 迁移原因: {event.action_reason}",
+                f"[DEBUG] 下一观察点: {card['next_watch']}",
+            ]
+        )
 
     if isinstance(updates, list) and updates:
         lines.extend(["", "命令增量:"])
@@ -520,7 +543,8 @@ def _format_ssh_session_commands_alert(event: AlertEvent) -> str:
     else:
         raw = (event.raw_output or "").strip()
         if raw:
-            lines.extend(["", "相关输出:", raw[:800]])
+            output_label = "变更详情:" if event.mode == "differential" else "检测结果:"
+            lines.extend(["", output_label, raw[:800]])
 
     return "\n".join(lines)
 
@@ -558,8 +582,17 @@ def _format_ssh_alert_message(event: AlertEvent) -> str:
     ]
 
     if card:
-        lines.append(f"威胁状态: {card['label']} ({_alert_transition(event)})")
-        lines.append(f"风险判断: {card['risk']}")
+        lines.extend(
+            [
+                f"[DEBUG] 威胁状态: {card['label']} ({_alert_transition(event)})",
+                f"[DEBUG] 风险判断: {card['risk']}",
+                f"[DEBUG] 触发原因: {event.rule}",
+                f"[DEBUG] 变更条件: {card.get('condition', '')}",
+                f"[DEBUG] 降级条件: {card.get('recovery', '')}",
+                f"[DEBUG] 迁移原因: {event.action_reason}",
+                f"[DEBUG] 下一观察点: {card['next_watch']}",
+            ]
+        )
 
     if records:
         lines.extend(
@@ -612,10 +645,13 @@ def format_alert_message(event: AlertEvent) -> str:
         lines.extend(
             [
                 "",
-                f"威胁状态: {card['label']} ({_alert_transition(event)})",
-                f"风险判断: {card['risk']}",
-                f"触发原因: {event.rule}",
-                f"下一观察点: {card['next_watch']}",
+                f"[DEBUG] 威胁状态: {card['label']} ({_alert_transition(event)})",
+                f"[DEBUG] 风险判断: {card['risk']}",
+                f"[DEBUG] 触发原因: {event.rule}",
+                f"[DEBUG] 变更条件: {card.get('condition', '')}",
+                f"[DEBUG] 降级条件: {card.get('recovery', '')}",
+                f"[DEBUG] 迁移原因: {event.action_reason}",
+                f"[DEBUG] 下一观察点: {card['next_watch']}",
             ]
         )
 
@@ -623,7 +659,8 @@ def format_alert_message(event: AlertEvent) -> str:
     if raw:
         if len(raw) > 800:
             raw = raw[:800] + "\n... (已截断)"
-        lines.extend(["", "相关输出:", raw])
+        output_label = "变更详情:" if event.mode == "differential" else "检测结果:"
+        lines.extend(["", output_label, raw])
 
     return "\n".join(lines)
 

@@ -55,7 +55,7 @@ class TelegramRoundLimitTests(unittest.TestCase):
 
         self.assertEqual(agent.calls, [(123, "CONTINUE")])
         self.assertIn(123, bot._round_limit_tasks)
-        self.assertIn("已收到继续执行请求", message.replies[0])
+        self.assertIn("继续执行中…", message.replies[0])
         self.assertFalse(bot._round_limit_tasks[123].done())
 
         agent.release.set()

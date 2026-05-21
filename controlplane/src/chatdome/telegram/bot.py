@@ -206,9 +206,9 @@ class TelegramBot:
         session.command_echo = not session.command_echo
         
         if session.command_echo:
-            msg = "🔍 *Command Echo (命令回显模式) 已开启* 🟢\n\n在接下来的回话底部，将会附带实际执行底层步骤的命令代码，供您审计和学习。"
+            msg = "🔍 命令回显 已开启 🟢"
         else:
-            msg = "🔍 *Command Echo (命令回显模式) 已关闭* 🔴\n\n对话展示将恢复为干净清爽的安全专家总结模式。"
+            msg = "🔍 命令回显 已关闭 🔴"
             
         await self._send_long_message(update.message, msg)
 
@@ -346,14 +346,11 @@ class TelegramBot:
             "点击“详细命令”查看完整影响分析。",
         )
         text = (
-            "⚠️ 检测到需要审批的系统操作。\n"
+            "⚠️ 待审批\n"
             f"{approval_line}"
             f"风险等级: {risk_level}{hash_line}\n"
             f"操作目的: {purpose}\n"
-            f"简要影响: {impact}\n"
-            "默认不展示命令细节。\n"
-            "你可以直接允许/拒绝，或先查看详细命令及影响分析。\n"
-            "文本确认可发送 /confirm <审批编号>，文本拒绝可发送 /reject <审批编号>。"
+            f"影响说明: {impact}"
         )
         if approval_id:
             approve_data = f"approval:approve:{approval_id}"
@@ -414,7 +411,7 @@ class TelegramBot:
         ]
         await self._reply_text(
             message,
-            "详情分析已完成，请选择是否执行。",
+            "分析完成。",
             markup=MessageMarkup.PLAIN,
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -436,13 +433,13 @@ class TelegramBot:
         if existing_task and not existing_task.done():
             await self._send_long_message(
                 message,
-                "详细命令分析仍在进行中，完成后会自动发送结果。你可以继续向 ChatDome 发送消息。",
+                "详细命令分析仍在进行中，请稍候。",
             )
             return
 
         await self._send_long_message(
             message,
-            "已开始详细命令分析，完成后会自动发送结果。你可以继续向 ChatDome 发送消息。",
+            "正在分析命令详情…",
         )
 
         coroutine = self._run_approval_detail_analysis(
@@ -542,11 +539,11 @@ class TelegramBot:
         if existing_task and not existing_task.done():
             await self._send_long_message(
                 message,
-                "当前任务已经在后台继续执行，完成后会自动发送结果。",
+                "任务已在执行中，请稍候。",
             )
             return
 
-        status_msg = await message.reply_text("已收到继续执行请求，正在后台处理。完成后会自动发送结果。")
+        status_msg = await message.reply_text("继续执行中…")
         coroutine = self._run_round_limit_resolution(
             message=message,
             status_message=status_msg,
@@ -1058,7 +1055,6 @@ class TelegramBot:
 
         return (
             "🧭 当前运行环境摘要\n\n"
-            f"档案文件: {path.resolve()}\n"
             f"采集时间(UTC): {fields.get('UTC', 'unknown')}\n\n"
             "主机信息:\n"
             f"- OS family: {fields.get('OS family', 'unknown')}\n"
@@ -1121,7 +1117,7 @@ class TelegramBot:
         if not self._check_auth(update):
             return
         if self._sentinel is None:
-            await update.message.reply_text("ℹ️ 哨兵模式未启用。请在 config.yaml 中设置 sentinel.enabled: true")
+            await update.message.reply_text("ℹ️ 哨兵模式未启用。")
             return
         from chatdome.sentinel.alerter import format_status_message
         status = "运行中" if self._sentinel.is_running else "未运行"

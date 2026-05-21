@@ -70,7 +70,6 @@ def format_alert_push_status(status: dict[str, Any], *, prefix: str = "") -> str
             [
                 "当前状态: Sentinel 告警推送已静默",
                 f"恢复时间: {until_text}",
-                "说明: Sentinel 仍会继续巡检并记录历史，只是不主动发到 Telegram。",
             ]
         )
     else:
