@@ -66,6 +66,7 @@ HELP_TEXT = """\
 /sentinel\\_packs \\- 查看已加载的命令包
 /sentinel\\_mute \\[时长\\] \\- 暂停 Sentinel 告警推送
 /sentinel\\_resume \\- 恢复 Sentinel 告警推送
+/codex\\_login \\- 触发 OpenAI Codex OAuth 设备码认证流程
 
 _直接发送你的问题即可，无需命令前缀。_
 """
@@ -157,6 +158,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("sentinel_mute", self._handle_sentinel_mute))
         self._app.add_handler(CommandHandler("sentinel_resume", self._handle_sentinel_resume))
         self._app.add_handler(CommandHandler("engram", self._handle_engram))
+        self._app.add_handler(CommandHandler("codex_login", self._handle_codex_login))
         self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
@@ -634,6 +636,79 @@ class TelegramBot:
         lines.append("🗑️ _删除记录: `/engram delete <id>`_")
         
         await self._send_text(update, "\n".join(lines))
+
+    async def _handle_codex_login(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /codex_login command — trigger OAuth Device Code flow."""
+        if not self._check_auth(update):
+            return
+
+        chat_id = update.effective_chat.id
+        from chatdome.llm.codex_auth import CodexOAuth
+        
+        oauth = CodexOAuth(
+            client_id=self.config.ai.codex_client_id,
+            token_file=self.config.ai.codex_token_file
+        )
+        
+        try:
+            status_msg = await update.message.reply_text("正在向 OpenAI 申请设备验证码，请稍候...")
+            device_info = await oauth.request_device_code()
+            await status_msg.delete()
+        except Exception as e:
+            logger.error("Failed to request Codex device code: %s", e)
+            await update.message.reply_text(f"❌ 申请验证码失败: {e}")
+            return
+
+        device_code = device_info["device_code"]
+        user_code = device_info["user_code"]
+        verification_uri = device_info.get("verification_uri", "https://auth.openai.com/codex/device")
+        interval = device_info.get("interval", 5)
+        expires_in = device_info.get("expires_in", 300)
+
+        msg_text = (
+            "🔐 *OpenAI Codex 认证授权*\n\n"
+            f"请在浏览器中打开链接进行授权：\n"
+            f"{verification_uri}\n\n"
+            f"输入以下临时验证码：\n"
+            f"`{user_code}`\n\n"
+            f"⏳ 该验证码将在 5 分钟内有效。绑定成功后，ChatDome 将自动保存授权凭证。"
+        )
+        
+        await self._send_long_message(update.message, msg_text, markup=MessageMarkup.MD)
+
+        # Start background polling task
+        async def do_poll_and_exchange():
+            try:
+                code, code_verifier = await oauth.poll_device_token(
+                    device_code=device_code,
+                    interval=interval,
+                    timeout=expires_in
+                )
+                await oauth.exchange_token(code, code_verifier)
+                
+                await self._send_bot_text(
+                    bot=context.bot,
+                    chat_id=chat_id,
+                    text="✅ *Codex 认证成功！*\n授权令牌已安全写入本地 `auth.json`，现已可直连 Codex 后端服务。",
+                    markup=MessageMarkup.MD
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error("Codex device login polling background task failed: %s", e)
+                await self._send_bot_text(
+                    bot=context.bot,
+                    chat_id=chat_id,
+                    text=f"❌ *Codex 认证失败：*\n{e}",
+                    markup=MessageMarkup.MD
+                )
+
+        if self._app is not None:
+            self._app.create_task(do_poll_and_exchange())
+        else:
+            asyncio.create_task(do_poll_and_exchange())
 
     async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline keyboard button clicks."""

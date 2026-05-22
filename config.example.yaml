@@ -1,20 +1,22 @@
-# ChatDome Configuration
+﻿# ChatDome Configuration
 #
 # This file contains NON-SENSITIVE settings only.
 # All sensitive parameters (tokens, API keys) MUST be configured
-# via environment variables — see README for details.
+# via environment variables 鈥?see README for details.
 #
 # Required environment variables:
-#   CHATDOME_BOT_TOKEN        — Telegram Bot token
-#   CHATDOME_AI_API_KEY       — LLM API key
+#   CHATDOME_BOT_TOKEN        鈥?Telegram Bot token
+#   CHATDOME_AI_API_KEY       鈥?LLM API key
 #
 # Optional environment variables:
-#   CHATDOME_AI_PROVIDER      — LLM provider id (default: openai)
-#   CHATDOME_AI_API_MODE      — Adapter mode: openai_api or codex_cli
-#   CHATDOME_AI_BASE_URL      — LLM API base URL (default: https://api.openai.com/v1)
-#   CHATDOME_AI_MODEL         — LLM model name (default: gpt-4o)
-#   CHATDOME_CODEX_COMMAND    — Codex CLI command/path (default: codex)
-#   CHATDOME_ALLOWED_CHAT_IDS — Comma-separated Telegram Chat IDs (e.g. "123,456")
+#   CHATDOME_AI_PROVIDER      鈥?LLM provider id (default: openai)
+#   CHATDOME_AI_API_MODE      鈥?Adapter mode: openai_api or codex_responses
+#   CHATDOME_AI_BASE_URL      鈥?LLM API base URL (default: https://api.openai.com/v1)
+#   CHATDOME_AI_MODEL         鈥?LLM model name (default: gpt-4o)
+#   CHATDOME_CODEX_CLIENT_ID  — OpenAI Codex Client ID
+#   CHATDOME_CODEX_TOKEN_FILE — Path to save Codex OAuth tokens
+#   CHATDOME_CODEX_BASE_URL   — Codex API base URL
+#   CHATDOME_ALLOWED_CHAT_IDS 鈥?Comma-separated Telegram Chat IDs (e.g. "123,456")
 
 chatdome:
   telegram:
@@ -24,7 +26,7 @@ chatdome:
   ai:
     # provider/api_mode are a pair:
     #   openai + openai_api: uses OpenAI-compatible Chat Completions API + API key
-    #   codex + codex_cli: uses locally authenticated Codex CLI, no API key required here
+    #   codex + codex_responses: uses locally authenticated Codex CLI, no API key required here
     provider: "openai"
     api_mode: "openai_api"
     # base_url: set via CHATDOME_AI_BASE_URL env var, or override here
@@ -33,17 +35,11 @@ chatdome:
     temperature: 0.1
     max_tokens: 2000
 
-    # Codex CLI mode. Run `codex login` first; headless hosts can use
-    # `codex login --device-auth` and complete the browser link elsewhere.
-    codex_command: "codex"
-    codex_profile: ""
-    codex_cwd: ""
-    codex_timeout: 300
-    codex_sandbox: "read-only"
-    # Reserved for future Codex CLI versions / native adapters.
-    codex_approval_policy: "never"
-    codex_ephemeral: true
-    codex_validate_auth: true
+        # Codex native OAuth settings.
+        # Users can complete login via the Telegram command /codex_login.
+    codex_client_id: ""
+    codex_token_file: ""
+    codex_base_url: "https://chatgpt.com/backend-api/codex"
 
   agent:
     # -------------------------------------------------------------------------
@@ -66,10 +62,10 @@ chatdome:
     # -------------------------------------------------------------------------
     # When `false`: AI-generated commands go through the safety
     #   validator (dangerous pattern blocklist + read-only allowlist).
-    # When `true` (current default): Bypasses the command validator — no blocklist,
+    # When `true` (current default): Bypasses the command validator 鈥?no blocklist,
     #   no allowlist at the sandbox validation layer.
     #
-    # ⚠️  WARNING: This is extremely dangerous. Only enable this if you fully
+    # 鈿狅笍  WARNING: This is extremely dangerous. Only enable this if you fully
     #   trust the deployment context and understand the risks. The ToolDispatcher still
     #   performs a pre-execution review and sends risky/mutating/deleting commands to
     #   approval, but unrestricted execution removes the deterministic validator guardrail.
@@ -91,51 +87,49 @@ chatdome:
     max_output_chars: 4000
 
   # ---------------------------------------------------------------------------
-  # Sentinel — 7×24 Security Monitoring (哨兵模式)
+  # Sentinel 鈥?7脳24 Security Monitoring (鍝ㄥ叺妯″紡)
   # ---------------------------------------------------------------------------
   sentinel:
-    enabled: true                         # 哨兵模式开关
+    enabled: true                         # 鍝ㄥ叺妯″紡寮€鍏?
 
-    # 告警推送目标（空 = 使用 telegram.allowed_chat_ids；如果两者都为空，则 Sentinel 只巡检/记录，不会主动推送到手机）
-    # 运行时可在 Telegram 中用自然语言或 /sentinel_mute、/sentinel_resume 暂停/恢复推送；
-    # 静默状态保存在 chat_data/sentinel_alert_push_state.json，不影响巡检和历史记录。
-    alert_chat_ids: []
-    alert_retention_days: 30             # sentinel_alerts.jsonl 按天保留窗口
+    # 鍛婅鎺ㄩ€佺洰鏍囷紙绌?= 浣跨敤 telegram.allowed_chat_ids锛涘鏋滀袱鑰呴兘涓虹┖锛屽垯 Sentinel 鍙贰妫€/璁板綍锛屼笉浼氫富鍔ㄦ帹閫佸埌鎵嬫満锛?    # 杩愯鏃跺彲鍦?Telegram 涓敤鑷劧璇█鎴?/sentinel_mute銆?sentinel_resume 鏆傚仠/鎭㈠鎺ㄩ€侊紱
+    # 闈欓粯鐘舵€佷繚瀛樺湪 chat_data/sentinel_alert_push_state.json锛屼笉褰卞搷宸℃鍜屽巻鍙茶褰曘€?    alert_chat_ids: []
+    alert_retention_days: 30             # sentinel_alerts.jsonl 鎸夊ぉ淇濈暀绐楀彛
 
-    # 推/拉分离 — 推送策略
-    push_min_severity: 7                   # 数值 ≥ 7 (high) 才主动推送 Telegram
-                                           # 低于此级别的告警静默记录，用户通过 /sentinel_status 查看
+    # 鎺?鎷夊垎绂?鈥?鎺ㄩ€佺瓥鐣?
+    push_min_severity: 7                   # 鏁板€?鈮?7 (high) 鎵嶄富鍔ㄦ帹閫?Telegram
+                                           # 浣庝簬姝ょ骇鍒殑鍛婅闈欓粯璁板綍锛岀敤鎴烽€氳繃 /sentinel_status 鏌ョ湅
 
-    # 命令库
-    builtin_packs:                         # 启用的内置 pack（省略 = 全部加载）
+    # 鍛戒护搴?
+    builtin_packs:                         # 鍚敤鐨勫唴缃?pack锛堢渷鐣?= 鍏ㄩ儴鍔犺浇锛?
       - ssh_auth
       - network
       - system_resources
       - processes_services
       - logs
-      # - users_permissions                # 按需启用
+      # - users_permissions                # 鎸夐渶鍚敤
       # - file_integrity
       # - containers
-    # custom_packs_dir: "./packs"          # 用户自定义 pack 目录
+    # custom_packs_dir: "./packs"          # 鐢ㄦ埛鑷畾涔?pack 鐩綍
 
-    # 告警防护
-    global_rate_limit: 10                  # 全局速率限制：每窗口最多推送 N 条
-    global_rate_window: 300                # 速率窗口大小（秒）
-    learning_rounds: 1                     # 冷启动静默轮数（首次启动建基线）
+    # 鍛婅闃叉姢
+    global_rate_limit: 10                  # 鍏ㄥ眬閫熺巼闄愬埗锛氭瘡绐楀彛鏈€澶氭帹閫?N 鏉?
+    global_rate_window: 300                # 閫熺巼绐楀彛澶у皬锛堢锛?
+    learning_rounds: 1                     # 鍐峰惎鍔ㄩ潤榛樿疆鏁帮紙棣栨鍚姩寤哄熀绾匡級
 
-    # 检查策略列表
+    # 妫€鏌ョ瓥鐣ュ垪琛?
     checks:
-      - name: "SSH 新访问来源检测"
+      - name: "SSH 鏂拌闂潵婧愭娴?
         check_id: ssh_bruteforce
         interval: 300
         mode: differential
-        severity: 6                        # medium（保留检查，不主动推送）
+        severity: 6                        # medium锛堜繚鐣欐鏌ワ紝涓嶄富鍔ㄦ帹閫侊級
         rule:
           type: added_count
           operator: ">"
           threshold: 0
 
-      - name: "SSH 短时多次失败登录告警（3分钟）"
+      - name: "SSH 鐭椂澶氭澶辫触鐧诲綍鍛婅锛?鍒嗛挓锛?
         check_id: ssh_failed_burst
         interval: 60
         mode: snapshot
@@ -147,9 +141,9 @@ chatdome:
         rule:
           type: line_count
           operator: ">="
-          threshold: 10                    # 3 分钟内失败 >= 10 次触发
+          threshold: 10                    # 3 鍒嗛挓鍐呭け璐?>= 10 娆¤Е鍙?
 
-      - name: "SSH 持续失败登录告警（1小时）"
+      - name: "SSH 鎸佺画澶辫触鐧诲綍鍛婅锛?灏忔椂锛?
         check_id: ssh_failed_burst
         interval: 300
         mode: snapshot
@@ -161,9 +155,9 @@ chatdome:
         rule:
           type: line_count
           operator: ">="
-          threshold: 15                    # 1 小时内失败 >= 15 次触发
+          threshold: 15                    # 1 灏忔椂鍐呭け璐?>= 15 娆¤Е鍙?
 
-      - name: "SSH 成功登录告警"
+      - name: "SSH 鎴愬姛鐧诲綍鍛婅"
         check_id: ssh_success_login
         interval: 60
         mode: differential
@@ -175,15 +169,15 @@ chatdome:
           operator: ">"
           threshold: 0
 
-      - name: "SSH 异常时段成功登录告警"
+      - name: "SSH 寮傚父鏃舵鎴愬姛鐧诲綍鍛婅"
         check_id: ssh_success_login_offhours
         interval: 60
         mode: differential
         args:
           since_hours: 24
           fallback_limit: 3000
-          work_start_hour: 8               # 正常时段起始（含）
-          work_end_hour: 23                # 正常时段结束（不含）
+          work_start_hour: 8               # 姝ｅ父鏃舵璧峰锛堝惈锛?
+          work_end_hour: 23                # 姝ｅ父鏃舵缁撴潫锛堜笉鍚級
           limit: 200
         severity: 8                        # high
         rule:
@@ -191,12 +185,12 @@ chatdome:
           operator: ">"
           threshold: 0
 
-      - name: "SSH 会话命令巡检"
+      - name: "SSH 浼氳瘽鍛戒护宸℃"
         check_id: ssh_session_commands_patrol
-        interval: 900                    # 每 15 分钟追踪活跃 SSH 会话命令增量
+        interval: 900                    # 姣?15 鍒嗛挓杩借釜娲昏穬 SSH 浼氳瘽鍛戒护澧為噺
         mode: differential
         args:
-          tracking_window_hours: 1        # 仅主动追踪登录后 1 小时内的会话
+          tracking_window_hours: 1        # 浠呬富鍔ㄨ拷韪櫥褰曞悗 1 灏忔椂鍐呯殑浼氳瘽
           limit: 50
         severity: 7                       # high
         rule:
@@ -204,7 +198,7 @@ chatdome:
           operator: ">"
           threshold: 0
 
-      - name: "磁盘使用率"
+      - name: "纾佺洏浣跨敤鐜?
         check_id: disk_usage
         interval: 600
         mode: snapshot
@@ -216,7 +210,7 @@ chatdome:
           operator: ">"
           threshold: 85
 
-      - name: "新增监听端口"
+      - name: "鏂板鐩戝惉绔彛"
         check_id: open_ports
         interval: 120
         mode: differential
@@ -225,3 +219,4 @@ chatdome:
           type: line_count
           operator: ">"
           threshold: 0
+

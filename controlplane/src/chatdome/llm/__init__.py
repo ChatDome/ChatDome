@@ -5,23 +5,20 @@ from __future__ import annotations
 from typing import Any
 
 from chatdome.llm.client import LLMClient, LLMResponse, ToolCall
-from chatdome.llm.codex_cli import CodexCLIClient
+from chatdome.llm.codex_responses import CodexResponsesClient
 
 
 def create_llm_client(ai_config: Any) -> Any:
     """Create the configured LLM provider adapter."""
     api_mode = getattr(ai_config, "api_mode", "openai_api")
-    if api_mode == "codex_cli":
-        return CodexCLIClient(
-            command=getattr(ai_config, "codex_command", "codex"),
-            model=getattr(ai_config, "model", "gpt-5.4"),
-            profile=getattr(ai_config, "codex_profile", ""),
-            cwd=getattr(ai_config, "codex_cwd", ""),
-            timeout=getattr(ai_config, "codex_timeout", 300),
-            sandbox=getattr(ai_config, "codex_sandbox", "read-only"),
-            approval_policy=getattr(ai_config, "codex_approval_policy", "never"),
-            ephemeral=getattr(ai_config, "codex_ephemeral", True),
-            validate_auth=getattr(ai_config, "codex_validate_auth", True),
+    if api_mode == "codex_responses":
+        return CodexResponsesClient(
+            base_url=getattr(ai_config, "codex_base_url", "https://chatgpt.com/backend-api/codex"),
+            model=getattr(ai_config, "model", "gpt-5.5"),
+            temperature=getattr(ai_config, "temperature", 0.1),
+            max_tokens=getattr(ai_config, "max_tokens", 2000),
+            codex_client_id=getattr(ai_config, "codex_client_id", None) or None,
+            codex_token_file=getattr(ai_config, "codex_token_file", None) or None,
         )
 
     return LLMClient(
@@ -34,7 +31,7 @@ def create_llm_client(ai_config: Any) -> Any:
 
 
 __all__ = [
-    "CodexCLIClient",
+    "CodexResponsesClient",
     "LLMClient",
     "LLMResponse",
     "ToolCall",

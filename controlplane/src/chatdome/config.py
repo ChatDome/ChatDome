@@ -57,14 +57,9 @@ class AIConfig:
     model: str = "gpt-4o"
     temperature: float = 0.1
     max_tokens: int = 2000
-    codex_command: str = "codex"
-    codex_profile: str = ""
-    codex_cwd: str = ""
-    codex_timeout: int = 300
-    codex_sandbox: str = "read-only"
-    codex_approval_policy: str = "never"
-    codex_ephemeral: bool = True
-    codex_validate_auth: bool = True
+    codex_client_id: str = ""
+    codex_token_file: str = ""
+    codex_base_url: str = "https://chatgpt.com/backend-api/codex"
 
 
 @dataclass
@@ -151,13 +146,14 @@ def _normalize_api_mode(raw: str) -> str:
         "chat": "openai_api",
         "chat_completions": "openai_api",
         "chat_completion": "openai_api",
-        "codex": "codex_cli",
-        "codex_cli": "codex_cli",
+        "codex": "codex_responses",
+        "codex_responses": "codex_responses",
+        "codex_oauth": "codex_responses",
     }
     if value not in aliases:
         raise ValueError(
             "Unsupported AI API mode: "
-            f"{raw!r}. Supported modes: openai_api, codex_cli."
+            f"{raw!r}. Supported modes: openai_api, codex_responses."
         )
     return aliases[value]
 
@@ -241,45 +237,19 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     if model:
         config.ai.model = model
 
-    # Optional: Codex CLI settings
-    codex_command = os.environ.get("CHATDOME_CODEX_COMMAND", "")
-    if codex_command:
-        config.ai.codex_command = codex_command
 
-    codex_profile = os.environ.get("CHATDOME_CODEX_PROFILE", "")
-    if codex_profile:
-        config.ai.codex_profile = codex_profile
 
-    codex_cwd = os.environ.get("CHATDOME_CODEX_CWD", "")
-    if codex_cwd:
-        config.ai.codex_cwd = codex_cwd
+    codex_client_id = os.environ.get("CHATDOME_CODEX_CLIENT_ID", "")
+    if codex_client_id:
+        config.ai.codex_client_id = codex_client_id
 
-    codex_timeout = os.environ.get("CHATDOME_CODEX_TIMEOUT", "")
-    if codex_timeout:
-        try:
-            parsed_codex_timeout = int(codex_timeout)
-            if parsed_codex_timeout > 0:
-                config.ai.codex_timeout = parsed_codex_timeout
-            else:
-                logger.warning("CHATDOME_CODEX_TIMEOUT must be > 0, ignored: %s", codex_timeout)
-        except ValueError:
-            logger.warning("Invalid CHATDOME_CODEX_TIMEOUT ignored: %s", codex_timeout)
+    codex_token_file = os.environ.get("CHATDOME_CODEX_TOKEN_FILE", "")
+    if codex_token_file:
+        config.ai.codex_token_file = codex_token_file
 
-    codex_sandbox = os.environ.get("CHATDOME_CODEX_SANDBOX", "")
-    if codex_sandbox:
-        config.ai.codex_sandbox = codex_sandbox
-
-    codex_approval_policy = os.environ.get("CHATDOME_CODEX_APPROVAL_POLICY", "")
-    if codex_approval_policy:
-        config.ai.codex_approval_policy = codex_approval_policy
-
-    codex_ephemeral = os.environ.get("CHATDOME_CODEX_EPHEMERAL", "")
-    if codex_ephemeral:
-        config.ai.codex_ephemeral = _parse_bool_env(codex_ephemeral)
-
-    codex_validate_auth = os.environ.get("CHATDOME_CODEX_VALIDATE_AUTH", "")
-    if codex_validate_auth:
-        config.ai.codex_validate_auth = _parse_bool_env(codex_validate_auth)
+    codex_base_url_env = os.environ.get("CHATDOME_CODEX_BASE_URL", "")
+    if codex_base_url_env:
+        config.ai.codex_base_url = codex_base_url_env
 
     # Optional: Allowed Chat IDs (comma-separated)
     chat_ids_env = os.environ.get("CHATDOME_ALLOWED_CHAT_IDS", "")
@@ -358,12 +328,10 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     if config.ai.provider in {"codex", "codex_cli", "openai-codex", "openai_codex"}:
         config.ai.provider = "codex"
         if config.ai.api_mode == "openai_api":
-            config.ai.api_mode = "codex_cli"
+            config.ai.api_mode = "codex_responses"
 
-    if config.ai.api_mode == "codex_cli":
+    if config.ai.api_mode == "codex_responses":
         config.ai.provider = "codex"
-        if not config.ai.codex_command:
-            raise ValueError("Codex CLI command is not configured.")
 
     if not config.telegram.bot_token:
         raise ValueError(
