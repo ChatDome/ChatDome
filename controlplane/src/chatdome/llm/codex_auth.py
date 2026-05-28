@@ -190,19 +190,27 @@ class CodexOAuth:
                             return code, code_verifier
                         raise ValueError(f"Unexpected successful response schema: {data}")
                         
-                    elif resp.status_code == 400:
+                    elif resp.status_code in (400, 403):
                         data = resp.json()
-                        error_code = data.get("error")
-                        if error_code == "authorization_pending":
+                        # Handle both standard {"error": "..."} and OpenAI {"error": {"code": "..."}}
+                        err_obj = data.get("error", {})
+                        if isinstance(err_obj, dict):
+                            error_code = err_obj.get("code") or err_obj.get("type")
+                            error_desc = err_obj.get("message")
+                        else:
+                            error_code = err_obj
+                            error_desc = data.get("error_description")
+
+                        if error_code in ("deviceauth_authorization_pending", "authorization_pending"):
                             # Still waiting for user, continue polling
                             logger.debug("Device auth poll: authorization_pending, retrying in %ds", interval)
                         elif error_code == "slow_down":
                             interval += 2
                             logger.warning("Received slow_down error, increasing polling interval to %ds", interval)
                         else:
-                            raise RuntimeError(f"OAuth polling failed: {error_code} - {data.get('error_description')}")
+                            raise RuntimeError(f"OAuth polling failed: {error_code} - {error_desc}")
                     else:
-                        raise RuntimeError(f"Unexpected OAuth polling HTTP status: {resp.status_code}")
+                        raise RuntimeError(f"Unexpected OAuth polling HTTP status: {resp.status_code} - {resp.text}")
                         
                 except httpx.HTTPError as e:
                     logger.warning("Network warning during token polling: %s", e)
