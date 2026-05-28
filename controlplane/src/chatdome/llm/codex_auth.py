@@ -231,7 +231,6 @@ class CodexOAuth:
             "grant_type": "authorization_code",
             "code": code,
             "code_verifier": code_verifier,
-            "redirect_uri": "https://auth.openai.com/oauth2/redirection",
         }
         headers = {"Content-Type": "application/json"}
         

@@ -702,7 +702,7 @@ class TelegramBot:
                 await self._send_bot_text(
                     bot=context.bot,
                     chat_id=chat_id,
-                    text=f"❌ *Codex 认证失败：*\n{e}",
+                    text=f"❌ *Codex 认证失败：*\n```text\n{e}\n```",
                     markup=MessageMarkup.TELEGRAM_MARKDOWN
                 )
 
