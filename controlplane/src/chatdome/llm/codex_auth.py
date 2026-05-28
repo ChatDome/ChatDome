@@ -148,6 +148,7 @@ class CodexOAuth:
     async def poll_device_token(
         self,
         device_code: str,
+        user_code: str,
         interval: int = 5,
         timeout: int = 300,
     ) -> tuple[str, str]:
@@ -166,6 +167,7 @@ class CodexOAuth:
             "client_id": self.client_id,
             "device_code": device_code,
             "device_auth_id": device_code,
+            "user_code": user_code,
         }
         headers = {"Content-Type": "application/json"}
         start_time = time.time()

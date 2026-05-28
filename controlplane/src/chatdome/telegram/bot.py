@@ -683,6 +683,7 @@ class TelegramBot:
             try:
                 code, code_verifier = await oauth.poll_device_token(
                     device_code=device_code,
+                    user_code=user_code,
                     interval=interval,
                     timeout=expires_in
                 )

@@ -69,6 +69,7 @@ class CodexOAuthTests(unittest.TestCase):
         # Use interval=0.01 to speed up test execution
         code, verifier = await self.oauth.poll_device_token(
             device_code="dev_123",
+            user_code="user_456",
             interval=0,
             timeout=5,
         )
@@ -88,6 +89,7 @@ class CodexOAuthTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             await self.oauth.poll_device_token(
                 device_code="dev_123",
+                user_code="user_456",
                 interval=0,
                 timeout=0.05,
             )
