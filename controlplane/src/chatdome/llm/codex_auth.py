@@ -238,29 +238,30 @@ class CodexOAuth:
         logger.debug("Exchanging OAuth authorization code for tokens")
         
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = None
-            for uri in possible_uris:
-                payload = {
-                    "client_id": self.client_id,
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "code_verifier": code_verifier,
-                    "redirect_uri": uri,
-                }
-                resp = await client.post(self.TOKEN_URL, json=payload, headers=headers)
-                if resp.status_code == 200:
-                    logger.info("Successfully exchanged token using redirect_uri: %s", uri)
-                    break
-                else:
-                    logger.warning("Token exchange failed with redirect_uri %s: HTTP %d %s", uri, resp.status_code, resp.text)
+            try:
+                resp = None
+                for uri in possible_uris:
+                    payload = {
+                        "client_id": self.client_id,
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "code_verifier": code_verifier,
+                        "redirect_uri": uri,
+                    }
+                    resp = await client.post(self.TOKEN_URL, json=payload, headers=headers)
+                    if resp.status_code == 200:
+                        logger.info("Successfully exchanged token using redirect_uri: %s", uri)
+                        break
+                    else:
+                        logger.warning("Token exchange failed with redirect_uri %s: HTTP %d %s", uri, resp.status_code, resp.text)
+                        
+                if resp is None or resp.status_code != 200:
+                    final_text = resp.text if resp else "Unknown Error"
+                    final_status = resp.status_code if resp else 0
+                    logger.error("OAuth token exchange failed for all possible redirect URIs. Last error: Status %d, Body %s", final_status, final_text)
+                    raise RuntimeError(f"OAuth token exchange failed (HTTP {final_status}): {final_text}")
                     
-            if resp is None or resp.status_code != 200:
-                final_text = resp.text if resp else "Unknown Error"
-                final_status = resp.status_code if resp else 0
-                logger.error("OAuth token exchange failed for all possible redirect URIs. Last error: Status %d, Body %s", final_status, final_text)
-                raise RuntimeError(f"OAuth token exchange failed (HTTP {final_status}): {final_text}")
-                
-            data = resp.json()
+                data = resp.json()
                 expires_in = int(data.get("expires_in", 3600))
                 
                 token_data = {
