@@ -234,7 +234,7 @@ class CodexOAuth:
             "com.openai.chat://auth0.openai.com/ios/com.openai.chat/callback"
         ]
         
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
         logger.debug("Exchanging OAuth authorization code for tokens")
         
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -248,7 +248,7 @@ class CodexOAuth:
                         "code_verifier": code_verifier,
                         "redirect_uri": uri,
                     }
-                    resp = await client.post(self.TOKEN_URL, json=payload, headers=headers)
+                    resp = await client.post(self.TOKEN_URL, data=payload, headers=headers)
                     if resp.status_code == 200:
                         logger.info("Successfully exchanged token using redirect_uri: %s", uri)
                         break
@@ -289,12 +289,12 @@ class CodexOAuth:
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
         }
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
         
         logger.info("Attempting to refresh Codex OAuth access token")
         async with httpx.AsyncClient(timeout=15.0) as client:
             try:
-                resp = await client.post(self.TOKEN_URL, json=payload, headers=headers)
+                resp = await client.post(self.TOKEN_URL, data=payload, headers=headers)
                 if resp.status_code != 200:
                     logger.error("OAuth token refresh failed: Status %d, Body %s", resp.status_code, resp.text)
                     raise RuntimeError(f"OAuth token refresh failed (HTTP {resp.status_code}): {resp.text}")
