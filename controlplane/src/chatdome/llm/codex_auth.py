@@ -88,7 +88,8 @@ class CodexOAuth:
         Request a new device code from OpenAI.
         
         Returns:
-            A dict containing device_code, user_code, verification_uri, interval, etc.
+            A normalized dict containing device_code, user_code,
+            verification_uri, interval (int), expires_in (int), etc.
         """
         payload = {
             "client_id": self.client_id,
@@ -108,11 +109,35 @@ class CodexOAuth:
                 data = resp.json()
                 logger.info("Device code response keys: %s", list(data.keys()))
                 
-                # Validate required fields
+                # OpenAI uses custom field names; normalize to standard names.
+                # device_auth_id -> device_code
+                # expires_at (ISO str) -> expires_in (seconds int)
+                # interval may be str -> int
+                if "device_auth_id" in data and "device_code" not in data:
+                    data["device_code"] = data["device_auth_id"]
+                
+                if "expires_at" in data and "expires_in" not in data:
+                    try:
+                        from datetime import datetime, timezone
+                        exp = datetime.fromisoformat(data["expires_at"])
+                        data["expires_in"] = max(int((exp - datetime.now(timezone.utc)).total_seconds()), 30)
+                    except Exception:
+                        data["expires_in"] = 300  # safe default
+                
+                if "interval" in data:
+                    try:
+                        data["interval"] = int(data["interval"])
+                    except (ValueError, TypeError):
+                        data["interval"] = 5
+                
+                if "verification_uri" not in data:
+                    data["verification_uri"] = "https://auth.openai.com/authorize/device"
+                
+                # Final validation
                 if "device_code" not in data:
-                    logger.error("Device code response missing 'device_code'. Full response: %s", data)
+                    logger.error("Device code response missing identifier. Full response: %s", data)
                     raise RuntimeError(
-                        f"OpenAI Device Auth returned unexpected response (missing 'device_code'). "
+                        f"OpenAI Device Auth returned unexpected response (missing device identifier). "
                         f"Keys: {list(data.keys())}. Check your client_id."
                     )
                 return data
@@ -140,6 +165,7 @@ class CodexOAuth:
         payload = {
             "client_id": self.client_id,
             "device_code": device_code,
+            "device_auth_id": device_code,
         }
         headers = {"Content-Type": "application/json"}
         start_time = time.time()
