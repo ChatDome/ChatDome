@@ -44,7 +44,11 @@ class CodexOAuthTests(unittest.TestCase):
         self.assertEqual(res["verification_uri"], "http://verify")
         mock_post.assert_called_once_with(
             self.oauth.DEVICE_CODE_URL,
-            json={"client_id": "test_client"},
+            json={
+                "client_id": "test_client",
+                "scope": "openid profile email offline_access",
+                "audience": "https://api.openai.com/v1",
+            },
             headers={"Content-Type": "application/json"},
         )
 

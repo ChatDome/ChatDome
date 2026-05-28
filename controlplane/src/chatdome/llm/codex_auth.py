@@ -90,7 +90,11 @@ class CodexOAuth:
         Returns:
             A dict containing device_code, user_code, verification_uri, interval, etc.
         """
-        payload = {"client_id": self.client_id}
+        payload = {
+            "client_id": self.client_id,
+            "scope": "openid profile email offline_access",
+            "audience": "https://api.openai.com/v1",
+        }
         headers = {"Content-Type": "application/json"}
         
         logger.debug("Requesting device code from OpenAI with client_id=%s", self.client_id)
@@ -101,7 +105,17 @@ class CodexOAuth:
                     logger.error("Failed to request device code: Status %d, Body %s", resp.status_code, resp.text)
                     raise RuntimeError(f"OpenAI Device Auth failed (HTTP {resp.status_code}): {resp.text}")
                 
-                return resp.json()
+                data = resp.json()
+                logger.info("Device code response keys: %s", list(data.keys()))
+                
+                # Validate required fields
+                if "device_code" not in data:
+                    logger.error("Device code response missing 'device_code'. Full response: %s", data)
+                    raise RuntimeError(
+                        f"OpenAI Device Auth returned unexpected response (missing 'device_code'). "
+                        f"Keys: {list(data.keys())}. Check your client_id."
+                    )
+                return data
             except httpx.HTTPError as e:
                 logger.error("Network error requesting device code: %s", e)
                 raise RuntimeError(f"Failed to connect to OpenAI Device Auth: {e}") from e
