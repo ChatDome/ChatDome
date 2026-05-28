@@ -676,7 +676,7 @@ class TelegramBot:
             f"⏳ 该验证码将在 5 分钟内有效。绑定成功后，ChatDome 将自动保存授权凭证。"
         )
         
-        await self._send_long_message(update.message, msg_text, markup=MessageMarkup.MD)
+        await self._send_long_message(update.message, msg_text, markup=MessageMarkup.TELEGRAM_MARKDOWN)
 
         # Start background polling task
         async def do_poll_and_exchange():
@@ -692,7 +692,7 @@ class TelegramBot:
                     bot=context.bot,
                     chat_id=chat_id,
                     text="✅ *Codex 认证成功！*\n授权令牌已安全写入本地 `auth.json`，现已可直连 Codex 后端服务。",
-                    markup=MessageMarkup.MD
+                    markup=MessageMarkup.TELEGRAM_MARKDOWN
                 )
             except asyncio.CancelledError:
                 pass
@@ -702,7 +702,7 @@ class TelegramBot:
                     bot=context.bot,
                     chat_id=chat_id,
                     text=f"❌ *Codex 认证失败：*\n{e}",
-                    markup=MessageMarkup.MD
+                    markup=MessageMarkup.TELEGRAM_MARKDOWN
                 )
 
         if self._app is not None:
