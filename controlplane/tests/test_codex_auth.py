@@ -62,7 +62,7 @@ class CodexOAuthTests(unittest.TestCase):
         # Second call: success
         resp_success = httpx.Response(
             200,
-            json={"code": "auth_code_999", "code_verifier": "verifier_888"},
+            json={"authorization_code": "auth_code_999", "code_verifier": "verifier_888"},
         )
         mock_post.side_effect = [resp_pending, resp_success]
 

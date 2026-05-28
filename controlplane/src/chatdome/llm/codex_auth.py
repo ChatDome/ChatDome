@@ -183,7 +183,7 @@ class CodexOAuth:
                     
                     if resp.status_code == 200:
                         data = resp.json()
-                        code = data.get("code")
+                        code = data.get("authorization_code") or data.get("code")
                         code_verifier = data.get("code_verifier")
                         if code and code_verifier:
                             logger.info("Device auth token polling success")
