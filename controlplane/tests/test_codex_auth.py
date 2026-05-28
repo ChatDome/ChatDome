@@ -44,11 +44,7 @@ class CodexOAuthTests(unittest.TestCase):
         self.assertEqual(res["verification_uri"], "http://verify")
         mock_post.assert_called_once_with(
             self.oauth.DEVICE_CODE_URL,
-            json={
-                "client_id": "test_client",
-                "scope": "openid profile email offline_access",
-                "audience": "https://api.openai.com/v1",
-            },
+            json={"client_id": "test_client"},
             headers={"Content-Type": "application/json"},
         )
 
@@ -77,6 +73,13 @@ class CodexOAuthTests(unittest.TestCase):
         self.assertEqual(code, "auth_code_999")
         self.assertEqual(verifier, "verifier_888")
         self.assertEqual(mock_post.call_count, 2)
+        first_call = mock_post.call_args_list[0]
+        self.assertEqual(first_call.args[0], self.oauth.DEVICE_TOKEN_URL)
+        self.assertEqual(
+            first_call.kwargs["json"],
+            {"device_auth_id": "dev_123", "user_code": "user_456"},
+        )
+        self.assertEqual(first_call.kwargs["headers"], {"Content-Type": "application/json"})
 
     def test_poll_device_token_timeout(self):
         asyncio.run(self._run_poll_device_token_timeout())
@@ -120,6 +123,17 @@ class CodexOAuthTests(unittest.TestCase):
         self.assertEqual(saved_data["access_token"], "acc_tok")
         self.assertEqual(saved_data["refresh_token"], "ref_tok")
         self.assertGreater(saved_data["expires_at"], time.time())
+        mock_post.assert_called_once_with(
+            self.oauth.TOKEN_URL,
+            data={
+                "client_id": "test_client",
+                "grant_type": "authorization_code",
+                "code": "auth_code",
+                "code_verifier": "verifier",
+                "redirect_uri": self.oauth.DEVICE_CALLBACK_URL,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
 
     def test_ensure_valid_token_no_refresh(self):
         asyncio.run(self._run_ensure_valid_token_no_refresh())
@@ -166,7 +180,15 @@ class CodexOAuthTests(unittest.TestCase):
         tok = await self.oauth.ensure_valid_token()
 
         self.assertEqual(tok, "new_tok")
-        mock_post.assert_called_once()
+        mock_post.assert_called_once_with(
+            self.oauth.TOKEN_URL,
+            json={
+                "client_id": "test_client",
+                "grant_type": "refresh_token",
+                "refresh_token": "ref_tok",
+            },
+            headers={"Content-Type": "application/json"},
+        )
         
         # Verify refreshed token saved to file
         saved_data = json.loads(self.token_file.read_text(encoding="utf-8"))

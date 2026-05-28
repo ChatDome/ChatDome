@@ -32,6 +32,7 @@ class CodexOAuth:
 
     DEVICE_CODE_URL = "https://auth.openai.com/api/accounts/deviceauth/usercode"
     DEVICE_TOKEN_URL = "https://auth.openai.com/api/accounts/deviceauth/token"
+    DEVICE_CALLBACK_URL = "https://auth.openai.com/deviceauth/callback"
     TOKEN_URL = "https://auth.openai.com/oauth/token"
 
     def __init__(
@@ -91,11 +92,7 @@ class CodexOAuth:
             A normalized dict containing device_code, user_code,
             verification_uri, interval (int), expires_in (int), etc.
         """
-        payload = {
-            "client_id": self.client_id,
-            "scope": "openid profile email offline_access",
-            "audience": "https://api.openai.com/v1",
-        }
+        payload = {"client_id": self.client_id}
         headers = {"Content-Type": "application/json"}
         
         logger.debug("Requesting device code from OpenAI with client_id=%s", self.client_id)
@@ -164,8 +161,6 @@ class CodexOAuth:
             A tuple of (authorization_code, code_verifier) on success.
         """
         payload = {
-            "client_id": self.client_id,
-            "device_code": device_code,
             "device_auth_id": device_code,
             "user_code": user_code,
         }
@@ -226,45 +221,35 @@ class CodexOAuth:
         Returns:
             The parsed token data dictionary.
         """
-        possible_uris = [
-            "com.openai.chat://auth",
-            "urn:ietf:wg:oauth:2.0:oob",
-            "vscode://openai.codex",
-            "https://auth.openai.com/oauth2/redirection",
-            "com.openai.chat://auth0.openai.com/ios/com.openai.chat/callback"
-        ]
-        
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         logger.debug("Exchanging OAuth authorization code for tokens")
         
         async with httpx.AsyncClient(timeout=15.0) as client:
             try:
-                resp = None
-                for uri in possible_uris:
-                    payload = {
-                        "client_id": self.client_id,
-                        "grant_type": "authorization_code",
-                        "code": code,
-                        "code_verifier": code_verifier,
-                        "redirect_uri": uri,
-                    }
-                    resp = await client.post(self.TOKEN_URL, data=payload, headers=headers)
-                    if resp.status_code == 200:
-                        logger.info("Successfully exchanged token using redirect_uri: %s", uri)
-                        break
-                    else:
-                        logger.warning("Token exchange failed with redirect_uri %s: HTTP %d %s", uri, resp.status_code, resp.text)
-                        
-                if resp is None or resp.status_code != 200:
-                    final_text = resp.text if resp else "Unknown Error"
-                    final_status = resp.status_code if resp else 0
-                    logger.error("OAuth token exchange failed for all possible redirect URIs. Last error: Status %d, Body %s", final_status, final_text)
-                    raise RuntimeError(f"OAuth token exchange failed (HTTP {final_status}): {final_text}")
+                payload = {
+                    "client_id": self.client_id,
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "code_verifier": code_verifier,
+                    "redirect_uri": self.DEVICE_CALLBACK_URL,
+                }
+                resp = await client.post(self.TOKEN_URL, data=payload, headers=headers)
+                if resp.status_code != 200:
+                    logger.error(
+                        "OAuth token exchange failed with device callback redirect URI: "
+                        "HTTP %d %s",
+                        resp.status_code,
+                        resp.text,
+                    )
+                    raise RuntimeError(
+                        f"OAuth token exchange failed (HTTP {resp.status_code}): {resp.text}"
+                    )
                     
                 data = resp.json()
                 expires_in = int(data.get("expires_in", 3600))
                 
                 token_data = {
+                    "id_token": data.get("id_token", ""),
                     "access_token": data["access_token"],
                     "refresh_token": data.get("refresh_token", ""),
                     "expires_at": int(time.time() + expires_in),
@@ -289,12 +274,12 @@ class CodexOAuth:
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
         }
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        headers = {"Content-Type": "application/json"}
         
         logger.info("Attempting to refresh Codex OAuth access token")
         async with httpx.AsyncClient(timeout=15.0) as client:
             try:
-                resp = await client.post(self.TOKEN_URL, data=payload, headers=headers)
+                resp = await client.post(self.TOKEN_URL, json=payload, headers=headers)
                 if resp.status_code != 200:
                     logger.error("OAuth token refresh failed: Status %d, Body %s", resp.status_code, resp.text)
                     raise RuntimeError(f"OAuth token refresh failed (HTTP {resp.status_code}): {resp.text}")
@@ -303,6 +288,7 @@ class CodexOAuth:
                 expires_in = int(data.get("expires_in", 3600))
                 
                 token_data = {
+                    "id_token": data.get("id_token", ""),
                     "access_token": data["access_token"],
                     "refresh_token": data.get("refresh_token") or refresh_token,  # Fallback to old refresh token if new one is not sent
                     "expires_at": int(time.time() + expires_in),
