@@ -231,6 +231,7 @@ class CodexOAuth:
             "grant_type": "authorization_code",
             "code": code,
             "code_verifier": code_verifier,
+            "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
         }
         headers = {"Content-Type": "application/json"}
         
