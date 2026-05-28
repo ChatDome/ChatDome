@@ -131,7 +131,7 @@ class CodexOAuth:
                         data["interval"] = 5
                 
                 if "verification_uri" not in data:
-                    data["verification_uri"] = "https://auth.openai.com/authorize/device"
+                    data["verification_uri"] = "https://auth.openai.com/codex/device"
                 
                 # Final validation
                 if "device_code" not in data:
