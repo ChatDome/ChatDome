@@ -129,12 +129,11 @@ All sensitive parameters are configured via **environment variables** — they a
 
 # Required
 export CHATDOME_BOT_TOKEN="your-telegram-bot-token"
-export CHATDOME_AI_API_KEY="your-openai-api-key"
 
 # Optional
 export CHATDOME_ALLOWED_CHAT_IDS="123456789"                 # Telegram Chat IDs for access control
-export CHATDOME_AI_BASE_URL="https://api.openai.com/v1"      # LLM API endpoint
-export CHATDOME_AI_MODEL="gpt-4o"                            # LLM model name
+export CHATDOME_OPENAI_API_KEY="your-openai-api-key"         # Referenced by config.yaml ai_profiles
+export DEEPSEEK_API_KEY="your-deepseek-api-key"              # Optional profile key
 export CHATDOME_SENTINEL_ENABLED="true"                      # Enable 7x24 Sentinel monitoring
 export CHATDOME_ALLOW_GENERATED_COMMANDS="true"              # Allow AI to generate and execute own commands
 export CHATDOME_ALLOW_UNRESTRICTED_COMMANDS="true"           # Enable God Mode (full unrestricted execution)
@@ -188,9 +187,8 @@ All sensitive parameters are configured via environment variables. They are neve
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `CHATDOME_AI_API_KEY` | ✅ | OpenAI-compatible API key |
-| `CHATDOME_AI_BASE_URL` | ❌ | API base URL (default: `https://api.openai.com/v1`) |
-| `CHATDOME_AI_MODEL` | ❌ | Model name (default: `gpt-4o`) |
+| `CHATDOME_OPENAI_API_KEY` | Profile-dependent | API key referenced by `api_key: "env:CHATDOME_OPENAI_API_KEY"` |
+| `DEEPSEEK_API_KEY` | Profile-dependent | Example API key referenced by the DeepSeek profile |
 
 **General:**
 
@@ -228,10 +226,24 @@ chatdome:
   telegram:
     max_message_length: 4000
 
-  ai:
-    model: "gpt-4o"
-    temperature: 0.1
-    max_tokens: 2000
+  active_ai_profile: "codex-gpt5"
+
+  ai_profiles:
+    codex-gpt5:
+      provider: "codex"
+      api_mode: "codex_responses"
+      model: "gpt-5.5"
+      temperature: 0.1
+      max_tokens: 2000
+
+    openai-official:
+      provider: "openai"
+      api_mode: "openai_api"
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-4o"
+      temperature: 0.1
+      max_tokens: 2000
+      api_key: "env:CHATDOME_OPENAI_API_KEY"
 
   agent:
     allow_generated_commands: true            # true = AI can generate ad-hoc commands

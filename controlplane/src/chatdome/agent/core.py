@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import inspect
 import secrets
 import time
 from typing import Any
@@ -20,6 +21,7 @@ from chatdome.agent.tools import ToolDispatcher
 from chatdome.config import AgentConfig
 from chatdome.executor.sandbox import CommandSandbox
 from chatdome.llm.client import LLMClient
+from chatdome.llm.manager import LLMManager, LLMSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +39,7 @@ class Agent:
 
     def __init__(
         self,
-        llm: LLMClient,
+        llm: LLMClient | None,
         sandbox: CommandSandbox,
         config: AgentConfig,
         runtime_environment_context: str = "",
@@ -45,8 +47,10 @@ class Agent:
         user_context_ledger: Any = None,
         valid_check_ids: 'list[str] | None' = None,
         engram_store: 'Any' = None,
+        llm_manager: LLMManager | None = None,
     ):
         self.llm = llm
+        self.llm_manager = llm_manager
         self.config = config
         self.tools = build_tools(
             allow_unrestricted_commands=config.allow_unrestricted_commands,
@@ -66,6 +70,56 @@ class Agent:
             ),
             engram_store=engram_store,
         )
+
+    async def get_active_llm_snapshot(self) -> LLMSnapshot:
+        """Return the LLM snapshot for a new user-facing run."""
+        llm_manager = getattr(self, "llm_manager", None)
+        if llm_manager is not None:
+            snapshot = await llm_manager.get_active_snapshot()
+            # Keep legacy attributes coherent for code paths/tests that inspect agent.llm.
+            self.llm = snapshot.client
+            self.tool_dispatcher.llm = snapshot.client
+            return snapshot
+        if self.llm is None:
+            raise RuntimeError("No LLM client is configured.")
+        return LLMSnapshot(profile_name="legacy", client=self.llm, profile=None)
+
+    async def _llm_unavailable_message(self, exc: Exception) -> str:
+        logger.error("LLM profile is not ready: %s", exc)
+        return f"⚠️ LLM 当前不可用: {exc}"
+
+    async def _run_loop_compat(
+        self,
+        chat_id: int,
+        session: Any,
+        snapshot: LLMSnapshot,
+    ) -> str:
+        """Call _run_loop while tolerating older test doubles without snapshot."""
+        try:
+            params = inspect.signature(self._run_loop).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "snapshot" in params:
+            return await self._run_loop(chat_id, session, snapshot)
+        return await self._run_loop(chat_id, session)
+
+    async def _dispatch_tool_compat(
+        self,
+        tool_name: str,
+        arguments: str,
+        tool_call_id: str,
+        chat_id: int,
+        llm: Any,
+    ) -> str:
+        """Call ToolDispatcher.dispatch while tolerating older test doubles."""
+        dispatch = self.tool_dispatcher.dispatch
+        try:
+            params = inspect.signature(dispatch).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "llm" in params:
+            return await dispatch(tool_name, arguments, tool_call_id, chat_id, llm=llm)
+        return await dispatch(tool_name, arguments, tool_call_id, chat_id)
 
     def set_sentinel(self, sentinel: Any) -> None:
         """Inject Sentinel scheduler tools after runtime wiring."""
@@ -215,7 +269,11 @@ class Agent:
                 self._persist_session(session)
                 _, final_answer = await self.resume_session(chat_id, "REJECT")
                 return final_answer
-            return await self._handle_pending_followup(chat_id, session, user_message)
+            try:
+                snapshot = await self.get_active_llm_snapshot()
+            except Exception as e:
+                return await self._llm_unavailable_message(e)
+            return await self._handle_pending_followup(chat_id, session, user_message, snapshot)
 
         if session.pending_round_limit:
             if self._is_reject_intent(user_message):
@@ -231,10 +289,15 @@ class Agent:
         session.add_user_message(user_message)
 
         # Trim or compress history if needed using the Local Memory Vault
-        await session.summarize_and_trim_history(self.llm, self.config.max_history_tokens)
+        try:
+            snapshot = await self.get_active_llm_snapshot()
+        except Exception as e:
+            return await self._llm_unavailable_message(e)
+
+        await session.summarize_and_trim_history(snapshot.client, self.config.max_history_tokens)
         self._persist_session(session)
 
-        return await self._run_loop(chat_id, session)
+        return await self._run_loop_compat(chat_id, session, snapshot)
 
     async def resolve_round_limit(self, chat_id: int, action: str) -> str:
         """Resolve a round-limit confirmation by continuing or abandoning the task."""
@@ -248,7 +311,11 @@ class Agent:
             session.clear_pending_round_limit()
             self._persist_session(session)
             logger.info("User chose to continue task after %d rounds (chat_id=%d)", reached, chat_id)
-            return await self._run_loop(chat_id, session)
+            try:
+                snapshot = await self.get_active_llm_snapshot()
+            except Exception as e:
+                return await self._llm_unavailable_message(e)
+            return await self._run_loop_compat(chat_id, session, snapshot)
 
         reached = session.pending_round_count
         session.task_auto_approve = False
@@ -321,7 +388,11 @@ class Agent:
             )
             session.add_tool_result(tool_call_id, tool_result_for_llm)
             self._persist_session(session)
-            final_answer = await self._run_loop(chat_id, session)
+            try:
+                snapshot = await self.get_active_llm_snapshot()
+            except Exception as e:
+                return "命令校验失败，已拒绝执行。", await self._llm_unavailable_message(e)
+            final_answer = await self._run_loop_compat(chat_id, session, snapshot)
             return "命令校验失败，已拒绝执行。", final_answer
 
         # Clear pending state before continuing the normal loop.
@@ -382,7 +453,11 @@ class Agent:
             session.add_tool_result(tool_call_id, tool_result_for_llm)
         self._persist_session(session)
 
-        final_answer = await self._run_loop(chat_id, session)
+        try:
+            snapshot = await self.get_active_llm_snapshot()
+        except Exception as e:
+            return raw_result, await self._llm_unavailable_message(e)
+        final_answer = await self._run_loop_compat(chat_id, session, snapshot)
         return raw_result, final_answer
 
     async def get_pending_approval_details(
@@ -425,13 +500,38 @@ class Agent:
             pending_reason = session.pending_reason or ""
             pending_tool_call_id = session.pending_tool_call_id or ""
 
-            analysis = await self.tool_dispatcher.get_command_approval_details(
-                command=pending_command,
-                reason=pending_reason,
-                chat_id=chat_id,
-                tool_call_id=pending_tool_call_id,
-                include_llm=include_llm,
-            )
+            detail_llm = None
+            if include_llm:
+                try:
+                    detail_llm = (await self.get_active_llm_snapshot()).client
+                except Exception as e:
+                    return {
+                        "ok": False,
+                        "message": f"LLM profile is not ready: {e}",
+                    }
+
+            details_fn = self.tool_dispatcher.get_command_approval_details
+            try:
+                details_params = inspect.signature(details_fn).parameters
+            except (TypeError, ValueError):
+                details_params = {}
+            if "llm" in details_params:
+                analysis = await details_fn(
+                    command=pending_command,
+                    reason=pending_reason,
+                    chat_id=chat_id,
+                    tool_call_id=pending_tool_call_id,
+                    include_llm=include_llm,
+                    llm=detail_llm,
+                )
+            else:
+                analysis = await details_fn(
+                    command=pending_command,
+                    reason=pending_reason,
+                    chat_id=chat_id,
+                    tool_call_id=pending_tool_call_id,
+                    include_llm=include_llm,
+                )
 
             current_command = session.pending_command or ""
             current_command_hash = session.pending_command_hash or self._command_hash(current_command)
@@ -572,7 +672,13 @@ class Agent:
             cleaned.append({"role": role, "content": content})
         session.pending_followups = cleaned[-12:]
 
-    async def _handle_pending_followup(self, chat_id: int, session: Any, user_message: str) -> str:
+    async def _handle_pending_followup(
+        self,
+        chat_id: int,
+        session: Any,
+        user_message: str,
+        snapshot: LLMSnapshot | None = None,
+    ) -> str:
         """
         Handle user follow-up while a risky command is pending approval.
 
@@ -580,6 +686,8 @@ class Agent:
         tool_call -> tool_result ordering required by the LLM API.
         """
         self._prune_pending_followups(session)
+        if snapshot is None:
+            snapshot = await self.get_active_llm_snapshot()
         pending_cmd = session.pending_command or "(unknown)"
         pending_approval_id = session.pending_approval_id or ""
         pending_reason = session.pending_reason or ""
@@ -611,7 +719,7 @@ class Agent:
         ephemeral_messages = [{"role": "system", "content": approval_context}] + followup_messages
 
         try:
-            response = await self.llm.chat_completion(
+            response = await snapshot.client.chat_completion(
                 messages=ephemeral_messages,
                 tools=None,
             )
@@ -623,7 +731,7 @@ class Agent:
             from chatdome.agent.tracker import TokenTracker
             TokenTracker.record_usage(
                 chat_id=chat_id,
-                model=self.config.model if hasattr(self.config, "model") else self.llm.model,
+                model=getattr(snapshot.client, "model", "unknown"),
                 action="pending_followup",
                 prompt_tokens=response.prompt_tokens,
                 completion_tokens=response.completion_tokens,
@@ -641,9 +749,18 @@ class Agent:
         self._persist_session(session)
         return content
 
-    async def _run_loop(self, chat_id: int, session: Any) -> str:
+    async def _run_loop(
+        self,
+        chat_id: int,
+        session: Any,
+        snapshot: LLMSnapshot | None = None,
+    ) -> str:
         """Drive the ReAct loop forward."""
 
+        if snapshot is None:
+            snapshot = await self.get_active_llm_snapshot()
+        llm = snapshot.client
+        self.llm = llm
         start_round = session.round_count
         window_limit = max(1, int(self.config.max_rounds_per_turn))
         end_round_exclusive = start_round + window_limit + 1
@@ -654,7 +771,7 @@ class Agent:
             )
 
             try:
-                response = await self.llm.chat_completion(
+                response = await llm.chat_completion(
                     messages=session.messages,
                     tools=self.tools,
                 )
@@ -675,7 +792,7 @@ class Agent:
             from chatdome.agent.tracker import TokenTracker
             TokenTracker.record_usage(
                 chat_id=chat_id,
-                model=self.config.model if hasattr(self.config, 'model') else self.llm.model,
+                model=getattr(llm, "model", "unknown"),
                 action="react_loop",
                 prompt_tokens=response.prompt_tokens,
                 completion_tokens=response.completion_tokens,
@@ -736,7 +853,13 @@ class Agent:
 
                     logger.info("Executing tool: %s (id=%s)", tc.name, tc.id)
                     try:
-                        result = await self.tool_dispatcher.dispatch(tc.name, tc.arguments, tc.id, chat_id)
+                        result = await self._dispatch_tool_compat(
+                            tc.name,
+                            tc.arguments,
+                            tc.id,
+                            chat_id,
+                            llm,
+                        )
                         session.add_tool_result(tc.id, result)
                         prior_tool_results[signature] = result
                         self._persist_session(session)

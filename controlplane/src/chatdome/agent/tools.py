@@ -85,7 +85,14 @@ class ToolDispatcher:
         if self._http_client and not self._http_client.is_closed:
             await self._http_client.aclose()
 
-    async def dispatch(self, tool_name: str, arguments_json: str, tool_call_id: str = "", chat_id: int = 0) -> str:
+    async def dispatch(
+        self,
+        tool_name: str,
+        arguments_json: str,
+        tool_call_id: str = "",
+        chat_id: int = 0,
+        llm: Any = None,
+    ) -> str:
         """
         Dispatch a tool call and return the formatted result string.
         Raises PendingApprovalError if the command needs human confirmation.
@@ -117,7 +124,7 @@ class ToolDispatcher:
             elif tool_name == "run_security_check":
                 return await self._handle_security_check(args, tool_call_id, chat_id)
             elif tool_name == "run_shell_command":
-                return await self._handle_shell_command(args, tool_call_id, chat_id)
+                return await self._handle_shell_command(args, tool_call_id, chat_id, llm=llm)
             elif tool_name == "get_command_audit_events":
                 return self._handle_command_audit_events(args, chat_id)
             elif tool_name == "whois_lookup":
@@ -329,7 +336,13 @@ class ToolDispatcher:
 
         return "\n".join(lines)
 
-    async def _handle_shell_command(self, args: dict[str, Any], tool_call_id: str, chat_id: int = 0) -> str:
+    async def _handle_shell_command(
+        self,
+        args: dict[str, Any],
+        tool_call_id: str,
+        chat_id: int = 0,
+        llm: Any = None,
+    ) -> str:
         """Evaluate and suspend an AI-generated shell command for user approval."""
         command = args.get("command", "")
         reason = args.get("reason", "无说明")
@@ -347,6 +360,7 @@ class ToolDispatcher:
             chat_id=chat_id,
             tool_call_id=tool_call_id,
             include_llm=False,
+            llm=llm,
         )
         static_is_safe = bool(analysis.get("static_is_safe", False))
         static_critical = bool(analysis.get("static_critical", False))
@@ -423,6 +437,7 @@ class ToolDispatcher:
         chat_id: int = 0,
         tool_call_id: str = "",
         include_llm: bool = True,
+        llm: Any = None,
     ) -> dict[str, Any]:
         """Return full approval details, including optional LLM analysis."""
         analysis = await self.analyze_command_for_approval(
@@ -431,6 +446,7 @@ class ToolDispatcher:
             chat_id=chat_id,
             tool_call_id=tool_call_id,
             include_llm=include_llm,
+            llm=llm,
         )
         CommandAuditTracker.record_event(
             "command_detail_requested",
@@ -453,6 +469,7 @@ class ToolDispatcher:
         chat_id: int = 0,
         tool_call_id: str = "",
         include_llm: bool = False,
+        llm: Any = None,
     ) -> dict[str, Any]:
         """Run static + optional LLM analysis for one command."""
         from chatdome.executor.validator import (
@@ -490,11 +507,12 @@ class ToolDispatcher:
         reviewer_status = safety_status
         reviewer_risk_level = risk_level
 
-        if include_llm and self.llm:
+        reviewer_llm = llm if llm is not None else self.llm
+        if include_llm and reviewer_llm:
             from chatdome.agent.prompts import REVIEWER_SYSTEM_PROMPT
 
             logger.info("Running deferred AI reviewer for command details: %s", command)
-            review = await self.llm.evaluate_command_safety(
+            review = await reviewer_llm.evaluate_command_safety(
                 command,
                 REVIEWER_SYSTEM_PROMPT,
                 chat_id=chat_id,

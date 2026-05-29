@@ -6,16 +6,10 @@
 #
 # Required environment variables:
 #   CHATDOME_BOT_TOKEN        — Telegram Bot token
-#   CHATDOME_AI_API_KEY       — LLM API key
 #
 # Optional environment variables:
-#   CHATDOME_AI_PROVIDER      — LLM provider id (default: openai)
-#   CHATDOME_AI_API_MODE      — Adapter mode: openai_api or codex_responses
-#   CHATDOME_AI_BASE_URL      — LLM API base URL (default: https://api.openai.com/v1)
-#   CHATDOME_AI_MODEL         — LLM model name (default: gpt-4o)
-#   CHATDOME_CODEX_CLIENT_ID  — OpenAI Codex OAuth Client ID
-#   CHATDOME_CODEX_TOKEN_FILE — Path to save Codex OAuth tokens
-#   CHATDOME_CODEX_BASE_URL   — Codex API base URL
+#   CHATDOME_OPENAI_API_KEY   — API key referenced by openai-official profile
+#   DEEPSEEK_API_KEY          — API key referenced by proxy-deepseek profile
 #   CHATDOME_ALLOWED_CHAT_IDS — Comma-separated Telegram Chat IDs (e.g. "123,456")
 
 chatdome:
@@ -23,23 +17,45 @@ chatdome:
     # allowed_chat_ids: set via CHATDOME_ALLOWED_CHAT_IDS env var
     max_message_length: 4000
 
-  ai:
-    # provider/api_mode are a pair:
-    #   openai + openai_api: uses OpenAI-compatible Chat Completions API + API key
-    #   codex + codex_responses: uses native Codex Responses API via OAuth device login
-    provider: "openai"
-    api_mode: "openai_api"
-    # base_url: set via CHATDOME_AI_BASE_URL env var, or override here
-    # base_url: "https://api.openai.com/v1"
-    model: "gpt-4o"
-    temperature: 0.1
-    max_tokens: 2000
+  # Multi-LLM profile pool.
+  #
+  # The old single `chatdome.ai` block is removed in the multi-LLM config model.
+  # Select the default runtime model with active_ai_profile, and define every
+  # available model under ai_profiles.
+  active_ai_profile: "codex-gpt5"
 
-    # Codex native OAuth settings.
-    # Users can complete login via the Telegram command /codex_login.
-    codex_client_id: ""
-    codex_token_file: ""
-    codex_base_url: "https://chatgpt.com/backend-api/codex"
+  ai_profiles:
+    codex-gpt5:
+      # codex + codex_responses uses native Codex Responses API via OAuth device login.
+      # Users can complete login via the Telegram command /codex_login.
+      provider: "codex"
+      api_mode: "codex_responses"
+      model: "gpt-5.5"
+      temperature: 0.1
+      max_tokens: 2000
+      codex_client_id: ""
+      codex_token_file: ""
+      codex_base_url: "https://chatgpt.com/backend-api/codex"
+
+    openai-official:
+      # openai + openai_api uses OpenAI-compatible Chat Completions API + API key.
+      # api_key must use env:<ENV_NAME>; do not put plaintext keys in YAML.
+      provider: "openai"
+      api_mode: "openai_api"
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-4o"
+      temperature: 0.1
+      max_tokens: 2000
+      api_key: "env:CHATDOME_OPENAI_API_KEY"
+
+    proxy-deepseek:
+      provider: "openai"
+      api_mode: "openai_api"
+      base_url: "https://api.deepseek.com/v1"
+      model: "deepseek-chat"
+      temperature: 0.1
+      max_tokens: 2000
+      api_key: "env:DEEPSEEK_API_KEY"
 
   agent:
     # -------------------------------------------------------------------------

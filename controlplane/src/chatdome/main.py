@@ -16,7 +16,7 @@ from pathlib import Path
 from chatdome.config import load_config
 from chatdome.agent.core import Agent
 from chatdome.executor.sandbox import CommandSandbox
-from chatdome.llm import create_llm_client
+from chatdome.llm.manager import LLMManager
 from chatdome.runtime_environment import collect_and_persist_runtime_environment
 from chatdome.sentinel.pack_loader import PackLoader
 from chatdome.sentinel.user_context import UserContextLedger
@@ -59,12 +59,11 @@ def main() -> None:
     logger.info("=" * 60)
     logger.info("  ChatDome v0.2.0 — AI Host Security Assistant")
     logger.info("=" * 60)
-    logger.info("  AI:       %s / %s", config.ai.provider, config.ai.api_mode)
-    logger.info("  Model:    %s", config.ai.model)
-    if config.ai.api_mode == "openai_api":
-        logger.info("  Base URL: %s", config.ai.base_url)
-    else:
-        logger.info("  Codex CLI: %s", config.ai.codex_command)
+    active_profile = config.ai_profiles[config.active_ai_profile]
+    logger.info("  AI profile: %s", config.active_ai_profile)
+    logger.info("  AI:       %s / %s", active_profile.provider, active_profile.api_mode)
+    logger.info("  Model:    %s", active_profile.model)
+    logger.info("  Profiles: %d configured", len(config.ai_profiles))
     logger.info("  Allowed chats: %s", config.telegram.allowed_chat_ids or "(all)")
     logger.info("  Generated commands: %s", config.agent.allow_generated_commands)
     logger.info(
@@ -88,11 +87,11 @@ def main() -> None:
     pack_loader.load(enabled_packs=enabled_packs)
     logger.info("  Pack Loader: %d commands loaded", pack_loader.command_count)
 
-    # LLM Client
+    # LLM Manager
     try:
-        llm = create_llm_client(config.ai)
-    except RuntimeError as e:
-        logger.error("LLM provider error: %s", e)
+        llm_manager = LLMManager(config.ai_profiles, config.active_ai_profile)
+    except (RuntimeError, ValueError) as e:
+        logger.error("LLM manager error: %s", e)
         sys.exit(1)
 
     # Command Sandbox
@@ -126,7 +125,8 @@ def main() -> None:
 
     # AI Agent
     agent = Agent(
-        llm=llm,
+        llm=None,
+        llm_manager=llm_manager,
         sandbox=sandbox,
         config=config.agent,
         runtime_environment_context=runtime_environment_context,

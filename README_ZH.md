@@ -133,12 +133,11 @@ python3 -m pip install -e .
 
 # 必需
 export CHATDOME_BOT_TOKEN="your-telegram-bot-token"
-export CHATDOME_AI_API_KEY="your-openai-api-key"
 
 # 可选
 export CHATDOME_ALLOWED_CHAT_IDS="123456789"                # Telegram Chat ID 访问控制
-export CHATDOME_AI_BASE_URL="https://api.openai.com/v1"     # LLM API 地址
-export CHATDOME_AI_MODEL="gpt-4o"                           # LLM 模型名称
+export CHATDOME_OPENAI_API_KEY="your-openai-api-key"        # 被 config.yaml 的 ai_profiles 引用
+export DEEPSEEK_API_KEY="your-deepseek-api-key"             # 可选 profile key
 export CHATDOME_SENTINEL_ENABLED="true"                     # 开启 7×24 哨兵监控模式
 export CHATDOME_ALLOW_GENERATED_COMMANDS="true"             # 允许 AI 自主生成并执行命令
 export CHATDOME_ALLOW_UNRESTRICTED_COMMANDS="true"          # 开启完全开放权限模式（God Mode）
@@ -192,9 +191,8 @@ https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 
 | 变量名 | 必需 | 说明 |
 |--------|------|------|
-| `CHATDOME_AI_API_KEY` | ✅ | OpenAI 兼容的 API Key |
-| `CHATDOME_AI_BASE_URL` | ❌ | API 地址（默认: `https://api.openai.com/v1`） |
-| `CHATDOME_AI_MODEL` | ❌ | 模型名称（默认: `gpt-4o`） |
+| `CHATDOME_OPENAI_API_KEY` | 取决于 profile | 被 `api_key: "env:CHATDOME_OPENAI_API_KEY"` 引用的 API Key |
+| `DEEPSEEK_API_KEY` | 取决于 profile | DeepSeek 示例 profile 引用的 API Key |
 
 **通用：**
 
@@ -232,10 +230,24 @@ chatdome:
   telegram:
     max_message_length: 4000
 
-  ai:
-    model: "gpt-4o"
-    temperature: 0.1
-    max_tokens: 2000
+  active_ai_profile: "codex-gpt5"
+
+  ai_profiles:
+    codex-gpt5:
+      provider: "codex"
+      api_mode: "codex_responses"
+      model: "gpt-5.5"
+      temperature: 0.1
+      max_tokens: 2000
+
+    openai-official:
+      provider: "openai"
+      api_mode: "openai_api"
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-4o"
+      temperature: 0.1
+      max_tokens: 2000
+      api_key: "env:CHATDOME_OPENAI_API_KEY"
 
   agent:
     allow_generated_commands: true            # true = 允许 AI 生成临场命令

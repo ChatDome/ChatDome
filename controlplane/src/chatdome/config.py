@@ -1,31 +1,24 @@
 """
 Configuration loader.
 
-Sensitive parameters (bot_token, api_key) are loaded EXCLUSIVELY from
-environment variables — they must never be stored in local files.
-
-Non-sensitive parameters (model, timeout, etc.) are loaded from a YAML
-config file with optional environment variable override support.
+Runtime configuration is loaded from YAML plus a small set of operational
+environment variables. LLM credentials are referenced from YAML with
+``api_key: "env:ENV_NAME"`` and resolved by LLMManager when a profile is used.
 
 Environment variables:
-  CHATDOME_BOT_TOKEN        — Telegram Bot token  (required)
-  CHATDOME_AI_API_KEY       — LLM API key         (required for API mode)
-  CHATDOME_AI_PROVIDER      — LLM provider id     (optional)
-  CHATDOME_AI_API_MODE      — LLM adapter mode    (optional)
-  CHATDOME_AI_BASE_URL      – LLM API base URL    (optional)
-  CHATDOME_AI_MODEL         — LLM model name      (optional)
-  CHATDOME_CODEX_COMMAND    — Codex CLI command   (optional)
-  CHATDOME_ALLOWED_CHAT_IDS – Comma-separated chat IDs (optional)
-  CHATDOME_PENDING_APPROVAL_TIMEOUT – Pending approval timeout in seconds (optional)
-  CHATDOME_PERSISTED_SESSION_TTL – Persisted session retention in seconds (optional)
-  CHATDOME_SENTINEL_ALERT_RETENTION_DAYS – Sentinel alert log retention days (optional)
-  CHATDOME_CONFIG           – Path to config.yaml (optional)
+  CHATDOME_BOT_TOKEN        - Telegram Bot token (required)
+  CHATDOME_ALLOWED_CHAT_IDS - Comma-separated chat IDs (optional)
+  CHATDOME_PENDING_APPROVAL_TIMEOUT - Pending approval timeout in seconds (optional)
+  CHATDOME_PERSISTED_SESSION_TTL - Persisted session retention in seconds (optional)
+  CHATDOME_SENTINEL_ALERT_RETENTION_DAYS - Sentinel alert log retention days (optional)
+  CHATDOME_CONFIG           - Path to config.yaml (optional)
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -49,7 +42,7 @@ class TelegramConfig:
 
 @dataclass
 class AIConfig:
-    """LLM API connection settings."""
+    """LLM profile connection settings."""
     provider: str = "openai"
     api_mode: str = "openai_api"
     base_url: str = "https://api.openai.com/v1"
@@ -67,32 +60,32 @@ class AgentConfig:
     """Agent behavior settings."""
     allow_generated_commands: bool = True
     allow_unrestricted_commands: bool = True
-    session_timeout: int = 600          # seconds
-    pending_approval_timeout: int = 86400  # seconds
-    persisted_session_ttl: int = 604800  # seconds (7 days)
+    session_timeout: int = 600
+    pending_approval_timeout: int = 86400
+    persisted_session_ttl: int = 604800
     max_rounds_per_turn: int = 10
     max_history_tokens: int = 16000
-    command_timeout: int = 10           # seconds
+    command_timeout: int = 10
     max_output_chars: int = 4000
 
 
 @dataclass
 class SentinelConfig:
-    """Sentinel 7×24 security monitoring configuration."""
+    """Sentinel 7x24 security monitoring configuration."""
     enabled: bool = False
     alert_chat_ids: list[int] = field(default_factory=list)
-    alert_retention_days: int = 30                              # sentinel_alerts.jsonl retention window
-    push_min_severity: int = 7                                  # ≥ 7 (high) pushes to Telegram
+    alert_retention_days: int = 30
+    push_min_severity: int = 7
     builtin_packs: list[str] = field(default_factory=lambda: [
         "ssh_auth", "network", "system_resources", "processes_services", "logs",
     ])
     custom_packs_dir: str = ""
-    global_rate_limit: int = 10                                 # max pushes per window
-    global_rate_window: int = 300                               # rate window (seconds)
-    learning_rounds: int = 1                                    # cold-start silent rounds
-    aggregation_window: int = 10                                # Phase 2
+    global_rate_limit: int = 10
+    global_rate_window: int = 300
+    learning_rounds: int = 1
+    aggregation_window: int = 10
     daily_report: bool = True
-    daily_report_time: str = "09:00"                            # UTC
+    daily_report_time: str = "09:00"
     ai_analysis_min_severity: int = 7
     checks: list[dict] = field(default_factory=list)
 
@@ -101,7 +94,8 @@ class SentinelConfig:
 class ChatDomeConfig:
     """Root configuration object."""
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
-    ai: AIConfig = field(default_factory=AIConfig)
+    active_ai_profile: str = ""
+    ai_profiles: dict[str, AIConfig] = field(default_factory=dict)
     agent: AgentConfig = field(default_factory=AgentConfig)
     sentinel: SentinelConfig = field(default_factory=SentinelConfig)
 
@@ -110,10 +104,15 @@ class ChatDomeConfig:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _dict_to_dataclass(cls, data: dict) -> Any:
+PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def _dict_to_dataclass(cls, data: dict | None) -> Any:
     """Map a dict to a dataclass, ignoring unknown keys."""
     if data is None:
         return cls()
+    if not isinstance(data, dict):
+        raise ValueError(f"{cls.__name__} configuration must be a mapping.")
     field_names = {f.name for f in cls.__dataclass_fields__.values()}
     filtered = {k: v for k, v in data.items() if k in field_names}
     return cls(**filtered)
@@ -158,6 +157,84 @@ def _normalize_api_mode(raw: str) -> str:
     return aliases[value]
 
 
+def _validate_profile_name(name: str) -> str:
+    value = str(name or "").strip()
+    if not PROFILE_NAME_PATTERN.match(value):
+        raise ValueError(
+            f"Invalid AI profile name: {name!r}. Use 1-64 letters, numbers, '.', '_' or '-'."
+        )
+    return value
+
+
+def _is_env_key_ref(raw: str) -> bool:
+    value = str(raw or "").strip()
+    return value.startswith("env:") and bool(value[4:].strip())
+
+
+def _normalize_ai_profile(name: str, raw: dict[str, Any]) -> AIConfig:
+    if not isinstance(raw, dict):
+        raise ValueError(f"AI profile {name!r} must be a mapping.")
+
+    profile = _dict_to_dataclass(AIConfig, raw)
+    profile.provider = (profile.provider or "openai").strip().lower()
+    profile.api_mode = _normalize_api_mode(profile.api_mode)
+
+    if profile.provider in {"codex", "codex_cli", "openai-codex", "openai_codex"}:
+        profile.provider = "codex"
+        if profile.api_mode == "openai_api":
+            profile.api_mode = "codex_responses"
+
+    if profile.api_mode == "codex_responses":
+        profile.provider = "codex"
+
+    profile.api_key = str(profile.api_key or "").strip()
+    if profile.api_key and not _is_env_key_ref(profile.api_key):
+        raise ValueError(
+            f"AI profile {name!r} api_key must use env:<ENV_NAME>; plaintext keys are not allowed."
+        )
+
+    if profile.api_mode == "openai_api" and not _is_env_key_ref(profile.api_key):
+        raise ValueError(
+            f"AI profile {name!r} requires api_key: \"env:<ENV_NAME>\"."
+        )
+
+    profile.base_url = str(profile.base_url or "https://api.openai.com/v1").strip()
+    profile.model = str(profile.model or "gpt-4o").strip()
+    profile.codex_client_id = str(profile.codex_client_id or "").strip()
+    profile.codex_token_file = str(profile.codex_token_file or "").strip()
+    profile.codex_base_url = str(
+        profile.codex_base_url or "https://chatgpt.com/backend-api/codex"
+    ).strip()
+    return profile
+
+
+def _load_ai_profiles(yaml_data: dict[str, Any]) -> tuple[str, dict[str, AIConfig]]:
+    if "ai" in yaml_data:
+        raise ValueError(
+            "Legacy chatdome.ai is no longer supported. "
+            "Use chatdome.active_ai_profile and chatdome.ai_profiles."
+        )
+
+    active = str(yaml_data.get("active_ai_profile") or "").strip()
+    if not active:
+        raise ValueError("chatdome.active_ai_profile is required.")
+
+    raw_profiles = yaml_data.get("ai_profiles")
+    if not isinstance(raw_profiles, dict) or not raw_profiles:
+        raise ValueError("chatdome.ai_profiles must contain at least one profile.")
+
+    profiles: dict[str, AIConfig] = {}
+    for raw_name, raw_profile in raw_profiles.items():
+        name = _validate_profile_name(str(raw_name))
+        profiles[name] = _normalize_ai_profile(name, raw_profile)
+
+    if active not in profiles:
+        raise ValueError(
+            f"chatdome.active_ai_profile {active!r} does not exist in chatdome.ai_profiles."
+        )
+    return active, profiles
+
+
 # ---------------------------------------------------------------------------
 # Loader
 # ---------------------------------------------------------------------------
@@ -166,107 +243,59 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     """
     Load ChatDome configuration.
 
-    Sensitive parameters are read from environment variables ONLY.
-    Non-sensitive parameters are read from a YAML config file.
-
     Config file lookup order:
       1. Explicit ``config_path`` argument
       2. ``CHATDOME_CONFIG`` environment variable
       3. ``./config.yaml`` in the current working directory
-
-    If no config file is found, default values are used for all
-    non-sensitive parameters.
     """
 
-    # ── Load YAML config (non-sensitive settings) ──
     if config_path is None:
         config_path = os.environ.get("CHATDOME_CONFIG", "config.yaml")
 
     path = Path(config_path)
-    yaml_data: dict = {}
+    yaml_data: dict[str, Any] = {}
 
     if path.is_file():
         logger.info("Loading configuration from %s", path.resolve())
         with open(path, "r", encoding="utf-8") as fh:
             raw = yaml.safe_load(fh)
         if raw and "chatdome" in raw:
-            yaml_data = raw["chatdome"]
+            yaml_data = raw["chatdome"] or {}
     else:
         logger.info(
             "No config file found at %s, using defaults + environment variables",
             path.resolve(),
         )
 
-    # Build config from YAML (non-sensitive fields only)
+    if not isinstance(yaml_data, dict):
+        raise ValueError("chatdome configuration must be a mapping.")
+
+    active_ai_profile, ai_profiles = _load_ai_profiles(yaml_data)
+
     config = ChatDomeConfig(
         telegram=_dict_to_dataclass(TelegramConfig, yaml_data.get("telegram")),
-        ai=_dict_to_dataclass(AIConfig, yaml_data.get("ai")),
+        active_ai_profile=active_ai_profile,
+        ai_profiles=ai_profiles,
         agent=_dict_to_dataclass(AgentConfig, yaml_data.get("agent")),
         sentinel=_dict_to_dataclass(SentinelConfig, yaml_data.get("sentinel")),
     )
 
-    # ── Override with environment variables (sensitive + optional) ──
-
-    # Required: Telegram Bot Token
     bot_token = os.environ.get("CHATDOME_BOT_TOKEN", "")
     if bot_token:
         config.telegram.bot_token = bot_token
 
-    # Required: AI API Key
-    api_key = os.environ.get("CHATDOME_AI_API_KEY", "")
-    if api_key:
-        config.ai.api_key = api_key
-
-    # Optional: AI Provider
-    provider = os.environ.get("CHATDOME_AI_PROVIDER", "")
-    if provider:
-        config.ai.provider = provider
-
-    # Optional: AI API Mode
-    api_mode = os.environ.get("CHATDOME_AI_API_MODE", "")
-    if api_mode:
-        config.ai.api_mode = api_mode
-
-    # Optional: AI Base URL
-    base_url = os.environ.get("CHATDOME_AI_BASE_URL", "")
-    if base_url:
-        config.ai.base_url = base_url
-
-    # Optional: AI Model
-    model = os.environ.get("CHATDOME_AI_MODEL", "")
-    if model:
-        config.ai.model = model
-
-
-
-    codex_client_id = os.environ.get("CHATDOME_CODEX_CLIENT_ID", "")
-    if codex_client_id:
-        config.ai.codex_client_id = codex_client_id
-
-    codex_token_file = os.environ.get("CHATDOME_CODEX_TOKEN_FILE", "")
-    if codex_token_file:
-        config.ai.codex_token_file = codex_token_file
-
-    codex_base_url_env = os.environ.get("CHATDOME_CODEX_BASE_URL", "")
-    if codex_base_url_env:
-        config.ai.codex_base_url = codex_base_url_env
-
-    # Optional: Allowed Chat IDs (comma-separated)
     chat_ids_env = os.environ.get("CHATDOME_ALLOWED_CHAT_IDS", "")
     if chat_ids_env:
         config.telegram.allowed_chat_ids = _parse_chat_ids(chat_ids_env)
-        
-    # Optional: Allow Generated Commands
+
     allow_gen_env = os.environ.get("CHATDOME_ALLOW_GENERATED_COMMANDS", "")
     if allow_gen_env:
-        config.agent.allow_generated_commands = allow_gen_env.lower() in ("true", "1", "yes", "on")
+        config.agent.allow_generated_commands = _parse_bool_env(allow_gen_env)
 
-    # Optional: Allow Unrestricted Commands (bypasses ALL validation)
     allow_unrestricted_env = os.environ.get("CHATDOME_ALLOW_UNRESTRICTED_COMMANDS", "")
     if allow_unrestricted_env:
-        config.agent.allow_unrestricted_commands = allow_unrestricted_env.lower() in ("true", "1", "yes", "on")
+        config.agent.allow_unrestricted_commands = _parse_bool_env(allow_unrestricted_env)
 
-    # Optional: Pending Approval Timeout (seconds)
     pending_timeout_env = os.environ.get("CHATDOME_PENDING_APPROVAL_TIMEOUT", "")
     if pending_timeout_env:
         try:
@@ -274,11 +303,13 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
             if parsed_timeout > 0:
                 config.agent.pending_approval_timeout = parsed_timeout
             else:
-                logger.warning("CHATDOME_PENDING_APPROVAL_TIMEOUT must be > 0, ignored: %s", pending_timeout_env)
+                logger.warning(
+                    "CHATDOME_PENDING_APPROVAL_TIMEOUT must be > 0, ignored: %s",
+                    pending_timeout_env,
+                )
         except ValueError:
             logger.warning("Invalid CHATDOME_PENDING_APPROVAL_TIMEOUT ignored: %s", pending_timeout_env)
 
-    # Optional: Persisted Session TTL (seconds)
     persisted_ttl_env = os.environ.get("CHATDOME_PERSISTED_SESSION_TTL", "")
     if persisted_ttl_env:
         try:
@@ -286,16 +317,17 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
             if parsed_ttl >= 0:
                 config.agent.persisted_session_ttl = parsed_ttl
             else:
-                logger.warning("CHATDOME_PERSISTED_SESSION_TTL must be >= 0, ignored: %s", persisted_ttl_env)
+                logger.warning(
+                    "CHATDOME_PERSISTED_SESSION_TTL must be >= 0, ignored: %s",
+                    persisted_ttl_env,
+                )
         except ValueError:
             logger.warning("Invalid CHATDOME_PERSISTED_SESSION_TTL ignored: %s", persisted_ttl_env)
 
-    # Optional: Sentinel Enable Toggle
     sentinel_enabled_env = os.environ.get("CHATDOME_SENTINEL_ENABLED", "")
     if sentinel_enabled_env:
-        config.sentinel.enabled = sentinel_enabled_env.lower() in ("true", "1", "yes", "on")
+        config.sentinel.enabled = _parse_bool_env(sentinel_enabled_env)
 
-    # Optional: Sentinel alert retention days
     sentinel_retention_env = os.environ.get("CHATDOME_SENTINEL_ALERT_RETENTION_DAYS", "")
     if sentinel_retention_env:
         try:
@@ -313,25 +345,12 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
                 sentinel_retention_env,
             )
 
-    # Actionable guardrail: enabled sentinel without checks is a no-op.
     if config.sentinel.enabled and not config.sentinel.checks:
         logger.warning(
             "Sentinel is enabled but no checks are configured. "
             "Define chatdome.sentinel.checks in config.yaml (copy config.example.yaml as a base), "
             "or provide CHATDOME_CONFIG pointing to that file.",
         )
-
-    # ── Validation ──
-
-    config.ai.provider = (config.ai.provider or "openai").strip().lower()
-    config.ai.api_mode = _normalize_api_mode(config.ai.api_mode)
-    if config.ai.provider in {"codex", "codex_cli", "openai-codex", "openai_codex"}:
-        config.ai.provider = "codex"
-        if config.ai.api_mode == "openai_api":
-            config.ai.api_mode = "codex_responses"
-
-    if config.ai.api_mode == "codex_responses":
-        config.ai.provider = "codex"
 
     if not config.telegram.bot_token:
         raise ValueError(
@@ -340,18 +359,15 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
             "  export CHATDOME_BOT_TOKEN=\"your-telegram-bot-token\""
         )
 
-    if config.ai.api_mode == "openai_api" and not config.ai.api_key:
-        raise ValueError(
-            "AI API Key is not configured.\n"
-            "Set the CHATDOME_AI_API_KEY environment variable:\n"
-            "  export CHATDOME_AI_API_KEY=\"your-api-key\""
-        )
-
+    active_profile = config.ai_profiles[config.active_ai_profile]
     logger.info(
-        "Configuration loaded: provider=%s, api_mode=%s, model=%s, allowed_chats=%s",
-        config.ai.provider,
-        config.ai.api_mode,
-        config.ai.model,
+        "Configuration loaded: active_ai_profile=%s, provider=%s, api_mode=%s, model=%s, profile_count=%d, allowed_chats=%s",
+        config.active_ai_profile,
+        active_profile.provider,
+        active_profile.api_mode,
+        active_profile.model,
+        len(config.ai_profiles),
         config.telegram.allowed_chat_ids,
     )
     return config
+

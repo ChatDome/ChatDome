@@ -66,6 +66,8 @@ HELP_TEXT = """\
 /sentinel\\_packs \\- 查看已加载的命令包
 /sentinel\\_mute \\[时长\\] \\- 暂停 Sentinel 告警推送
 /sentinel\\_resume \\- 恢复 Sentinel 告警推送
+/llm \\[profile\\] \\- 查看或切换当前 LLM profile
+/llm\\_list \\- 查看所有 LLM profiles
 /codex\\_login \\- 触发 OpenAI Codex OAuth 设备码认证流程
 
 _直接发送你的问题即可，无需命令前缀。_
@@ -158,6 +160,8 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("sentinel_mute", self._handle_sentinel_mute))
         self._app.add_handler(CommandHandler("sentinel_resume", self._handle_sentinel_resume))
         self._app.add_handler(CommandHandler("engram", self._handle_engram))
+        self._app.add_handler(CommandHandler("llm", self._handle_llm))
+        self._app.add_handler(CommandHandler("llm_list", self._handle_llm_list))
         self._app.add_handler(CommandHandler("codex_login", self._handle_codex_login))
         self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self._app.add_handler(
@@ -637,6 +641,113 @@ class TelegramBot:
         
         await self._send_text(update, "\n".join(lines))
 
+    def _get_llm_manager(self):
+        return getattr(self.agent, "llm_manager", None)
+
+    def _format_llm_profile_list(self) -> str:
+        manager = self._get_llm_manager()
+        if manager is None:
+            return "LLMManager 未启用。"
+
+        lines = ["当前 LLM profiles:", ""]
+        for item in manager.list_profiles():
+            marker = "*" if item.active else " "
+            line = (
+                f"{marker} {item.name} | {item.provider}/{item.api_mode} | "
+                f"model={item.model} | status={item.status}"
+            )
+            if item.key_ref:
+                line += f" | key={item.key_ref}"
+            lines.append(line)
+        lines.append("")
+        lines.append("切换: /llm <profile_name>")
+        return "\n".join(lines)
+
+    async def _handle_llm_list(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /llm_list command."""
+        if not self._check_auth(update):
+            return
+        await self._send_long_message(update.message, self._format_llm_profile_list())
+
+    async def _handle_llm(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /llm command."""
+        if not self._check_auth(update):
+            return
+
+        manager = self._get_llm_manager()
+        if manager is None:
+            await update.message.reply_text("LLMManager 未启用，无法切换模型。")
+            return
+
+        args = getattr(context, "args", []) or []
+        if not args:
+            await self._send_long_message(update.message, self._format_llm_profile_list())
+            return
+
+        profile_name = str(args[0]).strip()
+        old_profile = manager.get_active_profile_name()
+        try:
+            snapshot = await manager.switch_profile(profile_name)
+        except Exception as e:
+            logger.warning("LLM profile switch failed: %s", e)
+            await update.message.reply_text(f"❌ LLM profile 切换失败: {e}")
+            return
+
+        try:
+            from chatdome.agent.audit import CommandAuditTracker
+
+            CommandAuditTracker.record_event(
+                "llm_profile_switched",
+                chat_id=update.effective_chat.id if update.effective_chat else 0,
+                old_profile=old_profile,
+                new_profile=snapshot.profile_name,
+                user_id=update.effective_user.id if update.effective_user else 0,
+            )
+        except Exception:
+            logger.exception("Failed to record LLM profile switch event")
+
+        await update.message.reply_text(
+            "✅ 已切换 LLM profile: "
+            f"{snapshot.profile_name} ({snapshot.profile.provider}/{snapshot.profile.api_mode}, "
+            f"model={snapshot.profile.model})"
+        )
+
+    def _resolve_codex_login_profile(self, requested_profile: str = "") -> tuple[str, Any]:
+        profiles = self.config.ai_profiles
+        requested = str(requested_profile or "").strip()
+
+        if requested:
+            profile = profiles.get(requested)
+            if profile is None:
+                raise ValueError(f"未知 LLM profile: {requested}")
+            if profile.api_mode != "codex_responses":
+                raise ValueError(f"profile {requested} 不是 Codex OAuth profile。")
+            return requested, profile
+
+        manager = self._get_llm_manager()
+        active_name = manager.get_active_profile_name() if manager else self.config.active_ai_profile
+        active_profile = profiles.get(active_name)
+        if active_profile and active_profile.api_mode == "codex_responses":
+            return active_name, active_profile
+
+        codex_profiles = [
+            (name, profile)
+            for name, profile in profiles.items()
+            if profile.api_mode == "codex_responses"
+        ]
+        if len(codex_profiles) == 1:
+            return codex_profiles[0]
+
+        names = ", ".join(name for name, _ in codex_profiles) or "(none)"
+        raise ValueError(
+            "当前 active profile 不是 Codex。请使用 /codex_login <profile_name> 指定 Codex profile。"
+            f"可用 Codex profiles: {names}"
+        )
+
     async def _handle_codex_login(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -646,10 +757,18 @@ class TelegramBot:
 
         chat_id = update.effective_chat.id
         from chatdome.llm.codex_auth import CodexOAuth
+
+        try:
+            profile_name, profile = self._resolve_codex_login_profile(
+                (getattr(context, "args", []) or [""])[0]
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ 无法启动 Codex 认证: {e}")
+            return
         
         oauth = CodexOAuth(
-            client_id=self.config.ai.codex_client_id,
-            token_file=self.config.ai.codex_token_file
+            client_id=profile.codex_client_id or None,
+            token_file=profile.codex_token_file or None,
         )
         
         try:
@@ -669,6 +788,7 @@ class TelegramBot:
 
         msg_text = (
             "🔐 *OpenAI Codex 认证授权*\n\n"
+            f"Profile: `{profile_name}`\n\n"
             f"请在浏览器中打开链接进行授权：\n"
             f"{verification_uri}\n\n"
             f"输入以下临时验证码：\n"
@@ -692,7 +812,10 @@ class TelegramBot:
                 await self._send_bot_text(
                     bot=context.bot,
                     chat_id=chat_id,
-                    text="✅ *Codex 认证成功！*\n授权令牌已安全写入本地 `auth.json`，现已可直连 Codex 后端服务。",
+                    text=(
+                        "✅ *Codex 认证成功！*\n"
+                        f"Profile `{profile_name}` 的授权令牌已安全写入本地 `auth.json`，现已可直连 Codex 后端服务。"
+                    ),
                     markup=MessageMarkup.TELEGRAM_MARKDOWN
                 )
             except asyncio.CancelledError:
@@ -894,6 +1017,16 @@ class TelegramBot:
             kwargs["reply_markup"] = reply_markup
         await message.reply_text(rendered.text, **kwargs)
 
+    async def _send_text(
+        self,
+        update: Update,
+        text: str,
+        *,
+        markup: MessageMarkup = MessageMarkup.TELEGRAM_MARKDOWN,
+    ) -> None:
+        """Compatibility helper for command handlers that reply to an update."""
+        await self._send_long_message(update.message, text, markup=markup)
+
     async def _send_bot_text(
         self,
         bot,
@@ -1007,8 +1140,9 @@ class TelegramBot:
                     ),
                 },
             ]
+            snapshot = await self.agent.get_active_llm_snapshot()
             response = await asyncio.wait_for(
-                self.agent.llm.chat_completion(messages=messages, tools=None),
+                snapshot.client.chat_completion(messages=messages, tools=None),
                 timeout=90,
             )
 
@@ -1016,7 +1150,7 @@ class TelegramBot:
                 from chatdome.agent.tracker import TokenTracker
                 TokenTracker.record_usage(
                     chat_id=chat_id,
-                    model=self.agent.llm.model,
+                    model=getattr(snapshot.client, "model", "unknown"),
                     action="sentinel_alert_analysis",
                     prompt_tokens=response.prompt_tokens,
                     completion_tokens=response.completion_tokens,
