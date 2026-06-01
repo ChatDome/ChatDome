@@ -147,6 +147,8 @@ class CodexResponsesClientTests(unittest.TestCase):
         self.assertEqual(kwargs["store"], False)
         self.assertEqual(kwargs["stream"], True)
         self.assertEqual(kwargs["input"], [{"type": "message", "role": "user", "content": "hi"}])
+        self.assertNotIn("max_output_tokens", kwargs)
+        self.assertNotIn("temperature", kwargs)
 
     def test_chat_completion_stream_completed_event(self):
         asyncio.run(self._run_chat_completion_stream_completed_event())

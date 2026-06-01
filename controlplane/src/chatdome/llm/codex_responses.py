@@ -247,12 +247,9 @@ class CodexResponsesClient(LLMClient):
             kwargs["tools"] = converted_tools
             kwargs["tool_choice"] = "auto"
             
-        # Map temperature and max_tokens (in Responses API, it is max_output_tokens)
-        temp_val = self.temperature if temperature is None else temperature
-        kwargs["temperature"] = temp_val
-        
-        max_tok = self.max_tokens if max_tokens is None else max_tokens
-        kwargs["max_output_tokens"] = max_tok
+        # Codex backend supports a narrower Responses payload than the public
+        # OpenAI Responses API. Do not send temperature/max_output_tokens here:
+        # the backend rejects unsupported request parameters with HTTP 400.
         
         # Disable storing the response on OpenAI servers by default
         kwargs["store"] = False
