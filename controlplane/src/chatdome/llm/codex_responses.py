@@ -186,6 +186,54 @@ class CodexResponsesClient(LLMClient):
             return event.get(key, default)
         return getattr(event, key, default)
 
+    @staticmethod
+    def _has_response_payload(response: LLMResponse) -> bool:
+        """Return True when the parsed response has model-visible output."""
+        return bool(response.content or response.tool_calls)
+
+    @staticmethod
+    def _item_type(item: Any) -> str:
+        """Return an output item type without logging the item's content."""
+        if isinstance(item, dict):
+            return str(item.get("type") or "<missing>")
+        return str(getattr(item, "type", None) or "<missing>")
+
+    def _log_stream_summary(
+        self,
+        *,
+        event_counts: dict[str, int],
+        delta_chars: int,
+        done_text_chars: int,
+        done_output_items: list[Any],
+        completed_output_len: int | None,
+        final_source: str,
+        empty: bool,
+    ) -> None:
+        """
+        Log Codex stream shape without sensitive payload content.
+
+        DEBUG keeps normal logs quiet. If parsing produced no visible output,
+        WARNING exposes enough metadata to diagnose backend event-shape changes.
+        """
+        item_type_counts: dict[str, int] = {}
+        for item in done_output_items:
+            item_type = self._item_type(item)
+            item_type_counts[item_type] = item_type_counts.get(item_type, 0) + 1
+
+        log_fn = logger.warning if empty else logger.debug
+        log_fn(
+            "Codex stream summary: event_counts=%s delta_chars=%d done_text_chars=%d "
+            "done_output_items=%d done_output_item_types=%s completed_output_len=%s final_source=%s empty=%s",
+            event_counts,
+            delta_chars,
+            done_text_chars,
+            len(done_output_items),
+            item_type_counts,
+            completed_output_len,
+            final_source,
+            empty,
+        )
+
     async def _parse_streaming_response(self, stream: Any) -> LLMResponse:
         """
         Consume a Responses streaming result and map it to LLMResponse.
@@ -199,31 +247,107 @@ class CodexResponsesClient(LLMClient):
 
         completed_response: Any | None = None
         text_parts: list[str] = []
+        done_text_parts: list[str] = []
+        done_output_items: list[Any] = []
+        event_counts: dict[str, int] = {}
+        delta_chars = 0
+        done_text_chars = 0
 
         async for event in stream:
             event_type = self._event_value(event, "type", "")
+            event_counts[event_type or "<missing>"] = event_counts.get(event_type or "<missing>", 0) + 1
             if event_type == "response.completed":
                 completed_response = self._event_value(event, "response")
             elif event_type == "response.output_text.delta":
                 delta = self._event_value(event, "delta", "")
                 if delta:
-                    text_parts.append(str(delta))
+                    delta_text = str(delta)
+                    delta_chars += len(delta_text)
+                    text_parts.append(delta_text)
+            elif event_type == "response.output_text.done":
+                text = self._event_value(event, "text", "")
+                if text:
+                    done_text = str(text)
+                    done_text_chars += len(done_text)
+                    done_text_parts.append(done_text)
+            elif event_type == "response.output_item.done":
+                item = self._event_value(event, "item") or self._event_value(event, "output_item")
+                if item is not None:
+                    done_output_items.append(item)
             elif event_type in {"response.failed", "error"}:
                 error = self._event_value(event, "error", None)
                 raise RuntimeError(f"Codex streaming response failed: {error or event}")
 
+        streamed_text = "".join(text_parts) if text_parts else "".join(done_text_parts)
+        streamed_response = (
+            self._parse_responses_output({"output": done_output_items})
+            if done_output_items
+            else LLMResponse()
+        )
+        if streamed_text and not streamed_response.content:
+            streamed_response.content = streamed_text
+
+        completed_output = (
+            self._event_value(completed_response, "output", None)
+            if completed_response is not None
+            else None
+        )
+        completed_output_len = len(completed_output) if isinstance(completed_output, list) else None
+
         if completed_response is not None:
-            return self._parse_responses_output(completed_response)
+            completed_parsed = self._parse_responses_output(completed_response)
+            if self._has_response_payload(completed_parsed):
+                self._log_stream_summary(
+                    event_counts=event_counts,
+                    delta_chars=delta_chars,
+                    done_text_chars=done_text_chars,
+                    done_output_items=done_output_items,
+                    completed_output_len=completed_output_len,
+                    final_source="completed",
+                    empty=False,
+                )
+                return completed_parsed
+
+            # Codex can complete with an empty output array while the stream
+            # already delivered text/output_item events. In that case, keep the
+            # streamed payload and only borrow token usage from the final event.
+            if self._has_response_payload(streamed_response):
+                streamed_response.prompt_tokens = completed_parsed.prompt_tokens
+                streamed_response.completion_tokens = completed_parsed.completion_tokens
+                streamed_response.total_tokens = completed_parsed.total_tokens
+                self._log_stream_summary(
+                    event_counts=event_counts,
+                    delta_chars=delta_chars,
+                    done_text_chars=done_text_chars,
+                    done_output_items=done_output_items,
+                    completed_output_len=completed_output_len,
+                    final_source="streamed_fallback",
+                    empty=False,
+                )
+                return streamed_response
+
+            self._log_stream_summary(
+                event_counts=event_counts,
+                delta_chars=delta_chars,
+                done_text_chars=done_text_chars,
+                done_output_items=done_output_items,
+                completed_output_len=completed_output_len,
+                final_source="completed_empty",
+                empty=True,
+            )
+            return completed_parsed
 
         # Fallback for minimal streams that only carry text deltas.
-        content = "".join(text_parts) if text_parts else None
-        return LLMResponse(
-            content=content,
-            tool_calls=[],
-            prompt_tokens=0,
-            completion_tokens=0,
-            total_tokens=0,
+        self._log_stream_summary(
+            event_counts=event_counts,
+            delta_chars=delta_chars,
+            done_text_chars=done_text_chars,
+            done_output_items=done_output_items,
+            completed_output_len=completed_output_len,
+            final_source="streamed_without_completed",
+            empty=not self._has_response_payload(streamed_response),
         )
+        return streamed_response
 
     async def chat_completion(
         self,

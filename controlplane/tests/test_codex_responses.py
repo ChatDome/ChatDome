@@ -245,6 +245,101 @@ class CodexResponsesClientTests(unittest.TestCase):
         self.assertEqual(res.completion_tokens, 4)
         self.assertEqual(res.total_tokens, 7)
 
+    def test_chat_completion_stream_falls_back_to_text_delta_when_completed_output_is_empty(self):
+        asyncio.run(self._run_chat_completion_stream_falls_back_to_text_delta_when_completed_output_is_empty())
+
+    async def _run_chat_completion_stream_falls_back_to_text_delta_when_completed_output_is_empty(self):
+        empty_completed = SimpleNamespace(
+            output=[],
+            usage=SimpleNamespace(input_tokens=2, output_tokens=3, total_tokens=5),
+        )
+
+        async def mock_stream():
+            yield SimpleNamespace(type="response.output_text.delta", delta="Hello")
+            yield SimpleNamespace(type="response.output_text.delta", delta=" there")
+            yield SimpleNamespace(type="response.completed", response=empty_completed)
+
+        mock_client = MagicMock()
+        mock_client.responses.create = AsyncMock(return_value=mock_stream())
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            messages = [{"role": "user", "content": "hello"}]
+            res = await self.client.chat_completion(messages)
+
+        self.assertEqual(res.content, "Hello there")
+        self.assertEqual(res.prompt_tokens, 2)
+        self.assertEqual(res.completion_tokens, 3)
+        self.assertEqual(res.total_tokens, 5)
+
+    def test_empty_stream_logs_metadata_without_payload(self):
+        asyncio.run(self._run_empty_stream_logs_metadata_without_payload())
+
+    async def _run_empty_stream_logs_metadata_without_payload(self):
+        async def mock_stream():
+            yield SimpleNamespace(type="response.completed", response=SimpleNamespace(output=[]))
+
+        mock_client = MagicMock()
+        mock_client.responses.create = AsyncMock(return_value=mock_stream())
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            with self.assertLogs("chatdome.llm.codex_responses", level="WARNING") as logs:
+                messages = [{"role": "user", "content": "secret user input"}]
+                res = await self.client.chat_completion(messages)
+
+        self.assertIsNone(res.content)
+        self.assertEqual(res.tool_calls, [])
+        log_text = "\n".join(logs.output)
+        self.assertIn("event_counts={'response.completed': 1}", log_text)
+        self.assertIn("final_source=completed_empty", log_text)
+        self.assertIn("empty=True", log_text)
+        self.assertNotIn("secret user input", log_text)
+
+    def test_chat_completion_stream_falls_back_to_output_text_done(self):
+        asyncio.run(self._run_chat_completion_stream_falls_back_to_output_text_done())
+
+    async def _run_chat_completion_stream_falls_back_to_output_text_done(self):
+        async def mock_stream():
+            yield {"type": "response.output_text.done", "text": "done text"}
+            yield {"type": "response.completed", "response": {"output": []}}
+
+        mock_client = MagicMock()
+        mock_client.responses.create = AsyncMock(return_value=mock_stream())
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            messages = [{"role": "user", "content": "hello"}]
+            res = await self.client.chat_completion(messages)
+
+        self.assertEqual(res.content, "done text")
+
+    def test_chat_completion_stream_falls_back_to_output_item_done(self):
+        asyncio.run(self._run_chat_completion_stream_falls_back_to_output_item_done())
+
+    async def _run_chat_completion_stream_falls_back_to_output_item_done(self):
+        function_item = {
+            "type": "function_call",
+            "id": "fc_stream",
+            "call_id": "call_stream",
+            "name": "some_tool",
+            "arguments": {"param": 3},
+        }
+
+        async def mock_stream():
+            yield {"type": "response.output_item.done", "item": function_item}
+            yield {"type": "response.completed", "response": {"output": []}}
+
+        mock_client = MagicMock()
+        mock_client.responses.create = AsyncMock(return_value=mock_stream())
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            messages = [{"role": "user", "content": "use tool"}]
+            res = await self.client.chat_completion(messages)
+
+        self.assertIsNone(res.content)
+        self.assertEqual(len(res.tool_calls), 1)
+        self.assertEqual(res.tool_calls[0].id, "call_stream")
+        self.assertEqual(res.tool_calls[0].response_id, "fc_stream")
+        self.assertEqual(res.tool_calls[0].arguments, '{"param": 3}')
+
     def test_evaluate_command_safety(self):
         asyncio.run(self._run_evaluate_command_safety())
 
