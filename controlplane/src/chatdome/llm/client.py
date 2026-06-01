@@ -29,6 +29,7 @@ class ToolCall:
     id: str
     name: str
     arguments: str  # raw JSON string
+    response_id: str | None = None
 
 
 @dataclass

@@ -76,13 +76,16 @@ class CodexResponsesClient(LLMClient):
                         if not call_id:
                             logger.warning("Skipping Codex function_call without call_id/id in history.")
                             continue
-                        input_items.append({
+                        input_item = {
                             "type": "function_call",
-                            "id": tc.get("id"),
                             "call_id": call_id,
                             "name": fn.get("name"),
                             "arguments": args
-                        })
+                        }
+                        response_item_id = tc.get("id")
+                        if isinstance(response_item_id, str) and response_item_id.startswith("fc"):
+                            input_item["id"] = response_item_id
+                        input_items.append(input_item)
                 elif content:
                     input_items.append({
                         "type": "message",
@@ -158,7 +161,8 @@ class CodexResponsesClient(LLMClient):
                 tool_calls.append(ToolCall(
                     id=call_id,
                     name=name,
-                    arguments=arguments
+                    arguments=arguments,
+                    response_id=response_item_id,
                 ))
                 
         # Parse usage statistics

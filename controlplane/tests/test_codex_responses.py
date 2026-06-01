@@ -43,7 +43,8 @@ class CodexResponsesClientTests(unittest.TestCase):
                 "content": None,
                 "tool_calls": [
                     {
-                        "id": "call_1",
+                        "id": "fc_1",
+                        "call_id": "call_1",
                         "function": {"name": "run_cmd", "arguments": '{"cmd": "ls"}'},
                     }
                 ],
@@ -61,7 +62,7 @@ class CodexResponsesClientTests(unittest.TestCase):
         
         self.assertEqual(input_items[1], {
             "type": "function_call",
-            "id": "call_1",
+            "id": "fc_1",
             "call_id": "call_1",
             "name": "run_cmd",
             "arguments": '{"cmd": "ls"}',
@@ -119,6 +120,7 @@ class CodexResponsesClientTests(unittest.TestCase):
         self.assertEqual(res.content, "Hello back")
         self.assertEqual(len(res.tool_calls), 1)
         self.assertEqual(res.tool_calls[0].id, "call_99")
+        self.assertEqual(res.tool_calls[0].response_id, "fc_99")
         self.assertEqual(res.tool_calls[0].name, "some_tool")
         self.assertEqual(res.tool_calls[0].arguments, '{"param": 1}')
         self.assertEqual(res.prompt_tokens, 10)
@@ -143,6 +145,7 @@ class CodexResponsesClientTests(unittest.TestCase):
 
         self.assertEqual(len(res.tool_calls), 1)
         self.assertEqual(res.tool_calls[0].id, "call_dict")
+        self.assertEqual(res.tool_calls[0].response_id, "fc_dict")
         self.assertEqual(res.tool_calls[0].name, "some_tool")
         self.assertEqual(res.tool_calls[0].arguments, '{"param": 2}')
         self.assertEqual(res.prompt_tokens, 1)
@@ -159,6 +162,29 @@ class CodexResponsesClientTests(unittest.TestCase):
             _, input_items = self.client._convert_messages_to_input(messages)
 
         self.assertEqual(input_items, [{"type": "message", "role": "user", "content": "run"}])
+
+    def test_convert_messages_omits_invalid_function_call_response_id(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_legacy",
+                        "function": {"name": "run_cmd", "arguments": "{}"},
+                    }
+                ],
+            },
+        ]
+
+        _, input_items = self.client._convert_messages_to_input(messages)
+
+        self.assertEqual(input_items, [{
+            "type": "function_call",
+            "call_id": "call_legacy",
+            "name": "run_cmd",
+            "arguments": "{}",
+        }])
 
     def test_chat_completion_success(self):
         asyncio.run(self._run_chat_completion_success())

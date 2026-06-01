@@ -193,9 +193,12 @@ class Agent:
                         str(function.get("arguments", "") or ""),
                     )
                     tool_signature_order.append(signature)
-                    call_id = str(tc.get("id", "") or "")
+                    call_id = str(tc.get("call_id") or tc.get("id", "") or "")
                     if call_id:
                         call_id_to_signature[call_id] = signature
+                    response_id = str(tc.get("id", "") or "")
+                    if response_id:
+                        call_id_to_signature[response_id] = signature
                 continue
 
             if msg.get("role") == "tool":
@@ -814,12 +817,17 @@ class Agent:
                 # Build the assistant message with tool_calls for the session
                 tool_calls_for_session = [
                     {
-                        "id": tc.id,
+                        "id": getattr(tc, "response_id", None) or tc.id,
                         "type": "function",
                         "function": {
                             "name": tc.name,
                             "arguments": tc.arguments,
                         },
+                        **(
+                            {"call_id": tc.id}
+                            if getattr(tc, "response_id", None) and getattr(tc, "response_id", None) != tc.id
+                            else {}
+                        ),
                     }
                     for tc in response.tool_calls
                 ]
