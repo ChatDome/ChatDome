@@ -145,7 +145,35 @@ class CodexResponsesClientTests(unittest.TestCase):
         kwargs = mock_client.responses.create.call_args[1]
         self.assertEqual(kwargs["model"], "gpt-5.5")
         self.assertEqual(kwargs["store"], False)
+        self.assertEqual(kwargs["stream"], True)
         self.assertEqual(kwargs["input"], [{"type": "message", "role": "user", "content": "hi"}])
+
+    def test_chat_completion_stream_completed_event(self):
+        asyncio.run(self._run_chat_completion_stream_completed_event())
+
+    async def _run_chat_completion_stream_completed_event(self):
+        part_text = SimpleNamespace(type="output_text", text="streamed response")
+        msg_item = SimpleNamespace(type="message", content=[part_text])
+        mock_resp = SimpleNamespace(
+            output=[msg_item],
+            usage=SimpleNamespace(input_tokens=3, output_tokens=4, total_tokens=7),
+        )
+
+        async def mock_stream():
+            yield SimpleNamespace(type="response.output_text.delta", delta="ignored when completed exists")
+            yield SimpleNamespace(type="response.completed", response=mock_resp)
+
+        mock_client = MagicMock()
+        mock_client.responses.create = AsyncMock(return_value=mock_stream())
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            messages = [{"role": "user", "content": "hi"}]
+            res = await self.client.chat_completion(messages)
+
+        self.assertEqual(res.content, "streamed response")
+        self.assertEqual(res.prompt_tokens, 3)
+        self.assertEqual(res.completion_tokens, 4)
+        self.assertEqual(res.total_tokens, 7)
 
     def test_evaluate_command_safety(self):
         asyncio.run(self._run_evaluate_command_safety())

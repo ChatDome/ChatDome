@@ -157,6 +157,52 @@ class CodexResponsesClient(LLMClient):
             total_tokens=total_tokens
         )
 
+    @staticmethod
+    def _event_value(event: Any, key: str, default: Any = None) -> Any:
+        """Read a field from either SDK event objects or dict-like test doubles."""
+        if isinstance(event, dict):
+            return event.get(key, default)
+        return getattr(event, key, default)
+
+    async def _parse_streaming_response(self, stream: Any) -> LLMResponse:
+        """
+        Consume a Responses streaming result and map it to LLMResponse.
+
+        Codex backend requires streaming, but the final `response.completed`
+        event contains the same full response shape parsed by
+        `_parse_responses_output`, so that path remains the source of truth.
+        """
+        if not hasattr(stream, "__aiter__"):
+            return self._parse_responses_output(stream)
+
+        completed_response: Any | None = None
+        text_parts: list[str] = []
+
+        async for event in stream:
+            event_type = self._event_value(event, "type", "")
+            if event_type == "response.completed":
+                completed_response = self._event_value(event, "response")
+            elif event_type == "response.output_text.delta":
+                delta = self._event_value(event, "delta", "")
+                if delta:
+                    text_parts.append(str(delta))
+            elif event_type in {"response.failed", "error"}:
+                error = self._event_value(event, "error", None)
+                raise RuntimeError(f"Codex streaming response failed: {error or event}")
+
+        if completed_response is not None:
+            return self._parse_responses_output(completed_response)
+
+        # Fallback for minimal streams that only carry text deltas.
+        content = "".join(text_parts) if text_parts else None
+        return LLMResponse(
+            content=content,
+            tool_calls=[],
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+        )
+
     async def chat_completion(
         self,
         messages: list[dict[str, Any]],
@@ -194,6 +240,7 @@ class CodexResponsesClient(LLMClient):
             "model": self.model,
             "instructions": instructions,
             "input": input_items,
+            "stream": True,
         }
         
         if converted_tools:
@@ -214,9 +261,9 @@ class CodexResponsesClient(LLMClient):
         last_error: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                # SDK Call to responses.create
-                response = await client.responses.create(**kwargs)
-                return self._parse_responses_output(response)
+                # Codex backend requires streaming Responses requests.
+                response_stream = await client.responses.create(**kwargs)
+                return await self._parse_streaming_response(response_stream)
                 
             except openai.RateLimitError as e:
                 last_error = e
