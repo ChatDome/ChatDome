@@ -62,6 +62,7 @@ class CodexResponsesClientTests(unittest.TestCase):
         self.assertEqual(input_items[1], {
             "type": "function_call",
             "id": "call_1",
+            "call_id": "call_1",
             "name": "run_cmd",
             "arguments": '{"cmd": "ls"}',
         })
@@ -100,7 +101,13 @@ class CodexResponsesClientTests(unittest.TestCase):
         # Build mock response object using SimpleNamespace
         part_text = SimpleNamespace(type="output_text", text="Hello back")
         msg_item = SimpleNamespace(type="message", content=[part_text])
-        call_item = SimpleNamespace(type="function_call", id="call_99", name="some_tool", arguments={"param": 1})
+        call_item = SimpleNamespace(
+            type="function_call",
+            id="fc_99",
+            call_id="call_99",
+            name="some_tool",
+            arguments={"param": 1},
+        )
         
         mock_response = SimpleNamespace(
             output=[msg_item, call_item],
@@ -117,6 +124,41 @@ class CodexResponsesClientTests(unittest.TestCase):
         self.assertEqual(res.prompt_tokens, 10)
         self.assertEqual(res.completion_tokens, 20)
         self.assertEqual(res.total_tokens, 30)
+
+    def test_parse_dict_response_function_call_uses_call_id(self):
+        mock_response = {
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "fc_dict",
+                    "call_id": "call_dict",
+                    "name": "some_tool",
+                    "arguments": {"param": 2},
+                }
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        }
+
+        res = self.client._parse_responses_output(mock_response)
+
+        self.assertEqual(len(res.tool_calls), 1)
+        self.assertEqual(res.tool_calls[0].id, "call_dict")
+        self.assertEqual(res.tool_calls[0].name, "some_tool")
+        self.assertEqual(res.tool_calls[0].arguments, '{"param": 2}')
+        self.assertEqual(res.prompt_tokens, 1)
+        self.assertEqual(res.completion_tokens, 2)
+        self.assertEqual(res.total_tokens, 3)
+
+    def test_convert_messages_skips_tool_result_without_call_id(self):
+        messages = [
+            {"role": "user", "content": "run"},
+            {"role": "tool", "content": "old malformed output"},
+        ]
+
+        with self.assertLogs("chatdome.llm.codex_responses", level="WARNING"):
+            _, input_items = self.client._convert_messages_to_input(messages)
+
+        self.assertEqual(input_items, [{"type": "message", "role": "user", "content": "run"}])
 
     def test_chat_completion_success(self):
         asyncio.run(self._run_chat_completion_success())

@@ -72,9 +72,14 @@ class CodexResponsesClient(LLMClient):
                     for tc in msg["tool_calls"]:
                         fn = tc.get("function", {})
                         args = fn.get("arguments", "{}")
+                        call_id = tc.get("call_id") or tc.get("id")
+                        if not call_id:
+                            logger.warning("Skipping Codex function_call without call_id/id in history.")
+                            continue
                         input_items.append({
                             "type": "function_call",
                             "id": tc.get("id"),
+                            "call_id": call_id,
                             "name": fn.get("name"),
                             "arguments": args
                         })
@@ -85,9 +90,13 @@ class CodexResponsesClient(LLMClient):
                         "content": content
                     })
             elif role == "tool":
+                call_id = msg.get("tool_call_id")
+                if not call_id:
+                    logger.warning("Skipping Codex tool output without tool_call_id in history.")
+                    continue
                 input_items.append({
                     "type": "function_call_output",
-                    "call_id": msg.get("tool_call_id"),
+                    "call_id": call_id,
                     "output": content or ""
                 })
                 
@@ -113,24 +122,33 @@ class CodexResponsesClient(LLMClient):
         tool_calls: list[ToolCall] = []
         
         # Iterate over output items in the response
-        output_list = getattr(response, "output", []) or []
+        output_list = self._event_value(response, "output", []) or []
         for item in output_list:
-            item_type = getattr(item, "type", None)
+            item_type = self._event_value(item, "type", None)
             
             if item_type == "message":
                 # Extract text segments from message contents
-                content_parts = getattr(item, "content", []) or []
+                content_parts = self._event_value(item, "content", []) or []
                 for part in content_parts:
-                    part_type = getattr(part, "type", None)
+                    part_type = self._event_value(part, "type", None)
                     if part_type == "output_text":
-                        text_val = getattr(part, "text", "")
+                        text_val = self._event_value(part, "text", "")
                         content = (content or "") + text_val
                         
             elif item_type == "function_call":
                 # Parse tool calls
-                call_id = getattr(item, "id", None)
-                name = getattr(item, "name", None)
-                arguments = getattr(item, "arguments", "{}")
+                response_item_id = self._event_value(item, "id", None)
+                call_id = self._event_value(item, "call_id", None) or response_item_id
+                name = self._event_value(item, "name", None)
+                arguments = self._event_value(item, "arguments", "{}")
+                if not call_id or not name:
+                    logger.warning(
+                        "Skipping malformed Codex function_call item: id=%s call_id=%s name=%s",
+                        response_item_id,
+                        call_id,
+                        name,
+                    )
+                    continue
                 
                 # Make sure arguments is a string (as expected by ChatDome)
                 if not isinstance(arguments, str):
@@ -144,10 +162,10 @@ class CodexResponsesClient(LLMClient):
                 ))
                 
         # Parse usage statistics
-        usage = getattr(response, "usage", None)
-        prompt_tokens = getattr(usage, "input_tokens", 0) if usage else 0
-        completion_tokens = getattr(usage, "output_tokens", 0) if usage else 0
-        total_tokens = getattr(usage, "total_tokens", 0) if usage else 0
+        usage = self._event_value(response, "usage", None)
+        prompt_tokens = self._event_value(usage, "input_tokens", 0) if usage else 0
+        completion_tokens = self._event_value(usage, "output_tokens", 0) if usage else 0
+        total_tokens = self._event_value(usage, "total_tokens", 0) if usage else 0
         
         return LLMResponse(
             content=content,
