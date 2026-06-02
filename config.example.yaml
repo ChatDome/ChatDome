@@ -1,8 +1,9 @@
 # ChatDome Configuration
 #
 # This file contains NON-SENSITIVE settings only.
-# All sensitive parameters (tokens, API keys) MUST be configured
-# via environment variables — see README for details.
+# Telegram Bot tokens and API-key profile credentials are configured
+# via environment variables. Codex OAuth tokens are created by /codex_login
+# and stored locally in ~/.chatdome/auth.json — see README for details.
 #
 # Required environment variables:
 #   CHATDOME_BOT_TOKEN        — Telegram Bot token

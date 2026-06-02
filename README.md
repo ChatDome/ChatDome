@@ -68,8 +68,8 @@ ChatDome is positioned as a **host-security sub-agent**, not a generic main-agen
 - **Sandboxed Execution** — Commands run in a security sandbox with timeouts, output truncation, and dangerous command regex blocking.
 - **Long-term Memory & Context Management** — Features an intelligent, automatic AI-compression memory vault. It remembers past alerts and server diagnostics across multiple sessions without blowing up token limits or requiring an external database.
 - **Telegram-Native** — Manage your server from your phone, anywhere.
-- **OpenAI-Compatible** — Works with any LLM API that supports the OpenAI function calling format (OpenAI, Claude, local models via LiteLLM, etc.).
-- **Zero Infrastructure & Low Intrusion** — Single Python process, no database, no agent installation on target filespaces, requiring just a Telegram bot token and an LLM API key.
+- **Multi-LLM Profiles** — Supports Codex OAuth Responses API by default, with OpenAI-compatible API profiles available for OpenAI, DeepSeek, LiteLLM gateways, and similar endpoints.
+- **Zero Infrastructure & Low Intrusion** — Single Python process, no database, no agent installation on target filespaces; Codex uses `/codex_login` OAuth by default, and API keys are only needed for API-key profiles.
 - **Sub-Agent Direction** — Evolving into a security module that main-agents can call, orchestrate, and audit.
 
 ### 🛡️ Sentinel — 7×24 Autonomous Guardian (Core Implemented, Advanced Capabilities Evolving)
@@ -96,7 +96,7 @@ Because we use the **Dual-Confirmation Mechanism**, granting the AI this "Infini
 - Python 3.9+
 - A Linux server to monitor
 - A [Telegram Bot Token](https://core.telegram.org/bots/tutorial)
-- An OpenAI-compatible API key
+- A Codex OAuth account for the default profile, or an OpenAI-compatible API key when switching to an API-key profile
 
 ### Install
 
@@ -122,7 +122,7 @@ python3 -m pip install -e .
 
 ### Configure
 
-All sensitive parameters are configured via **environment variables** — they are never stored in local files.
+Telegram Bot tokens and API-key profile credentials are configured via **environment variables**. Codex OAuth stores its local token file at `~/.chatdome/auth.json` after `/codex_login`.
 
 ```bash
 # == Highly Recommended: Add these to your ~/.bashrc or ~/.zshrc for persistence ==
@@ -145,6 +145,8 @@ Non-sensitive settings (model, timeout, etc.) are in a YAML config file:
 cp config.example.yaml config.yaml
 # Edit config.yaml to tune non-sensitive parameters (optional)
 ```
+
+The default `active_ai_profile` is `codex-gpt5`. After first startup, send `/codex_login` in Telegram and complete the browser authorization flow; once it succeeds, ChatDome can call Codex directly. Use `/llm_list` to inspect configured profiles and `/llm <profile_name>` to switch models.
 
 ### Run
 
@@ -174,7 +176,7 @@ Look for `"chat":{"id": 123456789}` in the response.
 
 ### Environment Variables
 
-All sensitive parameters are configured via environment variables. They are never read from config files.
+Telegram Bot tokens and API-key profile credentials are configured via environment variables. Codex OAuth tokens are stored locally in `~/.chatdome/auth.json` and are never written to `config.yaml`.
 
 **Telegram:**
 
@@ -184,6 +186,8 @@ All sensitive parameters are configured via environment variables. They are neve
 | `CHATDOME_ALLOWED_CHAT_IDS` | ❌ | Comma-separated Chat IDs for access control |
 
 **LLM:**
+
+The default `codex-gpt5` profile does not require an API key. It uses Telegram `/codex_login` to start OAuth Device Code login and stores tokens locally in `~/.chatdome/auth.json`.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
@@ -235,6 +239,8 @@ chatdome:
       model: "gpt-5.5"
       temperature: 0.1
       max_tokens: 2000
+      codex_token_file: ""                    # empty = ~/.chatdome/auth.json
+      codex_base_url: "https://chatgpt.com/backend-api/codex"
 
     openai-official:
       provider: "openai"
@@ -322,6 +328,9 @@ The AI uses **function calling** (tool use) to interact with the host. It can:
 | `/token` | Show token usage statistics for current chat |
 | `/cmd_echo` | Toggle command echo mode in replies |
 | `/audit [N]` | Show latest command audit events for current chat (default 10, max 30) |
+| `/codex_login [profile]` | Start Codex OAuth device-code login for the current or named Codex profile |
+| `/llm_list` | Show configured LLM profiles and auth status |
+| `/llm [profile]` | Show or switch the active LLM profile |
 | `/help` | Show usage guide and example questions |
 
 No rigid command syntax — just talk to it.
@@ -380,13 +389,17 @@ ChatDome/
             │   ├── registry.py      # Pre-defined command registry
             │   └── validator.py     # Generated command safety validator
             └── llm/
-                └── client.py        # OpenAI-compatible API client
+                ├── client.py          # OpenAI-compatible API client
+                ├── codex_auth.py      # Codex OAuth Device Code login and token lifecycle
+                ├── codex_responses.py # Codex Responses API adapter
+                └── manager.py         # Multi-profile LLM management and runtime switching
 ```
 
 Additional implementation modules (current codebase):
 
 - `controlplane/src/chatdome/runtime_environment.py` — startup environment profiling and prompt compatibility context
 - `controlplane/src/chatdome/agent/audit.py` — command audit tracker (hash chain + 30-day retention)
+- `controlplane/src/chatdome/llm/codex_auth.py` and `codex_responses.py` — Codex OAuth authentication and direct Responses API access
 
 ## Roadmap
 
