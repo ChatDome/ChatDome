@@ -649,19 +649,49 @@ class TelegramBot:
         if manager is None:
             return "LLMManager 未启用。"
 
-        lines = ["当前 LLM profiles:", ""]
-        for item in manager.list_profiles():
-            marker = "*" if item.active else " "
-            line = (
-                f"{marker} {item.name} | {item.provider}/{item.api_mode} | "
-                f"model={item.model} | status={item.status}"
-            )
+        profiles = manager.list_profiles()
+        active = next((item for item in profiles if item.active), None)
+        active_name = active.name if active else manager.get_active_profile_name()
+
+        lines = [
+            "LLM Profiles",
+            "",
+            f"当前: {active_name}",
+            "切换命令: /llm <profile_name>",
+            "",
+            "可复制的切换命令:",
+        ]
+        for item in profiles:
+            prefix = "* " if item.active else "  "
+            lines.append(f"{prefix}/llm {item.name}")
+
+        lines.extend(["", "详细信息:"])
+        for item in profiles:
+            marker = "[当前]" if item.active else "[可选]"
+            lines.extend([
+                "",
+                f"{marker} {item.name}",
+                f"  状态: {self._format_llm_status(item.status)}",
+                f"  类型: {item.provider}/{item.api_mode}",
+                f"  模型: {item.model}",
+            ])
+            if item.base_url:
+                lines.append(f"  地址: {item.base_url}")
             if item.key_ref:
-                line += f" | key={item.key_ref}"
-            lines.append(line)
-        lines.append("")
-        lines.append("切换: /llm <profile_name>")
+                lines.append(f"  Key: {item.key_ref}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_llm_status(status: str) -> str:
+        labels = {
+            "ready": "ready，可切换",
+            "missing_key": "missing_key，环境变量未设置",
+            "token_file_present": "token_file_present，已找到 Codex token 文件",
+            "not_authenticated": "not_authenticated，需要 /codex_login",
+            "invalid_key_ref": "invalid_key_ref，api_key 需要 env:<ENV_NAME>",
+            "unsupported": "unsupported，不支持的 api_mode",
+        }
+        return labels.get(status, status)
 
     async def _handle_llm_list(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
