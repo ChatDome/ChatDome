@@ -46,8 +46,9 @@ class TelegramLLMListTests(unittest.TestCase):
 
         self.assertIn("当前: codex-gpt5", text)
         self.assertIn("切换命令: /llm <profile_name>", text)
-        self.assertIn("* /llm codex-gpt5", text)
+        self.assertIn("  /llm codex-gpt5  (current)", text)
         self.assertIn("  /llm deepseek", text)
+        self.assertNotIn("* /llm codex-gpt5", text)
         self.assertIn("[当前] codex-gpt5", text)
         self.assertIn("[可选] deepseek", text)
         self.assertIn("状态: ready，可切换", text)

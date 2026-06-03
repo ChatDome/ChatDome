@@ -662,8 +662,8 @@ class TelegramBot:
             "可复制的切换命令:",
         ]
         for item in profiles:
-            prefix = "* " if item.active else "  "
-            lines.append(f"{prefix}/llm {item.name}")
+            suffix = "  (current)" if item.active else ""
+            lines.append(f"  /llm {item.name}{suffix}")
 
         lines.extend(["", "详细信息:"])
         for item in profiles:
