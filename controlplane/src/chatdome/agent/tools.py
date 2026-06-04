@@ -593,30 +593,32 @@ class ToolDispatcher:
         return "静态预检显示偏只读查询，预计不修改系统状态；仍建议确认执行目的。"
 
     async def _handle_whois_lookup(self, args: dict[str, Any]) -> str:
-        """Look up IP geolocation via ip-api.com."""
+        """Look up IP geolocation via ipwho.is (HTTPS)."""
         ip = args.get("ip", "")
         if not ip:
             return "缺少 IP 地址参数"
 
         try:
             client = await self._get_http_client()
-            response = await client.get(
-                f"http://ip-api.com/json/{ip}",
-                params={"lang": "zh-CN", "fields": "status,message,country,regionName,city,isp,org,as,query"},
-            )
+            response = await client.get(f"https://ipwho.is/{ip}")
             data = response.json()
 
-            if data.get("status") == "fail":
+            if not data.get("success", False):
                 return f"IP 查询失败: {data.get('message', '未知错误')}"
 
+            connection = data.get("connection", {})
+            asn = connection.get("asn", "")
+            org = connection.get("org", "未知")
+            as_display = f"AS{asn} {org}" if asn else org
+
             lines = [
-                f"IP: {data.get('query', ip)}",
+                f"IP: {data.get('ip', ip)}",
                 f"国家: {data.get('country', '未知')}",
-                f"地区: {data.get('regionName', '未知')}",
+                f"地区: {data.get('region', '未知')}",
                 f"城市: {data.get('city', '未知')}",
-                f"ISP: {data.get('isp', '未知')}",
-                f"组织: {data.get('org', '未知')}",
-                f"AS: {data.get('as', '未知')}",
+                f"ISP: {connection.get('isp', '未知')}",
+                f"组织: {org}",
+                f"AS: {as_display}",
             ]
             return "\n".join(lines)
 
