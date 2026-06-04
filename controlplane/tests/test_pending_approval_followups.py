@@ -313,9 +313,8 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         with patch("chatdome.agent.tracker.TokenTracker.record_usage"):
             response = asyncio.run(agent._run_loop(123, session))
 
-        self.assertTrue(response.startswith("__ROUND_LIMIT_CONFIRM__:"))
-        payload = json.loads(response.split(":", 1)[1])
-        self.assertEqual(payload["rounds"], 10)
+        self.assertEqual(response.kind, "round_limit")
+        self.assertEqual(response.payload["rounds"], 10)
         self.assertEqual(session.pending_round_count, 10)
         self.assertEqual(session.round_count, 10)
         self.assertEqual(llm.calls, 10)
@@ -331,7 +330,8 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         with patch("chatdome.agent.tracker.TokenTracker.record_usage"):
             response = asyncio.run(agent._run_loop(123, session))
 
-        self.assertIn("重复工具调用", response)
+        self.assertEqual(response.kind, "reply")
+        self.assertIn("重复工具调用", response.content)
         self.assertEqual(llm.calls, 3)
         self.assertEqual(len(dispatcher.calls), 1)
         tool_results = [msg for msg in session.messages if msg.get("role") == "tool"]
@@ -521,7 +521,8 @@ class PendingApprovalFollowupTests(unittest.TestCase):
             )
 
         self.assertEqual(raw_result, "")
-        self.assertIn("审批编号不匹配", final_response)
+        self.assertEqual(final_response.kind, "reply")
+        self.assertIn("审批编号不匹配", final_response.content)
         self.assertTrue(session.pending_approval)
         self.assertEqual(agent.tool_dispatcher.sandbox.commands, [])
 
@@ -540,7 +541,7 @@ class PendingApprovalFollowupTests(unittest.TestCase):
             )
 
         self.assertIn("命令校验失败", raw_result)
-        self.assertEqual(final_response, "done")
+        self.assertEqual(final_response.content, "done")
         self.assertFalse(session.pending_approval)
         self.assertEqual(agent.tool_dispatcher.sandbox.commands, [])
         self.assertEqual(session.messages[-1]["role"], "tool")
@@ -560,7 +561,7 @@ class PendingApprovalFollowupTests(unittest.TestCase):
             )
 
         self.assertEqual(raw_result, "ok")
-        self.assertEqual(final_response, "done")
+        self.assertEqual(final_response.content, "done")
         self.assertFalse(session.pending_approval)
         self.assertEqual(len(agent.tool_dispatcher.sandbox.commands), 1)
         self.assertEqual(

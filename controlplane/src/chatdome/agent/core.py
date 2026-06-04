@@ -16,6 +16,7 @@ from typing import Any
 
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.agent.prompts import build_system_prompt, build_tools
+from chatdome.agent.result import AgentResult, coerce_agent_result
 from chatdome.agent.session import SessionManager
 from chatdome.agent.tools import ToolDispatcher
 from chatdome.config import AgentConfig
@@ -93,15 +94,15 @@ class Agent:
         chat_id: int,
         session: Any,
         snapshot: LLMSnapshot,
-    ) -> str:
+    ) -> AgentResult:
         """Call _run_loop while tolerating older test doubles without snapshot."""
         try:
             params = inspect.signature(self._run_loop).parameters
         except (TypeError, ValueError):
             params = {}
         if "snapshot" in params:
-            return await self._run_loop(chat_id, session, snapshot)
-        return await self._run_loop(chat_id, session)
+            return coerce_agent_result(await self._run_loop(chat_id, session, snapshot))
+        return coerce_agent_result(await self._run_loop(chat_id, session))
 
     async def _dispatch_tool_compat(
         self,
@@ -261,7 +262,7 @@ class Agent:
         ])
         return "\n".join(lines)
 
-    async def handle_message(self, chat_id: int, user_message: str) -> str:
+    async def handle_message(self, chat_id: int, user_message: str) -> AgentResult:
         """Process a user message through the full ReAct loop."""
         session = self.session_manager.get_or_create(chat_id)
 
@@ -275,8 +276,8 @@ class Agent:
             try:
                 snapshot = await self.get_active_llm_snapshot()
             except Exception as e:
-                return await self._llm_unavailable_message(e)
-            return await self._handle_pending_followup(chat_id, session, user_message, snapshot)
+                return AgentResult.reply(await self._llm_unavailable_message(e))
+            return AgentResult.reply(await self._handle_pending_followup(chat_id, session, user_message, snapshot))
 
         if session.pending_round_limit:
             if self._is_reject_intent(user_message):
@@ -284,7 +285,7 @@ class Agent:
             if self._is_continue_intent(user_message):
                 return await self.resolve_round_limit(chat_id, "CONTINUE")
             window_limit = max(1, int(self.config.max_rounds_per_turn))
-            return (
+            return AgentResult.reply(
                 f"\u5f53\u524d\u4efb\u52a1\u5df2\u6267\u884c {session.pending_round_count} \u8f6e\uff0c\u4ecd\u672a\u5b8c\u6210\u3002\n"
                 f"\u8bf7\u56de\u590d\u2018\u7ee7\u7eed\u2019\u4ee5\u518d\u6267\u884c {window_limit} \u8f6e\uff0c\u6216\u56de\u590d\u2018\u653e\u5f03\u2019\u7ed3\u675f\u5f53\u524d\u4efb\u52a1\u3002"
             )
@@ -295,18 +296,18 @@ class Agent:
         try:
             snapshot = await self.get_active_llm_snapshot()
         except Exception as e:
-            return await self._llm_unavailable_message(e)
+            return AgentResult.reply(await self._llm_unavailable_message(e))
 
         await session.summarize_and_trim_history(snapshot.client, self.config.max_history_tokens)
         self._persist_session(session)
 
         return await self._run_loop_compat(chat_id, session, snapshot)
 
-    async def resolve_round_limit(self, chat_id: int, action: str) -> str:
+    async def resolve_round_limit(self, chat_id: int, action: str) -> AgentResult:
         """Resolve a round-limit confirmation by continuing or abandoning the task."""
         session = self.session_manager.get_or_create(chat_id)
         if not session.pending_round_limit:
-            return "\u2139\ufe0f \u5f53\u524d\u6ca1\u6709\u7b49\u5f85\u7ee7\u7eed\u6267\u884c\u7684\u4efb\u52a1\u3002"
+            return AgentResult.reply("\u2139\ufe0f \u5f53\u524d\u6ca1\u6709\u7b49\u5f85\u7ee7\u7eed\u6267\u884c\u7684\u4efb\u52a1\u3002")
 
         normalized_action = (action or "").strip().upper()
         if normalized_action == "CONTINUE":
@@ -317,7 +318,7 @@ class Agent:
             try:
                 snapshot = await self.get_active_llm_snapshot()
             except Exception as e:
-                return await self._llm_unavailable_message(e)
+                return AgentResult.reply(await self._llm_unavailable_message(e))
             return await self._run_loop_compat(chat_id, session, snapshot)
 
         reached = session.pending_round_count
@@ -327,18 +328,18 @@ class Agent:
         session.add_assistant_message(final_text)
         self._persist_session(session)
         logger.info("User abandoned task after %d rounds (chat_id=%d)", reached, chat_id)
-        return final_text
+        return AgentResult.reply(final_text)
 
     async def resume_session(
         self,
         chat_id: int,
         action: str,
         approval_id: str | None = None,
-    ) -> tuple[str, str]:
-        """Resume a suspended session after user approval/rejection. Returns (raw_result, llm_response)."""
+    ) -> tuple[str, AgentResult]:
+        """Resume a suspended session after user approval/rejection. Returns (raw_result, agent_result)."""
         session = self.session_manager.get_or_create(chat_id)
         if not session.pending_approval or not session.pending_tool_call_id:
-            return "", "ℹ️ 当前没有等待确认的命令。"
+            return "", AgentResult.reply("ℹ️ 当前没有等待确认的命令。")
 
         tool_call_id = session.pending_tool_call_id
         command = session.pending_command or ""
@@ -350,7 +351,7 @@ class Agent:
         if requested_approval_id and pending_approval_id and requested_approval_id != pending_approval_id:
             return (
                 "",
-                (
+                AgentResult.reply(
                     "⚠️ 审批编号不匹配，未执行任何命令。\n\n"
                     f"当前待审批编号: {pending_approval_id}\n"
                     f"收到的审批编号: {requested_approval_id}"
@@ -394,7 +395,7 @@ class Agent:
             try:
                 snapshot = await self.get_active_llm_snapshot()
             except Exception as e:
-                return "命令校验失败，已拒绝执行。", await self._llm_unavailable_message(e)
+                return "命令校验失败，已拒绝执行。", AgentResult.reply(await self._llm_unavailable_message(e))
             final_answer = await self._run_loop_compat(chat_id, session, snapshot)
             return "命令校验失败，已拒绝执行。", final_answer
 
@@ -459,7 +460,7 @@ class Agent:
         try:
             snapshot = await self.get_active_llm_snapshot()
         except Exception as e:
-            return raw_result, await self._llm_unavailable_message(e)
+            return raw_result, AgentResult.reply(await self._llm_unavailable_message(e))
         final_answer = await self._run_loop_compat(chat_id, session, snapshot)
         return raw_result, final_answer
 
@@ -757,7 +758,7 @@ class Agent:
         chat_id: int,
         session: Any,
         snapshot: LLMSnapshot | None = None,
-    ) -> str:
+    ) -> AgentResult:
         """Drive the ReAct loop forward."""
 
         if snapshot is None:
@@ -781,7 +782,7 @@ class Agent:
             except Exception as e:
                 error_msg = f"LLM 调用失败: {e}"
                 logger.error(error_msg)
-                return f"⚠️ {error_msg}"
+                return AgentResult.reply(f"⚠️ {error_msg}")
 
             logger.debug(
                 "LLM response: content=%s, tool_calls=%d, tokens=%d",
@@ -936,7 +937,7 @@ class Agent:
                             "requires_detail_expansion": True,
                         }
                         self._persist_session(session)
-                        return f"__PENDING_APPROVAL__:{json.dumps(payload)}"
+                        return AgentResult.pending_approval(payload)
 
                 if storm_signature is not None:
                     final_content = self._tool_storm_final_response(
@@ -954,7 +955,7 @@ class Agent:
                         storm_repeat_count,
                         storm_signature[:300],
                     )
-                    return final_content
+                    return AgentResult.reply(final_content)
 
                 # Continue the loop — send results back to LLM
                 continue
@@ -974,7 +975,7 @@ class Agent:
                 session.add_assistant_message(final_content)
                 self._persist_session(session)
                 logger.info("Agent completed for chat_id=%d in %d rounds", chat_id, round_num)
-                return final_content
+                return AgentResult.reply(final_content)
         # Reached one execution window; ask user whether to continue.
         reached_rounds = session.round_count
         session.pending_round_limit = True
@@ -982,7 +983,7 @@ class Agent:
         session.task_auto_approve = False
         self._persist_session(session)
         logger.warning("Round limit window reached for chat_id=%d (rounds=%d)", chat_id, reached_rounds)
-        return f'__ROUND_LIMIT_CONFIRM__:{json.dumps({"rounds": reached_rounds, "window": window_limit})}'
+        return AgentResult.round_limit({"rounds": reached_rounds, "window": window_limit})
 
     def clear_session(self, chat_id: int) -> bool:
         """Clear a chat session. Returns True if it existed."""

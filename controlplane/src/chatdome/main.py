@@ -13,6 +13,7 @@ import logging
 import sys
 from pathlib import Path
 
+from chatdome import __version__
 from chatdome.config import load_config
 from chatdome.agent.core import Agent
 from chatdome.executor.sandbox import CommandSandbox
@@ -57,7 +58,7 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("=" * 60)
-    logger.info("  ChatDome v0.2.0 — AI Host Security Assistant")
+    logger.info("  ChatDome v%s — AI Host Security Assistant", __version__)
     logger.info("=" * 60)
     active_profile = config.ai_profiles[config.active_ai_profile]
     logger.info("  AI profile: %s", config.active_ai_profile)

@@ -27,6 +27,7 @@ from telegram.ext import (
 )
 
 from chatdome.agent.core import Agent
+from chatdome.agent.result import AgentResult, coerce_agent_result
 from chatdome.config import ChatDomeConfig
 from chatdome.sentinel.alert_controls import (
     format_alert_push_status,
@@ -60,6 +61,9 @@ HELP_TEXT = """\
 /env \\- 查看当前运行环境摘要（来自 environment\\_profile\\.md）
 /token \\- 查看当前账号的 Token 资源流水与花费汇总
 /cmd\\_echo \\- 开关命令回显模式（显示底层执行的具体步骤）
+/audit \\[N\\] \\- 查看当前会话最近 N 条命令审计事件
+/engram \\- 查看长期记忆印迹
+/engram delete <id> \\- 删除指定长期记忆
 /sentinel\\_status \\- 哨兵模式告警状态总览
 /sentinel\\_trigger \\- 手动触发全量巡检
 /sentinel\\_history \\- 查看告警历史
@@ -317,17 +321,7 @@ class TelegramBot:
             except Exception:
                 pass  # Not critical if we can't delete it
 
-            if response.startswith("__PENDING_APPROVAL__:"):
-                data = json.loads(response.split(":", 1)[1])
-                await self._send_approval_request(update.message, data)
-                return
-            if response.startswith("__ROUND_LIMIT_CONFIRM__:"):
-                data = json.loads(response.split(":", 1)[1])
-                await self._send_round_limit_prompt(update.message, data)
-                return
-
-            # Send response (handle long messages)
-            await self._send_long_message(update.message, response)
+            await self._send_agent_result(update.message, response)
 
         except Exception as e:
             logger.error("Error handling message: %s", e, exc_info=True)
@@ -595,14 +589,7 @@ class TelegramBot:
             except Exception:
                 pass
 
-        if final_response.startswith("__ROUND_LIMIT_CONFIRM__:"):
-            data = json.loads(final_response.split(":", 1)[1])
-            await self._send_round_limit_prompt(message, data)
-        elif final_response.startswith("__PENDING_APPROVAL__:"):
-            data = json.loads(final_response.split(":", 1)[1])
-            await self._send_approval_request(message, data)
-        else:
-            await self._send_long_message(message, final_response)
+        await self._send_agent_result(message, final_response)
 
     async def _handle_engram(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /engram command."""
@@ -954,14 +941,7 @@ class TelegramBot:
             if action in {"APPROVE", "APPROVE_TASK"} and raw_result:
                 await self._send_long_message(query.message, f"Execution result:\n```text\n{raw_result}\n```")
 
-            if final_response.startswith("__PENDING_APPROVAL__:"):
-                data = json.loads(final_response.split(":", 1)[1])
-                await self._send_approval_request(query.message, data)
-            elif final_response.startswith("__ROUND_LIMIT_CONFIRM__:"):
-                data = json.loads(final_response.split(":", 1)[1])
-                await self._send_round_limit_prompt(query.message, data)
-            else:
-                await self._send_long_message(query.message, final_response)
+            await self._send_agent_result(query.message, final_response)
         except asyncio.TimeoutError:
             await self._send_long_message(
                 query.message,
@@ -991,14 +971,7 @@ class TelegramBot:
             if raw_result:
                 await self._send_long_message(update.message, f"⚙️ *真实沙箱执行结果*:\n```text\n{raw_result}\n```")
                 
-            if final_response.startswith("__PENDING_APPROVAL__:"):
-                data = json.loads(final_response.split(":", 1)[1])
-                await self._send_approval_request(update.message, data)
-            elif final_response.startswith("__ROUND_LIMIT_CONFIRM__:"):
-                data = json.loads(final_response.split(":", 1)[1])
-                await self._send_round_limit_prompt(update.message, data)
-            else:
-                await self._send_long_message(update.message, final_response)
+            await self._send_agent_result(update.message, final_response)
         except Exception as e:
             await update.message.reply_text(f"⚠️ 恢复会话异常: {e}")
 
@@ -1017,18 +990,22 @@ class TelegramBot:
             except Exception:
                 pass
 
-            if final_response.startswith("__PENDING_APPROVAL__:"):
-                data = json.loads(final_response.split(":", 1)[1])
-                await self._send_approval_request(update.message, data)
-            elif final_response.startswith("__ROUND_LIMIT_CONFIRM__:"):
-                data = json.loads(final_response.split(":", 1)[1])
-                await self._send_round_limit_prompt(update.message, data)
-            else:
-                await self._send_long_message(update.message, final_response)
+            await self._send_agent_result(update.message, final_response)
         except Exception as e:
             await update.message.reply_text(f"⚠️ 恢复会话异常: {e}")
 
     # ----- Utilities -----
+
+    async def _send_agent_result(self, message, result: AgentResult | str | None) -> None:
+        """Render a structured Agent result into Telegram messages."""
+        agent_result = coerce_agent_result(result)
+        if agent_result.kind == "pending_approval":
+            await self._send_approval_request(message, agent_result.payload)
+            return
+        if agent_result.kind == "round_limit":
+            await self._send_round_limit_prompt(message, agent_result.payload)
+            return
+        await self._send_long_message(message, agent_result.content)
 
     async def _reply_text(
         self,
