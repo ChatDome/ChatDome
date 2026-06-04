@@ -99,6 +99,9 @@ class SentinelAlertPushControlTests(unittest.TestCase):
     def test_agent_tool_reports_disabled_sentinel(self):
         asyncio.run(self._run_agent_tool_reports_disabled_sentinel())
 
+    def test_stop_gracefully_waits_for_current_check(self):
+        asyncio.run(self._run_stop_gracefully_waits_for_current_check())
+
     async def _run_agent_tool_mutes_for_one_week(self):
         old_cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -156,6 +159,43 @@ class SentinelAlertPushControlTests(unittest.TestCase):
             chat_id=123,
         )
         self.assertIn("Sentinel 未启用", result)
+
+    async def _run_stop_gracefully_waits_for_current_check(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def send_alert(*args, **kwargs) -> None:
+            del args, kwargs
+
+        old_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.chdir(temp_dir)
+            try:
+                scheduler = self._scheduler(send_alert_fn=send_alert, alert_chat_ids=[])
+
+                async def blocking_check(check):
+                    del check
+                    started.set()
+                    await release.wait()
+                    return "✅ done"
+
+                scheduler._run_single_check = blocking_check
+                scheduler.start()
+                await asyncio.wait_for(started.wait(), timeout=1)
+
+                stop_task = asyncio.create_task(scheduler.stop_gracefully(timeout=1))
+                await asyncio.sleep(0)
+
+                self.assertFalse(stop_task.done())
+                self.assertFalse(scheduler.is_running)
+
+                release.set()
+                await asyncio.wait_for(stop_task, timeout=1)
+
+                self.assertIsNone(scheduler._task)
+                self.assertFalse(scheduler.is_running)
+            finally:
+                os.chdir(old_cwd)
 
     async def _run_muted_alert_is_recorded_without_telegram_push(self):
         alerts: list[tuple[int, str]] = []

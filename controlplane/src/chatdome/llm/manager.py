@@ -11,22 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from chatdome.config import AIConfig
+from chatdome.errors import LLMProfileError, LLMProfileNotFound, LLMProfileNotReady
 from chatdome.llm import create_llm_client
 from chatdome.llm.codex_auth import CodexOAuth, NotAuthenticatedError
 
 logger = logging.getLogger(__name__)
-
-
-class LLMProfileError(RuntimeError):
-    """Base class for LLM profile management errors."""
-
-
-class LLMProfileNotFound(LLMProfileError):
-    """Raised when a requested profile does not exist."""
-
-
-class LLMProfileNotReady(LLMProfileError):
-    """Raised when a profile is configured but not authenticated/ready."""
 
 
 @dataclass(frozen=True)
@@ -57,9 +46,9 @@ class LLMManager:
 
     def __init__(self, profiles: dict[str, AIConfig], active_profile: str) -> None:
         if not profiles:
-            raise ValueError("LLMManager requires at least one AI profile.")
+            raise LLMProfileError("LLMManager requires at least one AI profile.")
         if active_profile not in profiles:
-            raise ValueError(f"Active AI profile does not exist: {active_profile}")
+            raise LLMProfileNotFound(f"Active AI profile does not exist: {active_profile}")
 
         self._profiles = dict(profiles)
         self._active_profile = active_profile

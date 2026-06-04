@@ -16,15 +16,19 @@ from typing import Any
 
 import httpx
 
+from chatdome.errors import CodexAuthError, CodexAuthTimeoutError
+
 logger = logging.getLogger(__name__)
 
 # Default Client ID associated with Codex CLI
 DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 
-class NotAuthenticatedError(RuntimeError):
+class NotAuthenticatedError(CodexAuthError):
     """Raised when authentication is missing or has expired and cannot be refreshed."""
-    pass
+
+    code = "llm.codex_not_authenticated"
+    user_message = "Codex 尚未认证，请先运行 /codex_login。"
 
 
 class CodexOAuth:
@@ -82,7 +86,11 @@ class CodexOAuth:
             logger.info("Saved Codex token to %s", self.token_file)
         except Exception as e:
             logger.error("Failed to save Codex token to %s: %s", self.token_file, e)
-            raise RuntimeError(f"Failed to persist authentication token: {e}") from e
+            raise CodexAuthError(
+                f"Failed to persist authentication token: {e}",
+                user_message="保存 Codex 认证凭证失败，请检查 token 文件权限。",
+                expose_detail=True,
+            ) from e
 
     async def request_device_code(self) -> dict[str, Any]:
         """
@@ -101,7 +109,10 @@ class CodexOAuth:
                 resp = await client.post(self.DEVICE_CODE_URL, json=payload, headers=headers)
                 if resp.status_code != 200:
                     logger.error("Failed to request device code: Status %d, Body %s", resp.status_code, resp.text)
-                    raise RuntimeError(f"OpenAI Device Auth failed (HTTP {resp.status_code}): {resp.text}")
+                    raise CodexAuthError(
+                        f"OpenAI Device Auth failed (HTTP {resp.status_code}): {resp.text}",
+                        user_message="申请 Codex 设备验证码失败，请稍后重试。",
+                    )
                 
                 data = resp.json()
                 logger.info("Device code response keys: %s", list(data.keys()))
@@ -133,14 +144,19 @@ class CodexOAuth:
                 # Final validation
                 if "device_code" not in data:
                     logger.error("Device code response missing identifier. Full response: %s", data)
-                    raise RuntimeError(
+                    raise CodexAuthError(
                         f"OpenAI Device Auth returned unexpected response (missing device identifier). "
-                        f"Keys: {list(data.keys())}. Check your client_id."
+                        f"Keys: {list(data.keys())}. Check your client_id.",
+                        user_message="Codex 认证服务返回格式异常，请稍后重试。",
                     )
                 return data
             except httpx.HTTPError as e:
                 logger.error("Network error requesting device code: %s", e)
-                raise RuntimeError(f"Failed to connect to OpenAI Device Auth: {e}") from e
+                raise CodexAuthError(
+                    f"Failed to connect to OpenAI Device Auth: {e}",
+                    user_message="无法连接 Codex 认证服务，请检查网络后重试。",
+                    retryable=True,
+                ) from e
 
     async def poll_device_token(
         self,
@@ -183,7 +199,10 @@ class CodexOAuth:
                         if code and code_verifier:
                             logger.info("Device auth token polling success")
                             return code, code_verifier
-                        raise ValueError(f"Unexpected successful response schema: {data}")
+                        raise CodexAuthError(
+                            f"Unexpected successful response schema: {data}",
+                            user_message="Codex 认证服务返回格式异常，请重新发起认证。",
+                        )
                         
                     elif resp.status_code in (400, 403):
                         data = resp.json()
@@ -203,16 +222,25 @@ class CodexOAuth:
                             interval += 2
                             logger.warning("Received slow_down error, increasing polling interval to %ds", interval)
                         else:
-                            raise RuntimeError(f"OAuth polling failed: {error_code} - {error_desc}")
+                            raise CodexAuthError(
+                                f"OAuth polling failed: {error_code} - {error_desc}",
+                                user_message="Codex 授权未完成或已被拒绝，请重新运行 /codex_login。",
+                            )
                     else:
-                        raise RuntimeError(f"Unexpected OAuth polling HTTP status: {resp.status_code} - {resp.text}")
+                        raise CodexAuthError(
+                            f"Unexpected OAuth polling HTTP status: {resp.status_code} - {resp.text}",
+                            user_message="Codex 认证轮询失败，请稍后重试。",
+                            retryable=True,
+                        )
                         
                 except httpx.HTTPError as e:
                     logger.warning("Network warning during token polling: %s", e)
                 
                 await asyncio.sleep(interval)
                 
-            raise TimeoutError("OpenAI OAuth Device Login timed out. Please run the command again.")
+            raise CodexAuthTimeoutError(
+                "OpenAI OAuth Device Login timed out. Please run the command again."
+            )
 
     async def exchange_token(self, code: str, code_verifier: str) -> dict[str, Any]:
         """
@@ -241,8 +269,9 @@ class CodexOAuth:
                         resp.status_code,
                         resp.text,
                     )
-                    raise RuntimeError(
-                        f"OAuth token exchange failed (HTTP {resp.status_code}): {resp.text}"
+                    raise CodexAuthError(
+                        f"OAuth token exchange failed (HTTP {resp.status_code}): {resp.text}",
+                        user_message="Codex 授权码换取令牌失败，请重新运行 /codex_login。",
                     )
                     
                 data = resp.json()
@@ -260,7 +289,11 @@ class CodexOAuth:
                 self._save_token(token_data)
                 return token_data
             except httpx.HTTPError as e:
-                raise RuntimeError(f"Failed to connect to OAuth Token endpoint during exchange: {e}") from e
+                raise CodexAuthError(
+                    f"Failed to connect to OAuth Token endpoint during exchange: {e}",
+                    user_message="无法连接 Codex 令牌服务，请检查网络后重试。",
+                    retryable=True,
+                ) from e
 
     async def refresh_access_token(self, refresh_token: str) -> dict[str, Any]:
         """
@@ -282,7 +315,10 @@ class CodexOAuth:
                 resp = await client.post(self.TOKEN_URL, json=payload, headers=headers)
                 if resp.status_code != 200:
                     logger.error("OAuth token refresh failed: Status %d, Body %s", resp.status_code, resp.text)
-                    raise RuntimeError(f"OAuth token refresh failed (HTTP {resp.status_code}): {resp.text}")
+                    raise CodexAuthError(
+                        f"OAuth token refresh failed (HTTP {resp.status_code}): {resp.text}",
+                        user_message="Codex 令牌刷新失败，请重新运行 /codex_login。",
+                    )
                 
                 data = resp.json()
                 expires_in = int(data.get("expires_in", 3600))
@@ -299,7 +335,11 @@ class CodexOAuth:
                 self._save_token(token_data)
                 return token_data
             except httpx.HTTPError as e:
-                raise RuntimeError(f"Failed to connect to OAuth Token endpoint during refresh: {e}") from e
+                raise CodexAuthError(
+                    f"Failed to connect to OAuth Token endpoint during refresh: {e}",
+                    user_message="无法连接 Codex 令牌服务，请检查网络后重试。",
+                    retryable=True,
+                ) from e
 
     async def ensure_valid_token(self) -> str:
         """
@@ -319,11 +359,18 @@ class CodexOAuth:
         if time.time() >= token["expires_at"] - 60:
             refresh_token = token.get("refresh_token")
             if not refresh_token:
-                raise NotAuthenticatedError("Codex token has expired, and no refresh token is available. Please re-authenticate using /codex_login.")
+                raise NotAuthenticatedError(
+                    "Codex token has expired, and no refresh token is available. "
+                    "Please re-authenticate using /codex_login.",
+                    user_message="Codex 登录已过期，请重新运行 /codex_login。",
+                )
             try:
                 token = await self.refresh_access_token(refresh_token)
             except Exception as e:
                 logger.error("Failed to automatically refresh Codex access token: %s", e)
-                raise NotAuthenticatedError(f"Codex token refresh failed. Please re-authenticate using /codex_login. Details: {e}") from e
+                raise NotAuthenticatedError(
+                    f"Codex token refresh failed. Please re-authenticate using /codex_login. Details: {e}",
+                    user_message="Codex 令牌刷新失败，请重新运行 /codex_login。",
+                ) from e
                 
         return token["access_token"]

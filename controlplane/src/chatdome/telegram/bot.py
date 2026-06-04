@@ -29,6 +29,11 @@ from telegram.ext import (
 from chatdome.agent.core import Agent
 from chatdome.agent.result import AgentResult, coerce_agent_result
 from chatdome.config import ChatDomeConfig
+from chatdome.errors import (
+    LLMProfileNotFound,
+    LLMProfileNotReady,
+    user_facing_error_message,
+)
 from chatdome.sentinel.alert_controls import (
     format_alert_push_status,
     parse_alert_mute_until,
@@ -127,6 +132,13 @@ class TelegramBot:
 
     async def post_stop(self, app: Application) -> None:
         """Called when the application stops."""
+        sentinel = getattr(self, "_sentinel", None)
+        if sentinel is not None and hasattr(sentinel, "stop_gracefully"):
+            try:
+                await sentinel.stop_gracefully()
+            except Exception as e:
+                logger.error("Failed to stop Sentinel scheduler gracefully: %s", e)
+
         for chat_id in self.config.telegram.allowed_chat_ids:
             try:
                 await self._send_bot_text(
@@ -325,10 +337,15 @@ class TelegramBot:
 
         except Exception as e:
             logger.error("Error handling message: %s", e, exc_info=True)
+            error_text = self._format_error_text(
+                e,
+                prefix="⚠️ 处理消息失败",
+                fallback="处理消息时发生未预期错误，请查看日志。",
+            )
             try:
-                await thinking_msg.edit_text(f"⚠️ 处理消息时发生错误: {e}")
+                await thinking_msg.edit_text(error_text)
             except Exception:
-                await update.message.reply_text(f"⚠️ 处理消息时发生错误: {e}")
+                await update.message.reply_text(error_text)
 
     # ----- Interactive Approval -----
 
@@ -474,7 +491,14 @@ class TelegramBot:
             )
         except Exception as e:
             logger.exception("Failed to load approval details in background")
-            await self._send_long_message(message, f"详细命令分析失败: {e}")
+            await self._send_long_message(
+                message,
+                self._format_error_text(
+                    e,
+                    prefix="详细命令分析失败",
+                    fallback="详细命令分析失败，请稍后重试。",
+                ),
+            )
             return
 
         if not details.get("ok"):
@@ -580,7 +604,11 @@ class TelegramBot:
             logger.exception("Round-limit continuation failed for chat_id=%s", chat_id)
             await self._send_long_message(
                 message,
-                f"继续执行失败: {type(e).__name__}: {e or '无详细错误信息'}",
+                self._format_error_text(
+                    e,
+                    prefix="继续执行失败",
+                    fallback="继续执行失败，请稍后重试。",
+                ),
             )
             return
         finally:
@@ -711,7 +739,13 @@ class TelegramBot:
             snapshot = await manager.switch_profile(profile_name)
         except Exception as e:
             logger.warning("LLM profile switch failed: %s", e)
-            await update.message.reply_text(f"❌ LLM profile 切换失败: {e}")
+            await update.message.reply_text(
+                self._format_error_text(
+                    e,
+                    prefix="❌ LLM profile 切换失败",
+                    fallback="LLM profile 切换失败，请检查配置后重试。",
+                )
+            )
             return
 
         try:
@@ -740,9 +774,9 @@ class TelegramBot:
         if requested:
             profile = profiles.get(requested)
             if profile is None:
-                raise ValueError(f"未知 LLM profile: {requested}")
+                raise LLMProfileNotFound(f"未知 LLM profile: {requested}")
             if profile.api_mode != "codex_responses":
-                raise ValueError(f"profile {requested} 不是 Codex OAuth profile。")
+                raise LLMProfileNotReady(f"profile {requested} 不是 Codex OAuth profile。")
             return requested, profile
 
         manager = self._get_llm_manager()
@@ -760,7 +794,7 @@ class TelegramBot:
             return codex_profiles[0]
 
         names = ", ".join(name for name, _ in codex_profiles) or "(none)"
-        raise ValueError(
+        raise LLMProfileNotReady(
             "当前 active profile 不是 Codex。请使用 /codex_login <profile_name> 指定 Codex profile。"
             f"可用 Codex profiles: {names}"
         )
@@ -780,7 +814,13 @@ class TelegramBot:
                 (getattr(context, "args", []) or [""])[0]
             )
         except Exception as e:
-            await update.message.reply_text(f"❌ 无法启动 Codex 认证: {e}")
+            await update.message.reply_text(
+                self._format_error_text(
+                    e,
+                    prefix="❌ 无法启动 Codex 认证",
+                    fallback="无法启动 Codex 认证，请检查 LLM profile 配置。",
+                )
+            )
             return
         
         oauth = CodexOAuth(
@@ -794,7 +834,13 @@ class TelegramBot:
             await status_msg.delete()
         except Exception as e:
             logger.error("Failed to request Codex device code: %s", e)
-            await update.message.reply_text(f"❌ 申请验证码失败: {e}")
+            await update.message.reply_text(
+                self._format_error_text(
+                    e,
+                    prefix="❌ 申请验证码失败",
+                    fallback="申请 Codex 设备验证码失败，请稍后重试。",
+                )
+            )
             return
 
         device_code = device_info["device_code"]
@@ -842,8 +888,12 @@ class TelegramBot:
                 await self._send_bot_text(
                     bot=context.bot,
                     chat_id=chat_id,
-                    text=f"❌ *Codex 认证失败：*\n```text\n{e}\n```",
-                    markup=MessageMarkup.TELEGRAM_MARKDOWN
+                    text=self._format_error_text(
+                        e,
+                        prefix="❌ Codex 认证失败",
+                        fallback="Codex 认证失败，请重新运行 /codex_login。",
+                    ),
+                    markup=MessageMarkup.PLAIN,
                 )
 
         if self._app is not None:
@@ -950,7 +1000,11 @@ class TelegramBot:
         except Exception as e:
             logger.exception("Callback query handling failed")
             await query.message.reply_text(
-                f"按钮操作处理失败: {type(e).__name__}: {e or '无详细错误信息'}"
+                self._format_error_text(
+                    e,
+                    prefix="按钮操作处理失败",
+                    fallback="按钮操作处理失败，请稍后重试。",
+                )
             )
 
     async def _handle_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -973,7 +1027,14 @@ class TelegramBot:
                 
             await self._send_agent_result(update.message, final_response)
         except Exception as e:
-            await update.message.reply_text(f"⚠️ 恢复会话异常: {e}")
+            logger.exception("Confirm command failed")
+            await update.message.reply_text(
+                self._format_error_text(
+                    e,
+                    prefix="⚠️ 恢复会话失败",
+                    fallback="恢复会话失败，请稍后重试。",
+                )
+            )
 
     async def _handle_reject(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /reject command for pending high-risk execution."""
@@ -992,7 +1053,14 @@ class TelegramBot:
 
             await self._send_agent_result(update.message, final_response)
         except Exception as e:
-            await update.message.reply_text(f"⚠️ 恢复会话异常: {e}")
+            logger.exception("Reject command failed")
+            await update.message.reply_text(
+                self._format_error_text(
+                    e,
+                    prefix="⚠️ 恢复会话失败",
+                    fallback="恢复会话失败，请稍后重试。",
+                )
+            )
 
     # ----- Utilities -----
 
@@ -1006,6 +1074,14 @@ class TelegramBot:
             await self._send_round_limit_prompt(message, agent_result.payload)
             return
         await self._send_long_message(message, agent_result.content)
+
+    @staticmethod
+    def _format_error_text(exc: BaseException, *, prefix: str, fallback: str) -> str:
+        """Format a user-visible error without leaking provider internals."""
+        detail = user_facing_error_message(exc, fallback=fallback)
+        if not prefix:
+            return detail
+        return f"{prefix}: {detail}"
 
     async def _reply_text(
         self,
@@ -1172,7 +1248,11 @@ class TelegramBot:
             content = "告警分析超时，请稍后重试。"
         except Exception as exc:
             logger.exception("Sentinel alert analysis failed")
-            content = f"告警分析失败: {exc}"
+            content = self._format_error_text(
+                exc,
+                prefix="告警分析失败",
+                fallback="告警分析失败，请稍后重试。",
+            )
         finally:
             try:
                 await thinking_msg.delete()
@@ -1257,7 +1337,11 @@ class TelegramBot:
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as e:
-            return f"⚠️ 读取环境档案失败: {e}"
+            return self._format_error_text(
+                e,
+                prefix="⚠️ 读取环境档案失败",
+                fallback="读取环境档案失败，请检查文件权限。",
+            )
 
         fields: dict[str, str] = {}
         for line in text.splitlines():
@@ -1383,7 +1467,13 @@ class TelegramBot:
             await update.message.reply_text(f"🛡️ 巡检完成:\n\n{result}")
         except Exception as e:
             logger.exception("Sentinel trigger failed")
-            await update.message.reply_text(f"❌ 巡检出错: {e}")
+            await update.message.reply_text(
+                self._format_error_text(
+                    e,
+                    prefix="❌ 巡检出错",
+                    fallback="巡检执行失败，请稍后重试。",
+                )
+            )
 
     async def _handle_sentinel_history(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

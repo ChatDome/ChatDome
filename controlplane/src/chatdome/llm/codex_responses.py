@@ -13,6 +13,12 @@ import time
 from typing import Any
 
 import openai
+from chatdome.errors import (
+    LLMAuthenticationError,
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+)
 from chatdome.llm.client import LLMClient, LLMResponse, ToolCall
 from chatdome.llm.codex_auth import CodexOAuth
 
@@ -276,7 +282,11 @@ class CodexResponsesClient(LLMClient):
                     done_output_items.append(item)
             elif event_type in {"response.failed", "error"}:
                 error = self._event_value(event, "error", None)
-                raise RuntimeError(f"Codex streaming response failed: {error or event}")
+                raise LLMProviderError(
+                    f"Codex streaming response failed: {error or event}",
+                    user_message="Codex 响应流返回异常，请稍后重试。",
+                    retryable=True,
+                )
 
         streamed_text = "".join(text_parts) if text_parts else "".join(done_text_parts)
         streamed_response = (
@@ -428,7 +438,10 @@ class CodexResponsesClient(LLMClient):
                 
             except openai.AuthenticationError as e:
                 logger.error("Codex API authentication failed: %s", e)
-                raise
+                raise LLMAuthenticationError(
+                    str(e),
+                    user_message="Codex 认证失败，请重新运行 /codex_login。",
+                ) from e
                 
             except openai.APIError as e:
                 last_error = e
@@ -439,6 +452,9 @@ class CodexResponsesClient(LLMClient):
                 if attempt < self.max_retries:
                     await asyncio.sleep(2 ** attempt)
                     
-        raise RuntimeError(
-            f"Codex Responses API call failed after {self.max_retries} attempts: {last_error}"
-        )
+        message = f"Codex Responses API call failed after {self.max_retries} attempts: {last_error}"
+        if isinstance(last_error, openai.RateLimitError):
+            raise LLMRateLimitError(message) from last_error
+        if isinstance(last_error, openai.APITimeoutError):
+            raise LLMTimeoutError(message) from last_error
+        raise LLMProviderError(message) from last_error

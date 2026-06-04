@@ -20,6 +20,7 @@ from chatdome.agent.result import AgentResult, coerce_agent_result
 from chatdome.agent.session import SessionManager
 from chatdome.agent.tools import ToolDispatcher
 from chatdome.config import AgentConfig
+from chatdome.errors import LLMProfileNotReady, user_facing_error_message
 from chatdome.executor.sandbox import CommandSandbox
 from chatdome.llm.client import LLMClient
 from chatdome.llm.manager import LLMManager, LLMSnapshot
@@ -82,12 +83,13 @@ class Agent:
             self.tool_dispatcher.llm = snapshot.client
             return snapshot
         if self.llm is None:
-            raise RuntimeError("No LLM client is configured.")
+            raise LLMProfileNotReady("No LLM client is configured.")
         return LLMSnapshot(profile_name="legacy", client=self.llm, profile=None)
 
     async def _llm_unavailable_message(self, exc: Exception) -> str:
         logger.error("LLM profile is not ready: %s", exc)
-        return f"⚠️ LLM 当前不可用: {exc}"
+        detail = user_facing_error_message(exc, fallback="LLM 当前不可用，请稍后重试。")
+        return f"⚠️ {detail}"
 
     async def _run_loop_compat(
         self,
@@ -511,7 +513,10 @@ class Agent:
                 except Exception as e:
                     return {
                         "ok": False,
-                        "message": f"LLM profile is not ready: {e}",
+                        "message": user_facing_error_message(
+                            e,
+                            fallback="LLM profile 尚未就绪，请稍后重试。",
+                        ),
                     }
 
             details_fn = self.tool_dispatcher.get_command_approval_details
@@ -780,9 +785,9 @@ class Agent:
                     tools=self.tools,
                 )
             except Exception as e:
-                error_msg = f"LLM 调用失败: {e}"
-                logger.error(error_msg)
-                return AgentResult.reply(f"⚠️ {error_msg}")
+                logger.error("LLM call failed: %s", e)
+                detail = user_facing_error_message(e, fallback="LLM 调用失败，请稍后重试。")
+                return AgentResult.reply(f"⚠️ {detail}")
 
             logger.debug(
                 "LLM response: content=%s, tool_calls=%d, tokens=%d",

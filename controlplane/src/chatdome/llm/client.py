@@ -16,6 +16,13 @@ from typing import Any
 
 import openai
 
+from chatdome.errors import (
+    LLMAuthenticationError,
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -138,7 +145,10 @@ class LLMClient:
 
             except openai.AuthenticationError as e:
                 logger.error("Authentication failed: %s", e)
-                raise
+                raise LLMAuthenticationError(
+                    str(e),
+                    user_message="LLM 认证失败，请检查 API Key 或重新登录。",
+                ) from e
 
             except openai.APIError as e:
                 last_error = e
@@ -149,9 +159,12 @@ class LLMClient:
                 if attempt < self.max_retries:
                     await asyncio.sleep(2 ** attempt)
 
-        raise RuntimeError(
-            f"LLM API call failed after {self.max_retries} attempts: {last_error}"
-        )
+        message = f"LLM API call failed after {self.max_retries} attempts: {last_error}"
+        if isinstance(last_error, openai.RateLimitError):
+            raise LLMRateLimitError(message) from last_error
+        if isinstance(last_error, openai.APITimeoutError):
+            raise LLMTimeoutError(message) from last_error
+        raise LLMProviderError(message) from last_error
 
     async def evaluate_command_safety(
         self, command: str, system_prompt: str, chat_id: int = 0

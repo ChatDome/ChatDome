@@ -8,6 +8,7 @@ execute -> evaluate -> suppress/state-machine -> history/push.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import json
 import logging
@@ -86,6 +87,7 @@ class SentinelScheduler:
         self._load_alert_push_state()
 
         self._task: asyncio.Task | None = None
+        self._stop_event: asyncio.Event | None = None
         self._running = False
         self._round_count = 0
 
@@ -190,6 +192,7 @@ class SentinelScheduler:
             logger.warning("No Sentinel checks configured, not starting scheduler")
             return
 
+        self._stop_event = asyncio.Event()
         self._running = True
         self._task = asyncio.ensure_future(self._run_loop())
         logger.info(
@@ -199,10 +202,35 @@ class SentinelScheduler:
         )
 
     def stop(self) -> None:
+        """Request scheduler stop without waiting for the task to finish."""
         self._running = False
-        if self._task is not None:
-            self._task.cancel()
-            self._task = None
+        if self._stop_event is not None:
+            self._stop_event.set()
+        logger.info("Sentinel scheduler stop requested")
+
+    async def stop_gracefully(self, timeout: float = 15.0) -> None:
+        """
+        Stop the scheduler and wait for the patrol loop to finish.
+
+        The loop is allowed to finish the currently running check and exits
+        before starting another tick. If it does not finish within timeout,
+        cancel it as a last resort.
+        """
+        task = self._task
+        self.stop()
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(task, timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Sentinel scheduler did not stop within %.1fs; cancelling task",
+                    timeout,
+                )
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        self._task = None
+        self._stop_event = None
         logger.info("Sentinel scheduler stopped")
 
     async def trigger_all(self) -> str:
@@ -351,12 +379,21 @@ class SentinelScheduler:
                         await self._send_baseline_summary_if_needed()
                     checks_seen_in_round.clear()
 
-                await asyncio.sleep(tick_interval)
+                if self._stop_event is not None:
+                    try:
+                        await asyncio.wait_for(self._stop_event.wait(), timeout=tick_interval)
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(tick_interval)
 
         except asyncio.CancelledError:
             logger.info("Sentinel scheduler task cancelled")
         except Exception:
             logger.exception("Sentinel scheduler crashed")
+        finally:
+            self._running = False
 
     # -- auditd / SSH session tracking -------------------------------------
 
