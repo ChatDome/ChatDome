@@ -10,6 +10,7 @@ Environment variables:
   CHATDOME_ALLOWED_CHAT_IDS - Comma-separated chat IDs (optional)
   CHATDOME_PENDING_APPROVAL_TIMEOUT - Pending approval timeout in seconds (optional)
   CHATDOME_PERSISTED_SESSION_TTL - Persisted session retention in seconds (optional)
+  CHATDOME_PERSIST_COMMAND_OUTPUTS - Persist command stdout/stderr archives (optional)
   CHATDOME_SENTINEL_ALERT_RETENTION_DAYS - Sentinel alert log retention days (optional)
   CHATDOME_CONFIG           - Path to config.yaml (optional)
 """
@@ -67,6 +68,9 @@ class AgentConfig:
     max_history_tokens: int = 16000
     command_timeout: int = 10
     max_output_chars: int = 4000
+    persist_command_outputs: bool = False
+    command_output_retention_days: int = 7
+    command_output_max_chars: int = 8000
 
 
 @dataclass
@@ -324,6 +328,38 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
         except ValueError:
             logger.warning("Invalid CHATDOME_PERSISTED_SESSION_TTL ignored: %s", persisted_ttl_env)
 
+    persist_outputs_env = os.environ.get("CHATDOME_PERSIST_COMMAND_OUTPUTS", "")
+    if persist_outputs_env:
+        config.agent.persist_command_outputs = _parse_bool_env(persist_outputs_env)
+
+    output_retention_env = os.environ.get("CHATDOME_COMMAND_OUTPUT_RETENTION_DAYS", "")
+    if output_retention_env:
+        try:
+            parsed_days = int(output_retention_env)
+            if parsed_days > 0:
+                config.agent.command_output_retention_days = parsed_days
+            else:
+                logger.warning(
+                    "CHATDOME_COMMAND_OUTPUT_RETENTION_DAYS must be > 0, ignored: %s",
+                    output_retention_env,
+                )
+        except ValueError:
+            logger.warning("Invalid CHATDOME_COMMAND_OUTPUT_RETENTION_DAYS ignored: %s", output_retention_env)
+
+    output_max_chars_env = os.environ.get("CHATDOME_COMMAND_OUTPUT_MAX_CHARS", "")
+    if output_max_chars_env:
+        try:
+            parsed_chars = int(output_max_chars_env)
+            if parsed_chars > 0:
+                config.agent.command_output_max_chars = parsed_chars
+            else:
+                logger.warning(
+                    "CHATDOME_COMMAND_OUTPUT_MAX_CHARS must be > 0, ignored: %s",
+                    output_max_chars_env,
+                )
+        except ValueError:
+            logger.warning("Invalid CHATDOME_COMMAND_OUTPUT_MAX_CHARS ignored: %s", output_max_chars_env)
+
     sentinel_enabled_env = os.environ.get("CHATDOME_SENTINEL_ENABLED", "")
     if sentinel_enabled_env:
         config.sentinel.enabled = _parse_bool_env(sentinel_enabled_env)
@@ -370,4 +406,3 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
         config.telegram.allowed_chat_ids,
     )
     return config
-

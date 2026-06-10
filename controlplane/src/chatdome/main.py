@@ -68,6 +68,10 @@ def main() -> None:
     logger.info("  Allowed chats: %s", config.telegram.allowed_chat_ids or "(all)")
     logger.info("  Generated commands: %s", config.agent.allow_generated_commands)
     logger.info(
+        "  Command output archive: %s",
+        "enabled" if config.agent.persist_command_outputs else "disabled",
+    )
+    logger.info(
         "  Session policy: memory_timeout=%ss, pending_timeout=%ss, persisted_ttl=%ss",
         config.agent.session_timeout,
         config.agent.pending_approval_timeout,
@@ -101,6 +105,9 @@ def main() -> None:
         max_output_chars=config.agent.max_output_chars,
         allow_generated_commands=config.agent.allow_generated_commands,
         allow_unrestricted_commands=config.agent.allow_unrestricted_commands,
+        persist_command_outputs=config.agent.persist_command_outputs,
+        command_output_retention_days=config.agent.command_output_retention_days,
+        command_output_max_chars=config.agent.command_output_max_chars,
         pack_loader=pack_loader,
     )
 

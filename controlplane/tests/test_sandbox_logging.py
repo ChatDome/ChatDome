@@ -1,6 +1,10 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from chatdome.executor.sandbox import CommandSandbox
+from chatdome.executor.sandbox import CommandResult, CommandSandbox
 
 
 class SandboxLoggingTests(unittest.TestCase):
@@ -21,6 +25,87 @@ class SandboxLoggingTests(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(len(first), 12)
+
+    def test_command_output_archive_can_be_enabled_for_debug(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "outputs"
+            audit_dir = Path(tmp) / "audit"
+            sandbox = CommandSandbox(
+                allow_unrestricted_commands=True,
+                persist_command_outputs=True,
+                command_output_dir=output_dir,
+            )
+
+            with patch("chatdome.agent.audit.AUDIT_DIR", audit_dir):
+                sandbox._record_execution_audit(
+                    event_type="command_executed",
+                    chat_id=123,
+                    tool_call_id="call-debug",
+                    command="echo archive-test",
+                    reason="debug archive test",
+                    result=CommandResult(
+                        stdout="archive-test\n",
+                        stderr="",
+                        return_code=0,
+                        command="echo archive-test",
+                    ),
+                    execution_mode="unrestricted",
+                    duration_ms=12,
+                )
+
+            output_files = list(output_dir.glob("*/*.json"))
+            self.assertEqual(len(output_files), 1)
+            payload = json.loads(output_files[0].read_text(encoding="utf-8"))
+            self.assertIn("archive-test", payload["stdout"])
+            self.assertEqual(payload["tool_call_id"], "call-debug")
+
+            audit_records = [
+                json.loads(line)
+                for path in audit_dir.glob("audit-*.jsonl")
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertTrue(any(record.get("output_persisted") for record in audit_records))
+            self.assertTrue(any(record.get("output_ref") for record in audit_records))
+
+    def test_command_output_archive_skips_sensitive_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "outputs"
+            audit_dir = Path(tmp) / "audit"
+            sandbox = CommandSandbox(
+                allow_unrestricted_commands=True,
+                persist_command_outputs=True,
+                command_output_dir=output_dir,
+            )
+
+            with patch("chatdome.agent.audit.AUDIT_DIR", audit_dir):
+                sandbox._record_execution_audit(
+                    event_type="command_executed",
+                    chat_id=123,
+                    tool_call_id="call-sensitive",
+                    command="echo token-value",
+                    reason="sensitive archive test",
+                    result=CommandResult(
+                        stdout="token-value\n",
+                        stderr="",
+                        return_code=0,
+                        command="echo token-value",
+                    ),
+                    execution_mode="unrestricted",
+                    duration_ms=12,
+                )
+
+            self.assertEqual(list(output_dir.glob("*/*.json")), [])
+            audit_records = [
+                json.loads(line)
+                for path in audit_dir.glob("audit-*.jsonl")
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertTrue(
+                any(
+                    record.get("output_skip_reason") == "sensitive_command_pattern"
+                    for record in audit_records
+                )
+            )
 
 
 if __name__ == "__main__":

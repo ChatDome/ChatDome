@@ -978,7 +978,7 @@ class TelegramBot:
 
             thinking_msg = await query.message.reply_text("Processing...")
             try:
-                raw_result, final_response = await asyncio.wait_for(
+                _, final_response = await asyncio.wait_for(
                     self.agent.resume_session(chat_id, action, approval_id=approval_id or None),
                     timeout=90,
                 )
@@ -987,9 +987,6 @@ class TelegramBot:
                     await thinking_msg.delete()
                 except Exception:
                     pass
-
-            if action in {"APPROVE", "APPROVE_TASK"} and raw_result:
-                await self._send_long_message(query.message, f"Execution result:\n```text\n{raw_result}\n```")
 
             await self._send_agent_result(query.message, final_response)
         except asyncio.TimeoutError:
@@ -1016,15 +1013,12 @@ class TelegramBot:
         approval_id = context.args[0].strip() if context.args else None
         thinking_msg = await update.message.reply_text("🤔 强制批准执行中...")
         try:
-            raw_result, final_response = await self.agent.resume_session(chat_id, "APPROVE", approval_id=approval_id)
+            _, final_response = await self.agent.resume_session(chat_id, "APPROVE", approval_id=approval_id)
             try:
                 await thinking_msg.delete()
             except Exception:
                 pass
-                
-            if raw_result:
-                await self._send_long_message(update.message, f"⚙️ *真实沙箱执行结果*:\n```text\n{raw_result}\n```")
-                
+
             await self._send_agent_result(update.message, final_response)
         except Exception as e:
             logger.exception("Confirm command failed")

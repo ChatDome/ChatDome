@@ -145,7 +145,62 @@ chatdome:
                 with self.assertRaisesRegex(ValueError, "does not exist"):
                     load_config(config_path)
 
+    def test_command_output_archive_config_is_opt_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text(
+                """
+chatdome:
+  active_ai_profile: codex-gpt5
+  ai_profiles:
+    codex-gpt5:
+      provider: codex
+      api_mode: codex_responses
+      model: gpt-5.5
+  agent:
+    persist_command_outputs: true
+    command_output_retention_days: 3
+    command_output_max_chars: 1234
+""",
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"CHATDOME_BOT_TOKEN": "telegram-token"}, clear=True):
+                config = load_config(config_path)
+
+        self.assertTrue(config.agent.persist_command_outputs)
+        self.assertEqual(config.agent.command_output_retention_days, 3)
+        self.assertEqual(config.agent.command_output_max_chars, 1234)
+
+    def test_command_output_archive_env_override_is_supported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text(
+                """
+chatdome:
+  active_ai_profile: codex-gpt5
+  ai_profiles:
+    codex-gpt5:
+      provider: codex
+      api_mode: codex_responses
+      model: gpt-5.5
+""",
+                encoding="utf-8",
+            )
+
+            env = {
+                "CHATDOME_BOT_TOKEN": "telegram-token",
+                "CHATDOME_PERSIST_COMMAND_OUTPUTS": "true",
+                "CHATDOME_COMMAND_OUTPUT_RETENTION_DAYS": "5",
+                "CHATDOME_COMMAND_OUTPUT_MAX_CHARS": "2048",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                config = load_config(config_path)
+
+        self.assertTrue(config.agent.persist_command_outputs)
+        self.assertEqual(config.agent.command_output_retention_days, 5)
+        self.assertEqual(config.agent.command_output_max_chars, 2048)
+
 
 if __name__ == "__main__":
     unittest.main()
-

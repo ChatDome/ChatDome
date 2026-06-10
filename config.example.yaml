@@ -102,6 +102,13 @@ chatdome:
     max_history_tokens: 16000
     command_timeout: 10
     max_output_chars: 4000
+    # Debug/forensics only. When false, command stdout/stderr are not archived;
+    # audit logs keep command metadata, byte counts, and output hashes only.
+    # When true, outputs are written under chat_data/command_outputs/ with
+    # retention/max-size limits. Obvious secret-reading commands are skipped.
+    persist_command_outputs: false
+    command_output_retention_days: 7
+    command_output_max_chars: 8000
 
   # ---------------------------------------------------------------------------
   # Sentinel — 7×24 Security Monitoring (哨兵模式)

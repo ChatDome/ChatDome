@@ -12,19 +12,46 @@ Provides a wrapper around asyncio subprocess execution with:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import os
 import signal
+import shutil
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.sentinel.pack_loader import PackLoader
 from chatdome.executor.validator import validate_command
 
 logger = logging.getLogger(__name__)
+
+SENSITIVE_OUTPUT_COMMAND_MARKERS = (
+    "/etc/shadow",
+    "/etc/passwd",
+    ".env",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "auth.json",
+    "credential",
+    "credentials",
+    "secret",
+    "token",
+    "private_key",
+    "private key",
+    ".pem",
+    ".key",
+    "printenv",
+    "/environ",
+    " environ",
+)
 
 
 @dataclass
@@ -53,13 +80,22 @@ class CommandSandbox:
         max_output_chars: int = 4000,
         allow_generated_commands: bool = False,
         allow_unrestricted_commands: bool = False,
+        persist_command_outputs: bool = False,
+        command_output_retention_days: int = 7,
+        command_output_max_chars: int = 8000,
+        command_output_dir: str | Path | None = None,
         pack_loader: PackLoader | None = None,
     ):
         self.default_timeout = default_timeout
         self.max_output_chars = max_output_chars
         self.allow_generated_commands = allow_generated_commands
         self.allow_unrestricted_commands = allow_unrestricted_commands
+        self.persist_command_outputs = persist_command_outputs
+        self.command_output_retention_days = max(1, int(command_output_retention_days))
+        self.command_output_max_chars = max(1, int(command_output_max_chars))
+        self.command_output_dir = Path(command_output_dir or Path("chat_data") / "command_outputs")
         self._pack_loader = pack_loader
+        self._last_output_cleanup_ts = 0.0
 
     @staticmethod
     def _command_log_excerpt(command: str, max_chars: int = 240) -> str:
@@ -177,8 +213,8 @@ class CommandSandbox:
                 command=command,
             )
 
-    @staticmethod
     def _record_execution_audit(
+        self,
         *,
         event_type: str,
         chat_id: int,
@@ -215,12 +251,137 @@ class CommandSandbox:
                     "stderr_hash": CommandAuditTracker.sha256_text(result.stderr or ""),
                 }
             )
+            fields.update(
+                self._persist_command_output_if_enabled(
+                    chat_id=chat_id,
+                    tool_call_id=tool_call_id,
+                    command=command,
+                    reason=reason,
+                    result=result,
+                    execution_mode=execution_mode,
+                    duration_ms=duration_ms,
+                )
+            )
 
         CommandAuditTracker.record_event(
             event_type,
             chat_id=chat_id,
             **fields,
         )
+
+    def _persist_command_output_if_enabled(
+        self,
+        *,
+        chat_id: int,
+        tool_call_id: str,
+        command: str,
+        reason: str,
+        result: CommandResult,
+        execution_mode: str,
+        duration_ms: int,
+    ) -> dict[str, Any]:
+        """Optionally persist command output for debug/forensics without logging it."""
+        if not self.persist_command_outputs:
+            return {"output_persisted": False}
+
+        if self._looks_sensitive_for_output_archive(command):
+            logger.warning(
+                "Command output archive skipped due to sensitive command marker (sha256=%s)",
+                self._command_log_hash(command),
+            )
+            return {
+                "output_persisted": False,
+                "output_skip_reason": "sensitive_command_pattern",
+            }
+
+        now = datetime.now(timezone.utc)
+        self._cleanup_old_command_outputs(now)
+        day_dir = self.command_output_dir / now.strftime("%Y-%m-%d")
+        day_dir.mkdir(parents=True, exist_ok=True)
+
+        stdout, stdout_truncated = self._truncate_archive_text(result.stdout or "")
+        stderr, stderr_truncated = self._truncate_archive_text(result.stderr or "")
+        output_id = f"{now.strftime('%H%M%S')}-{int(chat_id)}-{uuid4().hex[:12]}"
+        path = day_dir / f"{output_id}.json"
+        payload = {
+            "version": 1,
+            "timestamp": int(now.timestamp()),
+            "timestamp_iso": now.isoformat().replace("+00:00", "Z"),
+            "chat_id": int(chat_id),
+            "tool_call_id": str(tool_call_id or ""),
+            "command": command,
+            "reason": reason,
+            "execution_mode": execution_mode,
+            "duration_ms": duration_ms,
+            "return_code": result.return_code,
+            "timed_out": result.timed_out,
+            "sandbox_truncated": result.truncated,
+            "archive_stdout_truncated": stdout_truncated,
+            "archive_stderr_truncated": stderr_truncated,
+            "stdout_hash": CommandAuditTracker.sha256_text(result.stdout or ""),
+            "stderr_hash": CommandAuditTracker.sha256_text(result.stderr or ""),
+            "stdout": stdout,
+            "stderr": stderr,
+        }
+        try:
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as e:
+            logger.error("Failed to persist command output archive: %s", e)
+            return {
+                "output_persisted": False,
+                "output_skip_reason": "archive_write_failed",
+            }
+
+        output_ref = path.as_posix()
+        logger.info(
+            "Command output archived (sha256=%s, ref=%s)",
+            self._command_log_hash(command),
+            output_ref,
+        )
+        return {
+            "output_persisted": True,
+            "output_ref": output_ref,
+            "output_archive_stdout_truncated": stdout_truncated,
+            "output_archive_stderr_truncated": stderr_truncated,
+        }
+
+    @staticmethod
+    def _looks_sensitive_for_output_archive(command: str) -> bool:
+        normalized = " ".join((command or "").lower().split())
+        return any(marker in normalized for marker in SENSITIVE_OUTPUT_COMMAND_MARKERS)
+
+    def _truncate_archive_text(self, text: str) -> tuple[str, bool]:
+        if len(text) <= self.command_output_max_chars:
+            return text, False
+        return (
+            text[: self.command_output_max_chars]
+            + f"\n\n... [command output archive truncated at {self.command_output_max_chars} chars]",
+            True,
+        )
+
+    def _cleanup_old_command_outputs(self, now: datetime) -> None:
+        now_ts = time.time()
+        if (now_ts - self._last_output_cleanup_ts) < 3600:
+            return
+        self._last_output_cleanup_ts = now_ts
+        if not self.command_output_dir.exists():
+            return
+
+        oldest_keep_date = now.date() - timedelta(days=self.command_output_retention_days - 1)
+        for child in self.command_output_dir.iterdir():
+            if not child.is_dir():
+                continue
+            try:
+                child_date = datetime.strptime(child.name, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if child_date >= oldest_keep_date:
+                continue
+            try:
+                shutil.rmtree(child)
+                logger.info("Command output archive cleanup removed %s", child)
+            except OSError as e:
+                logger.warning("Failed to remove old command output archive %s: %s", child, e)
 
     async def execute_security_check(
         self,
