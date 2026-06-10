@@ -847,7 +847,7 @@ class Agent:
                 storm_repeat_count = 0
                 storm_cached_result = ""
 
-                for tc, signature, repeat_count, is_duplicate in tool_call_plans:
+                for index, (tc, signature, repeat_count, is_duplicate) in enumerate(tool_call_plans):
                     if is_duplicate:
                         cached_result = prior_tool_results.get(signature, "")
                         result = self._duplicate_tool_result(signature, repeat_count, cached_result)
@@ -931,6 +931,17 @@ class Agent:
                             risk_level=getattr(e, "risk_level", ""),
                             impact_analysis=getattr(e, "impact_analysis", ""),
                         )
+                        for skipped_tc, _, _, _ in tool_call_plans[index + 1:]:
+                            skipped_result = (
+                                "Tool call was not executed because an earlier command is waiting "
+                                "for user approval. Re-request this tool call after the approval "
+                                "decision if the result is still needed."
+                            )
+                            session.add_tool_result(skipped_tc.id, skipped_result)
+                            logger.info(
+                                "Deferred tool call due to pending approval: %s",
+                                skipped_tc.id,
+                            )
                         payload = {
                             "approval_id": approval_id,
                             "run_id": run_id,

@@ -9,7 +9,7 @@ from unittest.mock import patch
 from chatdome.agent.core import Agent
 from chatdome.agent.prompts import build_system_prompt, build_tools
 from chatdome.agent.session import AgentSession
-from chatdome.agent.tools import ToolDispatcher
+from chatdome.agent.tools import PendingApprovalError, ToolDispatcher
 from chatdome.llm.client import LLMResponse, ToolCall
 
 
@@ -128,6 +128,31 @@ class CountingToolDispatcher:
             }
         )
         return "ok"
+
+
+class PendingAfterSecondToolDispatcher:
+    def __init__(self):
+        self.calls = []
+
+    async def dispatch(self, tool_name, arguments_json, tool_call_id="", chat_id=0):
+        self.calls.append(
+            {
+                "tool_name": tool_name,
+                "arguments_json": arguments_json,
+                "tool_call_id": tool_call_id,
+                "chat_id": chat_id,
+            }
+        )
+        if tool_call_id == "call-2":
+            raise PendingApprovalError(
+                command="systemctl restart nginx",
+                safety_status="NEEDS_APPROVAL",
+                impact_analysis="May restart a service.",
+                tool_call_id=tool_call_id,
+                reason="Need to restart nginx after config check.",
+                risk_level="HIGH",
+            )
+        return f"result for {tool_call_id}"
 
 
 class FakeApprovalDetailDispatcher:
@@ -337,6 +362,72 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         tool_results = [msg for msg in session.messages if msg.get("role") == "tool"]
         self.assertEqual(len(tool_results), 3)
         self.assertIn("Duplicate tool call suppressed", tool_results[-1]["content"])
+
+    def test_pending_approval_defers_remaining_tool_calls_with_outputs(self):
+        session = AgentSession(chat_id=123)
+        session.add_user_message("diagnose and repair web service")
+        llm = FakeLLM(
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="call-1",
+                        name="run_shell_command",
+                        arguments='{"command": "ss -tlnp"}',
+                    ),
+                    ToolCall(
+                        id="call-2",
+                        name="run_shell_command",
+                        arguments='{"command": "systemctl restart nginx"}',
+                    ),
+                    ToolCall(
+                        id="call-3",
+                        name="run_shell_command",
+                        arguments='{"command": "journalctl -u nginx -n 50"}',
+                    ),
+                ],
+            )
+        )
+        dispatcher = PendingAfterSecondToolDispatcher()
+        agent = _loop_agent(llm, dispatcher)
+
+        with patch("chatdome.agent.audit.CommandAuditTracker.record_event"), patch(
+            "chatdome.agent.tracker.TokenTracker.record_usage"
+        ):
+            response = asyncio.run(agent._run_loop(123, session))
+
+        self.assertEqual(response.kind, "pending_approval")
+        self.assertEqual(
+            [call["tool_call_id"] for call in dispatcher.calls],
+            ["call-1", "call-2"],
+        )
+        tool_results = {
+            msg["tool_call_id"]: msg["content"]
+            for msg in session.messages
+            if msg.get("role") == "tool"
+        }
+        self.assertEqual(tool_results["call-1"], "result for call-1")
+        self.assertIn("not executed", tool_results["call-3"])
+        self.assertNotIn("call-2", tool_results)
+
+        resume_agent = _resume_agent(session)
+        with patch("chatdome.agent.audit.CommandAuditTracker.record_event"):
+            raw_result, final_response = asyncio.run(
+                resume_agent.resume_session(
+                    123,
+                    "APPROVE",
+                    approval_id=session.pending_approval_id,
+                )
+            )
+
+        self.assertEqual(raw_result, "ok")
+        self.assertEqual(final_response.kind, "reply")
+        tool_result_ids = [
+            msg["tool_call_id"]
+            for msg in session.messages
+            if msg.get("role") == "tool"
+        ]
+        self.assertCountEqual(tool_result_ids, ["call-1", "call-2", "call-3"])
 
     def test_command_audit_tool_returns_recent_executed_commands(self):
         from chatdome.agent.audit import CommandAuditTracker
