@@ -267,6 +267,8 @@ class Agent:
     async def handle_message(self, chat_id: int, user_message: str) -> AgentResult:
         """Process a user message through the full ReAct loop."""
         session = self.session_manager.get_or_create(chat_id)
+        if session.repair_missing_tool_outputs():
+            self._persist_session(session)
 
         if session.pending_approval:
             # Allow natural-language rejection while waiting approval.

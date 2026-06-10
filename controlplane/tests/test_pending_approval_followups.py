@@ -287,6 +287,40 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         self.assertEqual(restored.pending_command_hash, session.pending_command_hash)
         self.assertEqual(restored.pending_risk_level, "LOW")
 
+    def test_missing_legacy_tool_output_is_repaired(self):
+        session = AgentSession(chat_id=123)
+        session.messages = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "check web"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "fc_legacy",
+                        "call_id": "call_legacy",
+                        "type": "function",
+                        "function": {"name": "run_shell_command", "arguments": "{}"},
+                    }
+                ],
+            },
+        ]
+
+        repaired = session.repair_missing_tool_outputs()
+
+        self.assertEqual(repaired, 1)
+        self.assertEqual(session.messages[-1]["role"], "tool")
+        self.assertEqual(session.messages[-1]["tool_call_id"], "call_legacy")
+        self.assertIn("Legacy tool output was missing", session.messages[-1]["content"])
+
+    def test_pending_tool_output_is_not_repaired_until_decision(self):
+        session = _pending_session()
+
+        repaired = session.repair_missing_tool_outputs()
+
+        self.assertEqual(repaired, 0)
+        self.assertFalse(any(msg.get("role") == "tool" for msg in session.messages))
+
     def test_detail_request_can_upgrade_static_cache_to_llm_review(self):
         session = _pending_session()
         session.pending_analysis = {

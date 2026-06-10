@@ -159,6 +159,48 @@ class AgentSession:
         })
         self.last_active = time.time()
 
+    def repair_missing_tool_outputs(self) -> int:
+        """Add fail-safe outputs for legacy assistant tool calls missing results."""
+        existing_outputs = {
+            str(msg.get("tool_call_id") or "")
+            for msg in self.messages
+            if msg.get("role") == "tool" and msg.get("tool_call_id")
+        }
+        pending_call_id = (
+            str(self.pending_tool_call_id or "")
+            if self.pending_approval and self.pending_tool_call_id
+            else ""
+        )
+        repaired = 0
+
+        for msg in list(self.messages):
+            if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+                continue
+            for tool_call in msg.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                call_id = str(tool_call.get("call_id") or tool_call.get("id") or "")
+                if not call_id or call_id in existing_outputs or call_id == pending_call_id:
+                    continue
+                self.add_tool_result(
+                    call_id,
+                    (
+                        "Legacy tool output was missing from the persisted session. "
+                        "ChatDome marked this tool call as unavailable without executing it. "
+                        "Re-request the check if this result is still needed."
+                    ),
+                )
+                existing_outputs.add(call_id)
+                repaired += 1
+
+        if repaired:
+            logger.warning(
+                "Repaired %d missing tool output(s) for chat_id=%d",
+                repaired,
+                self.chat_id,
+            )
+        return repaired
+
     def add_pending_followup(self, role: str, content: str) -> None:
         """Append a side-thread message while waiting for human approval."""
         if role not in {"user", "assistant"}:
@@ -444,6 +486,8 @@ class SessionManager:
             if (time.time() - pending_since) > self.pending_approval_timeout:
                 logger.info("Pending approval expired while offline for chat_id=%d", chat_id)
                 session.clear_pending_state()
+
+        session.repair_missing_tool_outputs()
 
         # Refresh in-memory activity timestamp to avoid immediate eviction.
         session.last_active = time.time()
