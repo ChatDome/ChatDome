@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +108,31 @@ class LLMManager:
                 profile=self._profiles[profile_name],
             )
 
+    async def reload_profiles(self, profiles: dict[str, AIConfig], active_profile: str) -> None:
+        """
+        Replace the profile pool and clear cached clients.
+
+        This is used by the local management menu hot-reload path. It validates
+        only the configuration shape; authentication is still checked lazily when
+        a profile is used or selected.
+        """
+        if not profiles:
+            raise LLMProfileError("LLMManager requires at least one AI profile.")
+        if active_profile not in profiles:
+            raise LLMProfileNotFound(f"Active AI profile does not exist: {active_profile}")
+
+        async with self._get_lock():
+            old_profile = self._active_profile
+            self._profiles = dict(profiles)
+            self._active_profile = active_profile
+            self._clients.clear()
+            logger.info(
+                "LLM profiles reloaded: active=%s -> %s, profile_count=%d",
+                old_profile,
+                active_profile,
+                len(self._profiles),
+            )
+
     async def switch_profile(self, profile_name: str) -> LLMSnapshot:
         """
         Switch the active profile after validating the target.
@@ -163,12 +187,10 @@ class LLMManager:
 
     async def _validate_profile_ready(self, profile_name: str, profile: AIConfig) -> None:
         if profile.api_mode == "openai_api":
-            env_name = self._api_key_env_name(profile)
-            key = os.environ.get(env_name, "")
-            if not key:
+            if not str(profile.api_key or "").strip():
                 raise LLMProfileNotReady(
                     f"LLM profile {profile_name!r} is not authenticated: "
-                    f"environment variable {env_name} is not set."
+                    "api_key is not configured in config.yaml."
                 )
             return
 
@@ -191,37 +213,24 @@ class LLMManager:
         )
 
     def _resolved_profile_for_client(self, profile_name: str, profile: AIConfig) -> AIConfig:
-        if profile.api_mode != "openai_api":
-            return profile
-
-        env_name = self._api_key_env_name(profile)
-        key = os.environ.get(env_name, "")
-        if not key:
+        if profile.api_mode == "openai_api" and not str(profile.api_key or "").strip():
             raise LLMProfileNotReady(
                 f"LLM profile {profile_name!r} is not authenticated: "
-                f"environment variable {env_name} is not set."
+                "api_key is not configured in config.yaml."
             )
-        return replace(profile, api_key=key)
-
-    @staticmethod
-    def _api_key_env_name(profile: AIConfig) -> str:
-        raw = str(profile.api_key or "").strip()
-        if not raw.startswith("env:") or not raw[4:].strip():
-            raise LLMProfileNotReady("api_key must use env:<ENV_NAME>.")
-        return raw[4:].strip()
+        return profile
 
     @classmethod
     def _safe_key_ref(cls, profile: AIConfig) -> str | None:
         if profile.api_mode != "openai_api":
             return None
-        try:
-            env_name = cls._api_key_env_name(profile)
-        except LLMProfileNotReady:
-            return "invalid"
-        if os.environ.get(env_name, ""):
-            fingerprint = hashlib.sha256(os.environ[env_name].encode("utf-8")).hexdigest()[:8]
-            return f"env:{env_name} loaded fp={fingerprint}"
-        return f"env:{env_name} missing"
+        key = str(profile.api_key or "").strip()
+        if not key:
+            return "missing"
+        if key.startswith("env:"):
+            return "deprecated env: reference"
+        fingerprint = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+        return f"configured fp={fingerprint}"
 
     @staticmethod
     def _profile_base_url(profile: AIConfig) -> str | None:
@@ -232,11 +241,10 @@ class LLMManager:
     @classmethod
     def _profile_status(cls, profile: AIConfig) -> str:
         if profile.api_mode == "openai_api":
-            try:
-                env_name = cls._api_key_env_name(profile)
-            except LLMProfileNotReady:
+            key = str(profile.api_key or "").strip()
+            if key.startswith("env:"):
                 return "invalid_key_ref"
-            return "ready" if os.environ.get(env_name, "") else "missing_key"
+            return "ready" if key else "missing_key"
 
         if profile.api_mode == "codex_responses":
             token_file = (

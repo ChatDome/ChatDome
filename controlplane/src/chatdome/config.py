@@ -1,18 +1,13 @@
 """
 Configuration loader.
 
-Runtime configuration is loaded from YAML plus a small set of operational
-environment variables. LLM credentials are referenced from YAML with
-``api_key: "env:ENV_NAME"`` and resolved by LLMManager when a profile is used.
+Runtime configuration is loaded from a single YAML file. Sensitive values
+such as Telegram Bot tokens and OpenAI-compatible API keys live in
+``config.yaml``; the file must stay out of version control and should be
+created with owner-only permissions by the installer/menu tooling.
 
 Environment variables:
-  CHATDOME_BOT_TOKEN        - Telegram Bot token (required)
-  CHATDOME_ALLOWED_CHAT_IDS - Comma-separated chat IDs (optional)
-  CHATDOME_PENDING_APPROVAL_TIMEOUT - Pending approval timeout in seconds (optional)
-  CHATDOME_PERSISTED_SESSION_TTL - Persisted session retention in seconds (optional)
-  CHATDOME_PERSIST_COMMAND_OUTPUTS - Persist command stdout/stderr archives (optional)
-  CHATDOME_SENTINEL_ALERT_RETENTION_DAYS - Sentinel alert log retention days (optional)
-  CHATDOME_CONFIG           - Path to config.yaml (optional)
+  CHATDOME_CONFIG - Path to config.yaml (optional process bootstrap only)
 """
 
 from __future__ import annotations
@@ -38,6 +33,7 @@ class TelegramConfig:
     """Telegram bot connection settings."""
     bot_token: str = ""
     allowed_chat_ids: list[int] = field(default_factory=list)
+    proxy_url: str = ""
     max_message_length: int = 4000
 
 
@@ -135,11 +131,6 @@ def _parse_chat_ids(raw: str) -> list[int]:
     return ids
 
 
-def _parse_bool_env(raw: str) -> bool:
-    """Parse common truthy strings used in environment toggles."""
-    return raw.lower() in ("true", "1", "yes", "on")
-
-
 def _normalize_api_mode(raw: str) -> str:
     """Normalize public API mode aliases to internal adapter ids."""
     value = (raw or "openai_api").strip().lower().replace("-", "_")
@@ -170,11 +161,6 @@ def _validate_profile_name(name: str) -> str:
     return value
 
 
-def _is_env_key_ref(raw: str) -> bool:
-    value = str(raw or "").strip()
-    return value.startswith("env:") and bool(value[4:].strip())
-
-
 def _normalize_ai_profile(name: str, raw: dict[str, Any]) -> AIConfig:
     if not isinstance(raw, dict):
         raise ValueError(f"AI profile {name!r} must be a mapping.")
@@ -192,14 +178,10 @@ def _normalize_ai_profile(name: str, raw: dict[str, Any]) -> AIConfig:
         profile.provider = "codex"
 
     profile.api_key = str(profile.api_key or "").strip()
-    if profile.api_key and not _is_env_key_ref(profile.api_key):
+    if profile.api_key.startswith("env:"):
         raise ValueError(
-            f"AI profile {name!r} api_key must use env:<ENV_NAME>; plaintext keys are not allowed."
-        )
-
-    if profile.api_mode == "openai_api" and not _is_env_key_ref(profile.api_key):
-        raise ValueError(
-            f"AI profile {name!r} requires api_key: \"env:<ENV_NAME>\"."
+            f"AI profile {name!r} uses deprecated api_key env: references. "
+            "Store the API key directly in config.yaml instead."
         )
 
     profile.base_url = str(profile.base_url or "https://api.openai.com/v1").strip()
@@ -267,7 +249,7 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
             yaml_data = raw["chatdome"] or {}
     else:
         logger.info(
-            "No config file found at %s, using defaults + environment variables",
+            "No config file found at %s, using defaults",
             path.resolve(),
         )
 
@@ -284,102 +266,16 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
         sentinel=_dict_to_dataclass(SentinelConfig, yaml_data.get("sentinel")),
     )
 
-    bot_token = os.environ.get("CHATDOME_BOT_TOKEN", "")
-    if bot_token:
-        config.telegram.bot_token = bot_token
-
-    chat_ids_env = os.environ.get("CHATDOME_ALLOWED_CHAT_IDS", "")
-    if chat_ids_env:
-        config.telegram.allowed_chat_ids = _parse_chat_ids(chat_ids_env)
-
-    allow_gen_env = os.environ.get("CHATDOME_ALLOW_GENERATED_COMMANDS", "")
-    if allow_gen_env:
-        config.agent.allow_generated_commands = _parse_bool_env(allow_gen_env)
-
-    allow_unrestricted_env = os.environ.get("CHATDOME_ALLOW_UNRESTRICTED_COMMANDS", "")
-    if allow_unrestricted_env:
-        config.agent.allow_unrestricted_commands = _parse_bool_env(allow_unrestricted_env)
-
-    pending_timeout_env = os.environ.get("CHATDOME_PENDING_APPROVAL_TIMEOUT", "")
-    if pending_timeout_env:
-        try:
-            parsed_timeout = int(pending_timeout_env)
-            if parsed_timeout > 0:
-                config.agent.pending_approval_timeout = parsed_timeout
-            else:
-                logger.warning(
-                    "CHATDOME_PENDING_APPROVAL_TIMEOUT must be > 0, ignored: %s",
-                    pending_timeout_env,
-                )
-        except ValueError:
-            logger.warning("Invalid CHATDOME_PENDING_APPROVAL_TIMEOUT ignored: %s", pending_timeout_env)
-
-    persisted_ttl_env = os.environ.get("CHATDOME_PERSISTED_SESSION_TTL", "")
-    if persisted_ttl_env:
-        try:
-            parsed_ttl = int(persisted_ttl_env)
-            if parsed_ttl >= 0:
-                config.agent.persisted_session_ttl = parsed_ttl
-            else:
-                logger.warning(
-                    "CHATDOME_PERSISTED_SESSION_TTL must be >= 0, ignored: %s",
-                    persisted_ttl_env,
-                )
-        except ValueError:
-            logger.warning("Invalid CHATDOME_PERSISTED_SESSION_TTL ignored: %s", persisted_ttl_env)
-
-    persist_outputs_env = os.environ.get("CHATDOME_PERSIST_COMMAND_OUTPUTS", "")
-    if persist_outputs_env:
-        config.agent.persist_command_outputs = _parse_bool_env(persist_outputs_env)
-
-    output_retention_env = os.environ.get("CHATDOME_COMMAND_OUTPUT_RETENTION_DAYS", "")
-    if output_retention_env:
-        try:
-            parsed_days = int(output_retention_env)
-            if parsed_days > 0:
-                config.agent.command_output_retention_days = parsed_days
-            else:
-                logger.warning(
-                    "CHATDOME_COMMAND_OUTPUT_RETENTION_DAYS must be > 0, ignored: %s",
-                    output_retention_env,
-                )
-        except ValueError:
-            logger.warning("Invalid CHATDOME_COMMAND_OUTPUT_RETENTION_DAYS ignored: %s", output_retention_env)
-
-    output_max_chars_env = os.environ.get("CHATDOME_COMMAND_OUTPUT_MAX_CHARS", "")
-    if output_max_chars_env:
-        try:
-            parsed_chars = int(output_max_chars_env)
-            if parsed_chars > 0:
-                config.agent.command_output_max_chars = parsed_chars
-            else:
-                logger.warning(
-                    "CHATDOME_COMMAND_OUTPUT_MAX_CHARS must be > 0, ignored: %s",
-                    output_max_chars_env,
-                )
-        except ValueError:
-            logger.warning("Invalid CHATDOME_COMMAND_OUTPUT_MAX_CHARS ignored: %s", output_max_chars_env)
-
-    sentinel_enabled_env = os.environ.get("CHATDOME_SENTINEL_ENABLED", "")
-    if sentinel_enabled_env:
-        config.sentinel.enabled = _parse_bool_env(sentinel_enabled_env)
-
-    sentinel_retention_env = os.environ.get("CHATDOME_SENTINEL_ALERT_RETENTION_DAYS", "")
-    if sentinel_retention_env:
-        try:
-            parsed_days = int(sentinel_retention_env)
-            if parsed_days > 0:
-                config.sentinel.alert_retention_days = parsed_days
-            else:
-                logger.warning(
-                    "CHATDOME_SENTINEL_ALERT_RETENTION_DAYS must be > 0, ignored: %s",
-                    sentinel_retention_env,
-                )
-        except ValueError:
-            logger.warning(
-                "Invalid CHATDOME_SENTINEL_ALERT_RETENTION_DAYS ignored: %s",
-                sentinel_retention_env,
-            )
+    if isinstance(config.telegram.allowed_chat_ids, str):
+        config.telegram.allowed_chat_ids = _parse_chat_ids(config.telegram.allowed_chat_ids)
+    else:
+        parsed_chat_ids: list[int] = []
+        for raw_chat_id in config.telegram.allowed_chat_ids or []:
+            try:
+                parsed_chat_ids.append(int(raw_chat_id))
+            except (TypeError, ValueError):
+                logger.warning("Invalid chat ID ignored: %s", raw_chat_id)
+        config.telegram.allowed_chat_ids = parsed_chat_ids
 
     if config.sentinel.enabled and not config.sentinel.checks:
         logger.warning(
@@ -391,8 +287,7 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     if not config.telegram.bot_token:
         raise ValueError(
             "Telegram Bot Token is not configured.\n"
-            "Set the CHATDOME_BOT_TOKEN environment variable:\n"
-            "  export CHATDOME_BOT_TOKEN=\"your-telegram-bot-token\""
+            "Set chatdome.telegram.bot_token in config.yaml."
         )
 
     active_profile = config.ai_profiles[config.active_ai_profile]

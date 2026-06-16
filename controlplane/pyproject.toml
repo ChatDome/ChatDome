@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-chatdome = "chatdome.main:main"
+chatdome-server = "chatdome.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

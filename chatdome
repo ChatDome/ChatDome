@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLI="$ROOT_DIR/chatdome-cli.py"
+SERVICE_NAME="chatdome"
+
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+else
+  PYTHON_BIN="python"
+fi
+
+pause() {
+  echo
+  read -r -p "Press Enter to continue..." _
+}
+
+run_cli() {
+  "$PYTHON_BIN" "$CLI" "$@"
+}
+
+systemctl_available() {
+  command -v systemctl >/dev/null 2>&1
+}
+
+service_action() {
+  local action="$1"
+  if systemctl_available; then
+    sudo systemctl "$action" "$SERVICE_NAME"
+  else
+    bash "$ROOT_DIR/scripts/start.sh" "$action"
+  fi
+}
+
+show_header() {
+  clear
+  echo "ChatDome Management Menu"
+  echo "========================"
+  echo
+}
+
+start_service() {
+  show_header
+  run_cli ensure-config
+  run_cli status || true
+  echo
+  read -r -p "Start or restart ChatDome service now? [y/N] " answer
+  case "${answer,,}" in
+    y|yes)
+      service_action restart
+      ;;
+    *)
+      echo "Skipped."
+      ;;
+  esac
+  pause
+}
+
+service_menu() {
+  while true; do
+    show_header
+    echo "Service Management"
+    echo "1) Show status"
+    echo "2) Restart service"
+    echo "3) Stop service"
+    echo "4) Follow logs"
+    echo "5) Show environment profile"
+    echo "0) Back"
+    echo
+    read -r -p "Select: " choice
+    case "$choice" in
+      1) run_cli status; pause ;;
+      2) service_action restart; pause ;;
+      3) service_action stop; pause ;;
+      4)
+        if systemctl_available; then
+          sudo journalctl -u "$SERVICE_NAME" -f
+        else
+          tail -f "$ROOT_DIR/chat_data/chatdome.log"
+        fi
+        ;;
+      5) run_cli env-summary; pause ;;
+      0) return ;;
+    esac
+  done
+}
+
+llm_menu() {
+  while true; do
+    show_header
+    echo "LLM Management"
+    echo "1) List profiles"
+    echo "2) Configure OpenAI-compatible API"
+    echo "3) Configure Codex OAuth profile"
+    echo "4) Switch default profile"
+    echo "5) Show setup guide"
+    echo "0) Back"
+    echo
+    read -r -p "Select: " choice
+    case "$choice" in
+      1) run_cli llm-list; pause ;;
+      2)
+        read -r -p "Profile name [openai-official]: " profile
+        profile="${profile:-openai-official}"
+        read -r -p "Model [gpt-4o]: " model
+        model="${model:-gpt-4o}"
+        read -r -p "Base URL [https://api.openai.com/v1]: " base_url
+        base_url="${base_url:-https://api.openai.com/v1}"
+        read -r -s -p "API Key: " api_key
+        echo
+        run_cli set-openai --profile "$profile" --model "$model" --base-url "$base_url" --api-key "$api_key"
+        pause
+        ;;
+      3)
+        read -r -p "Profile name [codex-gpt5]: " profile
+        profile="${profile:-codex-gpt5}"
+        read -r -p "Model [gpt-5.5]: " model
+        model="${model:-gpt-5.5}"
+        read -r -p "Client ID (blank = default): " client_id
+        read -r -p "Token file (blank = ~/.chatdome/auth.json): " token_file
+        read -r -p "Base URL [https://chatgpt.com/backend-api/codex]: " base_url
+        base_url="${base_url:-https://chatgpt.com/backend-api/codex}"
+        run_cli set-codex --profile "$profile" --model "$model" --client-id "$client_id" --token-file "$token_file" --base-url "$base_url"
+        echo "Use /codex_login $profile in Telegram to finish OAuth."
+        pause
+        ;;
+      4)
+        run_cli llm-list
+        echo
+        read -r -p "Profile to activate: " profile
+        run_cli set-active-profile "$profile"
+        pause
+        ;;
+      5)
+        cat <<'GUIDE'
+OpenAI-compatible:
+  1. Choose a profile name, model, base URL, and API key.
+  2. The key is written to local config.yaml.
+  3. ChatDome receives an llm hot-reload request automatically.
+
+Codex OAuth:
+  1. Configure the Codex profile here if needed.
+  2. Open Telegram and run /codex_login <profile>.
+  3. Complete the device-code flow in your browser.
+GUIDE
+        pause
+        ;;
+      0) return ;;
+    esac
+  done
+}
+
+telegram_menu() {
+  while true; do
+    show_header
+    echo "Telegram Configuration"
+    echo "1) Show Telegram config"
+    echo "2) Set Bot Token"
+    echo "3) Set allowed Chat IDs"
+    echo "4) Check Telegram API"
+    echo "5) Send test message"
+    echo "6) Set proxy URL"
+    echo "0) Back"
+    echo
+    read -r -p "Select: " choice
+    case "$choice" in
+      1) run_cli telegram-status; pause ;;
+      2)
+        read -r -s -p "Bot Token: " token
+        echo
+        run_cli set-bot-token "$token"
+        pause
+        ;;
+      3)
+        read -r -p "Chat IDs (comma-separated): " chat_ids
+        run_cli set-chat-ids "$chat_ids"
+        pause
+        ;;
+      4) run_cli check-telegram; pause ;;
+      5) run_cli send-test-message; pause ;;
+      6)
+        read -r -p "Proxy URL (blank to clear): " proxy_url
+        run_cli set-telegram-proxy "$proxy_url"
+        pause
+        ;;
+      0) return ;;
+    esac
+  done
+}
+
+sentinel_menu() {
+  while true; do
+    show_header
+    echo "Sentinel Management"
+    echo "1) Show Sentinel status"
+    echo "2) Enable/disable Sentinel"
+    echo "3) List checks"
+    echo "4) Change push policy"
+    echo "0) Back"
+    echo
+    read -r -p "Select: " choice
+    case "$choice" in
+      1) run_cli sentinel-status; pause ;;
+      2)
+        read -r -p "Enable Sentinel? [true/false]: " enabled
+        run_cli set-sentinel-enabled "$enabled"
+        pause
+        ;;
+      3) run_cli list-sentinel-checks; pause ;;
+      4)
+        read -r -p "push_min_severity (blank = keep): " severity
+        read -r -p "global_rate_limit (blank = keep): " limit
+        args=()
+        [[ -n "$severity" ]] && args+=(--push-min-severity "$severity")
+        [[ -n "$limit" ]] && args+=(--global-rate-limit "$limit")
+        run_cli set-sentinel-policy "${args[@]}"
+        pause
+        ;;
+      0) return ;;
+    esac
+  done
+}
+
+agent_menu() {
+  while true; do
+    show_header
+    echo "Agent Security Policy"
+    echo "1) Show current policy"
+    echo "2) Switch command mode"
+    echo "3) Change timeouts"
+    echo "0) Back"
+    echo
+    read -r -p "Select: " choice
+    case "$choice" in
+      1) run_cli agent-status; pause ;;
+      2)
+        echo "Modes: restricted, generated, unrestricted"
+        read -r -p "Mode: " mode
+        run_cli set-agent-mode "$mode"
+        pause
+        ;;
+      3)
+        read -r -p "session_timeout (blank = keep): " session_timeout
+        read -r -p "max_rounds_per_turn (blank = keep): " max_rounds
+        read -r -p "command_timeout (blank = keep): " command_timeout
+        args=()
+        [[ -n "$session_timeout" ]] && args+=(--session-timeout "$session_timeout")
+        [[ -n "$max_rounds" ]] && args+=(--max-rounds-per-turn "$max_rounds")
+        [[ -n "$command_timeout" ]] && args+=(--command-timeout "$command_timeout")
+        run_cli set-agent-params "${args[@]}"
+        pause
+        ;;
+      0) return ;;
+    esac
+  done
+}
+
+maintenance_menu() {
+  while true; do
+    show_header
+    echo "System Maintenance"
+    echo "1) Update ChatDome"
+    echo "2) Uninstall / disable"
+    echo "0) Back"
+    echo
+    read -r -p "Select: " choice
+    case "$choice" in
+      1)
+        git -C "$ROOT_DIR" pull
+        "$PYTHON_BIN" -m pip install -e "$ROOT_DIR/controlplane"
+        service_action restart
+        pause
+        ;;
+      2)
+        echo "1) Stop and disable service only"
+        echo "2) Full cleanup instructions"
+        read -r -p "Select: " uninstall_choice
+        case "$uninstall_choice" in
+          1)
+            if systemctl_available; then
+              sudo systemctl disable --now "$SERVICE_NAME"
+            else
+              bash "$ROOT_DIR/scripts/start.sh" stop
+            fi
+            ;;
+          2)
+            echo "For full cleanup: stop the service, remove installed symlinks/systemd unit, then delete the project directory if desired."
+            ;;
+        esac
+        pause
+        ;;
+      0) return ;;
+    esac
+  done
+}
+
+main_menu() {
+  run_cli ensure-config >/dev/null
+  while true; do
+    show_header
+    echo "1) Start service"
+    echo "2) Service management"
+    echo "3) AI model management"
+    echo "4) Telegram configuration"
+    echo "5) Sentinel management"
+    echo "6) Agent security policy"
+    echo "7) System maintenance"
+    echo "0) Exit"
+    echo
+    read -r -p "Select: " choice
+    case "$choice" in
+      1) start_service ;;
+      2) service_menu ;;
+      3) llm_menu ;;
+      4) telegram_menu ;;
+      5) sentinel_menu ;;
+      6) agent_menu ;;
+      7) maintenance_menu ;;
+      0) exit 0 ;;
+    esac
+  done
+}
+
+main_menu

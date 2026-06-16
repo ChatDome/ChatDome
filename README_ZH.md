@@ -119,38 +119,28 @@ python3 -m pip install -r requirements.txt
 ```
 
 #### 方式 B：开发模式安装（Editable Mode）
-不仅安装依赖，还会注册全局可用的 `chatdome` 命令行工具。
+不仅安装依赖，还会注册全局可用的 `chatdome-server` 服务入口。
 ```bash
 python3 -m pip install -e .
 ```
 
 ### 配置
 
-Telegram Bot Token 与 API-key profile 凭据通过**环境变量**配置；Codex OAuth 在 `/codex_login` 后把 token 安全写入本地 `~/.chatdome/auth.json`。
-
-```bash
-# == 强烈建议：将以下配置写入 ~/.bashrc 或 ~/.zshrc 以便持久化生效 ==
-
-# 必需
-export CHATDOME_BOT_TOKEN="your-telegram-bot-token"
-
-# 可选
-export CHATDOME_ALLOWED_CHAT_IDS="123456789"                # Telegram Chat ID 访问控制
-export CHATDOME_OPENAI_API_KEY="your-openai-api-key"        # 被 config.yaml 的 ai_profiles 引用
-export DEEPSEEK_API_KEY="your-deepseek-api-key"             # 可选 profile key
-export CHATDOME_SENTINEL_ENABLED="true"                     # 开启 7×24 哨兵监控模式
-export CHATDOME_ALLOW_GENERATED_COMMANDS="true"             # 允许 AI 自主生成并执行命令
-export CHATDOME_ALLOW_UNRESTRICTED_COMMANDS="true"          # 开启完全开放权限模式（God Mode）
-```
-
-非敏感的调优参数在 YAML 配置文件中：
+所有运行配置统一写入本地 `config.yaml`。该文件会包含 Telegram Bot Token 和 API-key profile 凭据，已被 `.gitignore` 忽略；Linux 部署时建议保持 `chmod 600`。Codex OAuth 在 `/codex_login` 后仍把 token 安全写入本地 `~/.chatdome/auth.json`。
 
 ```bash
 cp config.example.yaml config.yaml
-# 可选：编辑 config.yaml 调整非敏感参数
+chmod 600 config.yaml
+# 编辑 config.yaml：填写 chatdome.telegram.bot_token、allowed_chat_ids 和需要的 api_key
 ```
 
-默认 `active_ai_profile` 是 `codex-gpt5`。首次启动后，在 Telegram 中发送 `/codex_login`，按提示完成浏览器授权；授权成功后即可直连 Codex 后端。使用 `/llm_list` 查看所有 profile，使用 `/llm <profile_name>` 切换模型。
+也可以直接运行仓库根目录的交互式菜单：
+
+```bash
+./chatdome
+```
+
+默认 `active_ai_profile` 是 `codex-gpt5`。首次启动后，在 Telegram 中发送 `/codex_login`，按提示完成浏览器授权；授权成功后即可直连 Codex 后端。使用 `/llm_list` 查看所有 profile，使用 `/llm <profile_name>` 切换模型；在本地菜单中修改 LLM、Sentinel 或 Agent 策略时，会写入 `config.yaml` 并发起热重载请求。
 
 ### 运行
 
@@ -163,8 +153,10 @@ python3 -m chatdome.main
 
 **如果使用 方式 B（开发模式安装）：**
 ```bash
-chatdome
+chatdome-server --config config.yaml
 ```
+
+如果使用一键安装脚本，安装后运行 `chatdome` 会进入本地管理菜单，服务由 systemd 以 `chatdome-server --config config.yaml` 启动。
 
 打开 Telegram，给你的 Bot 发一条消息，搞定。
 
@@ -178,60 +170,48 @@ https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 
 ## 配置
 
-### 环境变量
+### config.yaml 单文件配置
 
-Telegram Bot Token 与 API-key profile 凭据通过环境变量配置；Codex OAuth token 存储在本地 `~/.chatdome/auth.json`，不会写入 `config.yaml`。
-
-**Telegram：**
-
-| 变量名 | 必需 | 说明 |
-|--------|------|------|
-| `CHATDOME_BOT_TOKEN` | ✅ | Telegram Bot Token |
-| `CHATDOME_ALLOWED_CHAT_IDS` | ❌ | 逗号分隔的 Chat ID，用于访问控制 |
-
-**LLM：**
+ChatDome 当前采用 `config.yaml` 单文件管理运行配置。Telegram Bot Token、允许访问的 Chat IDs、OpenAI-compatible API Key、Sentinel 和 Agent 策略都写在这个文件中；`config.yaml` 已被 `.gitignore` 忽略，安装脚本和菜单会尽量将其权限设为 `600`。
 
 默认 `codex-gpt5` profile 不需要 API Key；它通过 Telegram `/codex_login` 触发 OAuth Device Code 登录，并把 token 保存到本地 `~/.chatdome/auth.json`。
 
-| 变量名 | 必需 | 说明 |
-|--------|------|------|
-| `CHATDOME_OPENAI_API_KEY` | 取决于 profile | 被 `api_key: "env:CHATDOME_OPENAI_API_KEY"` 引用的 API Key |
-| `DEEPSEEK_API_KEY` | 取决于 profile | DeepSeek 示例 profile 引用的 API Key |
+| 配置路径 | 必需 | 说明 |
+|----------|------|------|
+| `chatdome.telegram.bot_token` | ✅ | Telegram Bot Token |
+| `chatdome.telegram.allowed_chat_ids` | ❌ | 允许访问的 Chat ID 列表；空列表表示不限制 |
+| `chatdome.telegram.proxy_url` | ❌ | Telegram Bot API 代理地址 |
+| `chatdome.ai_profiles.<name>.api_key` | 取决于 profile | OpenAI-compatible profile 的 API Key，直接写入本地 `config.yaml` |
+| `chatdome.sentinel.enabled` | ❌ | 开启 7×24 Sentinel 哨兵主动监控模式 |
+| `chatdome.agent.allow_generated_commands` | ❌ | 允许 AI 自主生成命令 |
+| `chatdome.agent.allow_unrestricted_commands` | ❌ | 开启 unrestricted 模式 |
 
-**通用：**
-
-| 变量名 | 必需 | 说明 |
-|--------|------|------|
-| `CHATDOME_CONFIG` | ❌ | 配置文件路径（默认: `./config.yaml`） |
-| `CHATDOME_SENTINEL_ENABLED` | ❌ | 开启 7×24 Sentinel 哨兵主动监控模式 (`true`/`false`) |
-| `CHATDOME_ALLOW_GENERATED_COMMANDS` | ❌ | 全局一键开启“动态命令无限可能”模式 (`true`/`false`) |
-| `CHATDOME_ALLOW_UNRESTRICTED_COMMANDS` | ❌ | 开启 God Mode（绕过所有命令验证）(`true`/`false`) |
-
-> ⚠️ **安全提醒**：切勿将 Token 或 API Key 提交到版本控制。请使用环境变量、`.env` 文件（并添加到 `.gitignore`）或密钥管理器。
+> ⚠️ **安全提醒**：切勿将 `config.yaml` 提交到版本控制。该文件包含敏感信息，生产部署建议只允许 owner 读写。
 
 ### 🎛️ 核心能力控制开关（进阶）
 
-除了基础的 Token 配置外，ChatDome 提供了三个改变核心运行逻辑的进阶能力开关。在使用进阶功能前，强烈建议你了解它们的作用。当前随仓库提供的默认配置（`config.example.yaml`）中，Sentinel 与动态命令执行默认开启；如需保守部署，请在配置文件或环境变量中显式设置对应选项为 `"false"`：
+除了基础的 Token 配置外，ChatDome 提供了三个改变核心运行逻辑的进阶能力开关。在使用进阶功能前，强烈建议你了解它们的作用。当前随仓库提供的默认配置（`config.example.yaml`）中，Sentinel 与动态命令执行默认开启；如需保守部署，请在 `config.yaml` 中显式设置对应选项为 `false`：
 
-#### 1. 哨兵主动监控模式 (`CHATDOME_SENTINEL_ENABLED`)
+#### 1. 哨兵主动监控模式 (`chatdome.sentinel.enabled`)
 - **功能说明**：将 ChatDome 从“被动的一问一答助手”升级为“7x24 小时主动巡更的哨兵”。它会在后台静默定期执行系统安全审计，并通过独创的双层态势感知架构对告警进行降噪聚合。
 - **推荐场景**：希望完全不需要主动询问，就能在异常发生的第一时间在 Telegram 被动收到精炼警报通知的所有运维人员。
 
-#### 2. 无限可能模式 (`CHATDOME_ALLOW_GENERATED_COMMANDS`)
+#### 2. 无限可能模式 (`chatdome.agent.allow_generated_commands`)
 - **功能说明**：解除“仅允许执行出厂预装官方命令”的严格限制。开启后，你用自然语言下达的复杂、模糊查阅要求，AI 会结合 Linux 知识生成新的 Shell 组合查询命令。
 - **内置安全机制**：动态命令会先经过静态审查和审批流程；当 unrestricted 模式关闭时，还会经过只读 allowlist/blocklist 校验。
 
-#### 3. 上帝越狱模式 (`CHATDOME_ALLOW_UNRESTRICTED_COMMANDS`)
+#### 3. 上帝越狱模式 (`chatdome.agent.allow_unrestricted_commands`)
 - **功能说明**：**【危险！上帝权限】**开启此项后，沙箱会绕过确定性的命令校验器，不再使用只读 allowlist/blocklist 作为硬边界。
 - **内置安全机制**：ToolDispatcher 仍会做执行前审查；静态安全、无写入/删除信号的命令可能自动执行，高风险、写入或删除命令会进入 Telegram 审批流，需要按钮确认或显式 `/confirm`。这仍是高风险模式，生产环境应谨慎开启。
 
-### 配置文件（非敏感参数）
-
-`config.yaml` 仅包含非敏感的调优参数：
+### 配置文件示例
 
 ```yaml
 chatdome:
   telegram:
+    bot_token: "123456:ABC..."
+    allowed_chat_ids: [123456789]
+    proxy_url: ""
     max_message_length: 4000
 
   active_ai_profile: "codex-gpt5"
@@ -253,7 +233,7 @@ chatdome:
       model: "gpt-4o"
       temperature: 0.1
       max_tokens: 2000
-      api_key: "env:CHATDOME_OPENAI_API_KEY"
+      api_key: "sk-..."                    # 直接写入本地 config.yaml
 
   agent:
     allow_generated_commands: true            # true = 允许 AI 生成临场命令

@@ -115,38 +115,28 @@ python3 -m pip install -r requirements.txt
 ```
 
 #### Method B: Development Install (Editable Mode)
-Installs dependencies as well as the globally accessible `chatdome` CLI command.
+Installs dependencies as well as the globally accessible `chatdome-server` service command.
 ```bash
 python3 -m pip install -e .
 ```
 
 ### Configure
 
-Telegram Bot tokens and API-key profile credentials are configured via **environment variables**. Codex OAuth stores its local token file at `~/.chatdome/auth.json` after `/codex_login`.
-
-```bash
-# == Highly Recommended: Add these to your ~/.bashrc or ~/.zshrc for persistence ==
-
-# Required
-export CHATDOME_BOT_TOKEN="your-telegram-bot-token"
-
-# Optional
-export CHATDOME_ALLOWED_CHAT_IDS="123456789"                 # Telegram Chat IDs for access control
-export CHATDOME_OPENAI_API_KEY="your-openai-api-key"         # Referenced by config.yaml ai_profiles
-export DEEPSEEK_API_KEY="your-deepseek-api-key"              # Optional profile key
-export CHATDOME_SENTINEL_ENABLED="true"                      # Enable 7x24 Sentinel monitoring
-export CHATDOME_ALLOW_GENERATED_COMMANDS="true"              # Allow AI to generate and execute own commands
-export CHATDOME_ALLOW_UNRESTRICTED_COMMANDS="true"           # Enable God Mode (full unrestricted execution)
-```
-
-Non-sensitive settings (model, timeout, etc.) are in a YAML config file:
+All runtime settings live in local `config.yaml`. This file contains Telegram Bot tokens and API-key profile credentials, is ignored by Git, and should be kept owner-readable only (`chmod 600` on Linux). Codex OAuth still stores its local token file at `~/.chatdome/auth.json` after `/codex_login`.
 
 ```bash
 cp config.example.yaml config.yaml
-# Edit config.yaml to tune non-sensitive parameters (optional)
+chmod 600 config.yaml
+# Edit config.yaml: set chatdome.telegram.bot_token, allowed_chat_ids, and any API keys you need
 ```
 
-The default `active_ai_profile` is `codex-gpt5`. After first startup, send `/codex_login` in Telegram and complete the browser authorization flow; once it succeeds, ChatDome can call Codex directly. Use `/llm_list` to inspect configured profiles and `/llm <profile_name>` to switch models.
+You can also use the interactive local menu from the repository root:
+
+```bash
+./chatdome
+```
+
+The default `active_ai_profile` is `codex-gpt5`. After first startup, send `/codex_login` in Telegram and complete the browser authorization flow; once it succeeds, ChatDome can call Codex directly. Use `/llm_list` to inspect configured profiles and `/llm <profile_name>` to switch models. Local menu changes to LLM, Sentinel, or Agent policy are written to `config.yaml` and request a runtime reload.
 
 ### Run
 
@@ -159,8 +149,10 @@ python3 -m chatdome.main
 
 **If you used Method B (Development Install):**
 ```bash
-chatdome
+chatdome-server --config config.yaml
 ```
+
+When installed with `install.sh`, the `chatdome` command opens the local management menu, and the systemd service runs `chatdome-server --config config.yaml`.
 
 Open Telegram, send your bot a message. Done.
 
@@ -174,60 +166,48 @@ Look for `"chat":{"id": 123456789}` in the response.
 
 ## Configuration
 
-### Environment Variables
+### Single-File `config.yaml`
 
-Telegram Bot tokens and API-key profile credentials are configured via environment variables. Codex OAuth tokens are stored locally in `~/.chatdome/auth.json` and are never written to `config.yaml`.
-
-**Telegram:**
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `CHATDOME_BOT_TOKEN` | ✅ | Telegram Bot token |
-| `CHATDOME_ALLOWED_CHAT_IDS` | ❌ | Comma-separated Chat IDs for access control |
-
-**LLM:**
+ChatDome now uses `config.yaml` as the single runtime configuration file. Telegram Bot token, allowed Chat IDs, OpenAI-compatible API keys, Sentinel settings, and Agent policy all live there. `config.yaml` is ignored by Git; installer/menu tooling keeps it owner-readable only where possible.
 
 The default `codex-gpt5` profile does not require an API key. It uses Telegram `/codex_login` to start OAuth Device Code login and stores tokens locally in `~/.chatdome/auth.json`.
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `CHATDOME_OPENAI_API_KEY` | Profile-dependent | API key referenced by `api_key: "env:CHATDOME_OPENAI_API_KEY"` |
-| `DEEPSEEK_API_KEY` | Profile-dependent | Example API key referenced by the DeepSeek profile |
+| Path | Required | Description |
+|------|----------|-------------|
+| `chatdome.telegram.bot_token` | ✅ | Telegram Bot token |
+| `chatdome.telegram.allowed_chat_ids` | ❌ | Allowed Chat IDs; empty list means no chat restriction |
+| `chatdome.telegram.proxy_url` | ❌ | Telegram Bot API proxy URL |
+| `chatdome.ai_profiles.<name>.api_key` | Profile-dependent | OpenAI-compatible profile API key, stored directly in local `config.yaml` |
+| `chatdome.sentinel.enabled` | ❌ | Enable 7x24 Sentinel proactive monitoring |
+| `chatdome.agent.allow_generated_commands` | ❌ | Allow AI-generated commands |
+| `chatdome.agent.allow_unrestricted_commands` | ❌ | Enable unrestricted command mode |
 
-**General:**
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `CHATDOME_CONFIG` | ❌ | Path to config.yaml (default: `./config.yaml`) |
-| `CHATDOME_SENTINEL_ENABLED` | ❌ | Enable 7x24 Sentinel proactive monitoring mode (`true`/`false`) |
-| `CHATDOME_ALLOW_GENERATED_COMMANDS` | ❌ | Enable Infinite Possibilities Mode (`true`/`false`) |
-| `CHATDOME_ALLOW_UNRESTRICTED_COMMANDS` | ❌ | Enable God Mode (bypass ALL command validation:`true`/`false`) |
-
-> ⚠️ **Security**: Never commit tokens or API keys to version control. Use environment variables, `.env` files (with `.gitignore`), or a secrets manager.
+> ⚠️ **Security**: Never commit `config.yaml` to version control. It contains secrets.
 
 ### 🎛️ Core Capability Switches (Advanced)
 
-Beyond basic token configuration, ChatDome offers three advanced privilege switches that alter its core operating logic. It is highly recommended to understand their implications before using them. In the shipped default configuration (`config.example.yaml`), Sentinel and dynamic command execution are enabled by default; set the corresponding options to `"false"` in config or environment variables for a conservative deployment:
+Beyond basic token configuration, ChatDome offers three advanced privilege switches that alter its core operating logic. It is highly recommended to understand their implications before using them. In the shipped default configuration (`config.example.yaml`), Sentinel and dynamic command execution are enabled by default; set the corresponding options to `false` in `config.yaml` for a conservative deployment:
 
-#### 1. Sentinel Proactive Monitoring Mode (`CHATDOME_SENTINEL_ENABLED`)
+#### 1. Sentinel Proactive Monitoring Mode (`chatdome.sentinel.enabled`)
 - **What it does**: Upgrades ChatDome from a "passive Q&A assistant" to a "7x24 proactive patrolling sentinel". It quietly performs periodic system security audits in the background and employs an innovative dual-layer situational awareness architecture to aggregate and denoise alerts.
 - **Recommended for**: Administrators who want to receive refined, proactive alert notifications on Telegram the moment an anomaly occurs, without needing to ask manually.
 
-#### 2. Infinite Possibilities Mode (`CHATDOME_ALLOW_GENERATED_COMMANDS`)
+#### 2. Infinite Possibilities Mode (`chatdome.agent.allow_generated_commands`)
 - **What it does**: Removes the strict limitation of "only executing pre-installed official commands". When enabled, the AI can generate new shell queries for complex or vague inspection requests.
 - **Security Guarantee**: Dynamic commands are reviewed before execution. With unrestricted mode disabled, they also pass through the read-only allowlist/blocklist validator.
 
-#### 3. God Mode (`CHATDOME_ALLOW_UNRESTRICTED_COMMANDS`)
+#### 3. God Mode (`chatdome.agent.allow_unrestricted_commands`)
 - **What it does**: **[DANGER! GOD PRIVILEGES]** Enabling this bypasses the deterministic command validator, removing the read-only allowlist/blocklist as a hard boundary.
 - **Security Guarantee**: ToolDispatcher still performs a pre-execution review. Static-safe commands with no write/delete signal may run automatically; risky, mutating, or deleting commands enter the Telegram approval flow and may require `/confirm`. This remains a high-risk mode and should be used cautiously in production.
 
-### Config File (Non-Sensitive / Optional)
-
-`config.yaml` contains only non-sensitive tuning parameters:
+### Config File Example
 
 ```yaml
 chatdome:
   telegram:
+    bot_token: "123456:ABC..."
+    allowed_chat_ids: [123456789]
+    proxy_url: ""
     max_message_length: 4000
 
   active_ai_profile: "codex-gpt5"
@@ -249,7 +229,7 @@ chatdome:
       model: "gpt-4o"
       temperature: 0.1
       max_tokens: 2000
-      api_key: "env:CHATDOME_OPENAI_API_KEY"
+      api_key: "sk-..."                    # stored directly in local config.yaml
 
   agent:
     allow_generated_commands: true            # true = AI can generate ad-hoc commands

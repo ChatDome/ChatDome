@@ -27,7 +27,7 @@ class FakeLLMManager:
                 api_mode="openai_api",
                 model="deepseek-chat",
                 base_url="https://api.deepseek.com/v1",
-                key_ref="env:DEEPSEEK_API_KEY loaded fp=12345678",
+                key_ref="configured fp=12345678",
                 status="ready",
                 active=False,
             ),
@@ -52,7 +52,7 @@ class TelegramLLMListTests(unittest.TestCase):
         self.assertIn("[当前] codex-gpt5", text)
         self.assertIn("[可选] deepseek", text)
         self.assertIn("状态: ready，可切换", text)
-        self.assertIn("Key: env:DEEPSEEK_API_KEY loaded fp=12345678", text)
+        self.assertIn("Key: configured fp=12345678", text)
         self.assertNotIn("deepseek | openai/openai_api", text)
 
 

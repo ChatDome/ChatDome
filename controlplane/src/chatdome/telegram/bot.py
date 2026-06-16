@@ -151,13 +151,17 @@ class TelegramBot:
 
     def build(self) -> Application:
         """Build and configure the Telegram Application."""
-        self._app = (
-            Application.builder()
-            .token(self.config.telegram.bot_token)
-            .post_init(self.post_init)
-            .post_stop(self.post_stop)
-            .build()
-        )
+        builder = Application.builder().token(self.config.telegram.bot_token)
+        proxy_url = str(getattr(self.config.telegram, "proxy_url", "") or "").strip()
+        if proxy_url:
+            if hasattr(builder, "proxy_url"):
+                builder = builder.proxy_url(proxy_url)
+            else:
+                logger.warning("telegram.proxy_url is configured but this PTB version does not support proxy_url().")
+            if hasattr(builder, "get_updates_proxy_url"):
+                builder = builder.get_updates_proxy_url(proxy_url)
+
+        self._app = builder.post_init(self.post_init).post_stop(self.post_stop).build()
 
         # Register handlers
         self._app.add_handler(CommandHandler("help", self._handle_help))
@@ -700,10 +704,10 @@ class TelegramBot:
     def _format_llm_status(status: str) -> str:
         labels = {
             "ready": "ready，可切换",
-            "missing_key": "missing_key，环境变量未设置",
+            "missing_key": "missing_key，config.yaml 中未配置 api_key",
             "token_file_present": "token_file_present，已找到 Codex token 文件",
             "not_authenticated": "not_authenticated，需要 /codex_login",
-            "invalid_key_ref": "invalid_key_ref，api_key 需要 env:<ENV_NAME>",
+            "invalid_key_ref": "invalid_key_ref，已废弃 env: 写法，请直接写入 config.yaml",
             "unsupported": "unsupported，不支持的 api_mode",
         }
         return labels.get(status, status)

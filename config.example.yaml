@@ -1,21 +1,15 @@
 # ChatDome Configuration
 #
-# This file contains NON-SENSITIVE settings only.
-# Telegram Bot tokens and API-key profile credentials are configured
-# via environment variables. Codex OAuth tokens are created by /codex_login
-# and stored locally in ~/.chatdome/auth.json — see README for details.
-#
-# Required environment variables:
-#   CHATDOME_BOT_TOKEN        — Telegram Bot token
-#
-# Optional environment variables:
-#   CHATDOME_OPENAI_API_KEY   — API key referenced by openai-official profile
-#   DEEPSEEK_API_KEY          — API key referenced by proxy-deepseek profile
-#   CHATDOME_ALLOWED_CHAT_IDS — Comma-separated Telegram Chat IDs (e.g. "123,456")
+# Copy this file to config.yaml and fill in local secrets there.
+# config.yaml is ignored by Git and should be kept owner-readable only
+# (chmod 600 on Linux). Codex OAuth tokens are still created by /codex_login
+# and stored locally in ~/.chatdome/auth.json.
 
 chatdome:
   telegram:
-    # allowed_chat_ids: set via CHATDOME_ALLOWED_CHAT_IDS env var
+    bot_token: ""
+    allowed_chat_ids: []
+    proxy_url: ""
     max_message_length: 4000
 
   # Multi-LLM profile pool.
@@ -40,14 +34,15 @@ chatdome:
 
     openai-official:
       # openai + openai_api uses OpenAI-compatible Chat Completions API + API key.
-      # api_key must use env:<ENV_NAME>; do not put plaintext keys in YAML.
+      # Leave api_key empty until you want to use this profile. The menu can
+      # write the local secret into config.yaml for you.
       provider: "openai"
       api_mode: "openai_api"
       base_url: "https://api.openai.com/v1"
       model: "gpt-4o"
       temperature: 0.1
       max_tokens: 2000
-      api_key: "env:CHATDOME_OPENAI_API_KEY"
+      api_key: ""
 
     proxy-deepseek:
       provider: "openai"
@@ -56,7 +51,7 @@ chatdome:
       model: "deepseek-chat"
       temperature: 0.1
       max_tokens: 2000
-      api_key: "env:DEEPSEEK_API_KEY"
+      api_key: ""
 
   agent:
     # -------------------------------------------------------------------------

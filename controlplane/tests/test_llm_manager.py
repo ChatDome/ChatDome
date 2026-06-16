@@ -1,5 +1,4 @@
 import asyncio
-import os
 import unittest
 from unittest.mock import patch
 
@@ -13,33 +12,32 @@ class DummyClient:
 
 
 class LLMManagerTests(unittest.TestCase):
-    def test_openai_profile_missing_env_rejects_switch(self):
+    def test_openai_profile_missing_key_rejects_switch(self):
         profiles = {
             "codex": AIConfig(provider="codex", api_mode="codex_responses", model="gpt-5.5"),
             "openai": AIConfig(
                 provider="openai",
                 api_mode="openai_api",
                 model="gpt-4o",
-                api_key="env:CHATDOME_OPENAI_API_KEY",
+                api_key="",
             ),
         }
         manager = LLMManager(profiles, "codex")
 
         async def run():
-            with patch.dict(os.environ, {}, clear=True):
-                with self.assertRaises(LLMProfileNotReady):
-                    await manager.switch_profile("openai")
+            with self.assertRaises(LLMProfileNotReady):
+                await manager.switch_profile("openai")
 
         asyncio.run(run())
         self.assertEqual(manager.get_active_profile_name(), "codex")
 
-    def test_openai_profile_resolves_env_key_before_client_creation(self):
+    def test_openai_profile_uses_direct_key_before_client_creation(self):
         profiles = {
             "openai": AIConfig(
                 provider="openai",
                 api_mode="openai_api",
                 model="gpt-4o",
-                api_key="env:CHATDOME_OPENAI_API_KEY",
+                api_key="secret-key",
             ),
         }
         manager = LLMManager(profiles, "openai")
@@ -50,10 +48,9 @@ class LLMManagerTests(unittest.TestCase):
             return DummyClient(profile.model)
 
         async def run():
-            with patch.dict(os.environ, {"CHATDOME_OPENAI_API_KEY": "secret-key"}, clear=True):
-                with patch("chatdome.llm.manager.create_llm_client", side_effect=fake_create):
-                    snapshot = await manager.get_active_snapshot()
-                    self.assertEqual(snapshot.client.model, "gpt-4o")
+            with patch("chatdome.llm.manager.create_llm_client", side_effect=fake_create):
+                snapshot = await manager.get_active_snapshot()
+                self.assertEqual(snapshot.client.model, "gpt-4o")
 
         asyncio.run(run())
         self.assertEqual(captured["api_key"], "secret-key")
@@ -65,7 +62,7 @@ class LLMManagerTests(unittest.TestCase):
                 provider="openai",
                 api_mode="openai_api",
                 model="gpt-4o",
-                api_key="env:CHATDOME_OPENAI_API_KEY",
+                api_key="secret-key",
             ),
             "codex": AIConfig(provider="codex", api_mode="codex_responses", model="gpt-5.5"),
         }
@@ -81,10 +78,9 @@ class LLMManagerTests(unittest.TestCase):
                 raise NotAuthenticatedError("not authenticated")
 
         async def run():
-            with patch.dict(os.environ, {"CHATDOME_OPENAI_API_KEY": "secret-key"}, clear=True):
-                with patch("chatdome.llm.manager.CodexOAuth", FakeOAuth):
-                    with self.assertRaises(LLMProfileNotReady):
-                        await manager.switch_profile("codex")
+            with patch("chatdome.llm.manager.CodexOAuth", FakeOAuth):
+                with self.assertRaises(LLMProfileNotReady):
+                    await manager.switch_profile("codex")
 
         asyncio.run(run())
         self.assertEqual(manager.get_active_profile_name(), "openai")
@@ -95,7 +91,7 @@ class LLMManagerTests(unittest.TestCase):
                 provider="openai",
                 api_mode="openai_api",
                 model="gpt-4o",
-                api_key="env:CHATDOME_OPENAI_API_KEY",
+                api_key="secret-key",
             ),
             "codex": AIConfig(provider="codex", api_mode="codex_responses", model="gpt-5.5"),
         }
@@ -112,11 +108,10 @@ class LLMManagerTests(unittest.TestCase):
             return DummyClient(profile.model)
 
         async def run():
-            with patch.dict(os.environ, {"CHATDOME_OPENAI_API_KEY": "secret-key"}, clear=True):
-                with patch("chatdome.llm.manager.CodexOAuth", FakeOAuth):
-                    with patch("chatdome.llm.manager.create_llm_client", side_effect=fake_create):
-                        snapshot = await manager.switch_profile("codex")
-                        self.assertEqual(snapshot.profile_name, "codex")
+            with patch("chatdome.llm.manager.CodexOAuth", FakeOAuth):
+                with patch("chatdome.llm.manager.create_llm_client", side_effect=fake_create):
+                    snapshot = await manager.switch_profile("codex")
+                    self.assertEqual(snapshot.profile_name, "codex")
 
         asyncio.run(run())
         self.assertEqual(manager.get_active_profile_name(), "codex")
@@ -127,7 +122,7 @@ class LLMManagerTests(unittest.TestCase):
                 provider="openai",
                 api_mode="openai_api",
                 model="gpt-4o",
-                api_key="env:CHATDOME_OPENAI_API_KEY",
+                api_key="secret-key",
             ),
         }
         manager = LLMManager(profiles, "openai")
@@ -138,16 +133,51 @@ class LLMManagerTests(unittest.TestCase):
             return DummyClient(profile.model)
 
         async def run():
-            with patch.dict(os.environ, {"CHATDOME_OPENAI_API_KEY": "secret-key"}, clear=True):
-                with patch("chatdome.llm.manager.create_llm_client", side_effect=fake_create):
-                    first = await manager.get_active_snapshot()
-                    second = await manager.get_active_snapshot()
-                    self.assertIs(first.client, second.client)
+            with patch("chatdome.llm.manager.create_llm_client", side_effect=fake_create):
+                first = await manager.get_active_snapshot()
+                second = await manager.get_active_snapshot()
+                self.assertIs(first.client, second.client)
 
         asyncio.run(run())
         self.assertEqual(calls["count"], 1)
 
+    def test_reload_profiles_replaces_pool_and_clears_cached_clients(self):
+        profiles = {
+            "openai": AIConfig(
+                provider="openai",
+                api_mode="openai_api",
+                model="gpt-4o",
+                api_key="secret-key",
+            ),
+        }
+        manager = LLMManager(profiles, "openai")
+        calls = {"count": 0}
+
+        def fake_create(profile):
+            calls["count"] += 1
+            return DummyClient(profile.model)
+
+        async def run():
+            with patch("chatdome.llm.manager.create_llm_client", side_effect=fake_create):
+                first = await manager.get_active_snapshot()
+                self.assertEqual(first.client.model, "gpt-4o")
+                await manager.reload_profiles(
+                    {
+                        "new": AIConfig(
+                            provider="openai",
+                            api_mode="openai_api",
+                            model="gpt-4.1",
+                            api_key="new-key",
+                        )
+                    },
+                    "new",
+                )
+                second = await manager.get_active_snapshot()
+                self.assertEqual(second.client.model, "gpt-4.1")
+
+        asyncio.run(run())
+        self.assertEqual(calls["count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
-

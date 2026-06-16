@@ -1,8 +1,6 @@
-import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from chatdome.config import load_config
 
@@ -14,6 +12,8 @@ class LLMProviderConfigTests(unittest.TestCase):
             config_path.write_text(
                 """
 chatdome:
+  telegram:
+    bot_token: telegram-token
   active_ai_profile: codex-gpt5
   ai_profiles:
     codex-gpt5:
@@ -24,8 +24,7 @@ chatdome:
                 encoding="utf-8",
             )
 
-            with patch.dict(os.environ, {"CHATDOME_BOT_TOKEN": "telegram-token"}, clear=True):
-                config = load_config(config_path)
+            config = load_config(config_path)
 
         self.assertEqual(config.active_ai_profile, "codex-gpt5")
         profile = config.ai_profiles["codex-gpt5"]
@@ -39,6 +38,8 @@ chatdome:
             config_path.write_text(
                 """
 chatdome:
+  telegram:
+    bot_token: telegram-token
   ai:
     provider: openai
     api_mode: openai_api
@@ -46,36 +47,17 @@ chatdome:
                 encoding="utf-8",
             )
 
-            with patch.dict(os.environ, {"CHATDOME_BOT_TOKEN": "telegram-token"}, clear=True):
-                with self.assertRaisesRegex(ValueError, "Legacy chatdome.ai"):
-                    load_config(config_path)
+            with self.assertRaisesRegex(ValueError, "Legacy chatdome.ai"):
+                load_config(config_path)
 
-    def test_openai_profile_requires_env_key_reference(self):
+    def test_openai_profile_allows_direct_api_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.yaml"
             config_path.write_text(
                 """
 chatdome:
-  active_ai_profile: openai-official
-  ai_profiles:
-    openai-official:
-      provider: openai
-      api_mode: openai_api
-      model: gpt-4o
-""",
-                encoding="utf-8",
-            )
-
-            with patch.dict(os.environ, {"CHATDOME_BOT_TOKEN": "telegram-token"}, clear=True):
-                with self.assertRaisesRegex(ValueError, "requires api_key"):
-                    load_config(config_path)
-
-    def test_plaintext_api_key_is_rejected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "config.yaml"
-            config_path.write_text(
-                """
-chatdome:
+  telegram:
+    bot_token: telegram-token
   active_ai_profile: openai-official
   ai_profiles:
     openai-official:
@@ -87,9 +69,31 @@ chatdome:
                 encoding="utf-8",
             )
 
-            with patch.dict(os.environ, {"CHATDOME_BOT_TOKEN": "telegram-token"}, clear=True):
-                with self.assertRaisesRegex(ValueError, "plaintext keys"):
-                    load_config(config_path)
+            config = load_config(config_path)
+
+        self.assertEqual(config.ai_profiles["openai-official"].api_key, "sk-test")
+
+    def test_env_api_key_reference_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text(
+                """
+chatdome:
+  telegram:
+    bot_token: telegram-token
+  active_ai_profile: openai-official
+  ai_profiles:
+    openai-official:
+      provider: openai
+      api_mode: openai_api
+      model: gpt-4o
+      api_key: env:CHATDOME_OPENAI_API_KEY
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "deprecated api_key env"):
+                load_config(config_path)
 
     def test_old_ai_environment_overrides_are_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -97,6 +101,8 @@ chatdome:
             config_path.write_text(
                 """
 chatdome:
+  telegram:
+    bot_token: telegram-token
   active_ai_profile: codex-gpt5
   ai_profiles:
     codex-gpt5:
@@ -109,15 +115,7 @@ chatdome:
                 encoding="utf-8",
             )
 
-            env = {
-                "CHATDOME_BOT_TOKEN": "telegram-token",
-                "CHATDOME_AI_PROVIDER": "openai",
-                "CHATDOME_AI_MODEL": "env-model",
-                "CHATDOME_CODEX_CLIENT_ID": "env-client",
-                "CHATDOME_CODEX_TOKEN_FILE": "/env/auth.json",
-            }
-            with patch.dict(os.environ, env, clear=True):
-                config = load_config(config_path)
+            config = load_config(config_path)
 
         profile = config.ai_profiles["codex-gpt5"]
         self.assertEqual(profile.provider, "codex")
@@ -131,6 +129,8 @@ chatdome:
             config_path.write_text(
                 """
 chatdome:
+  telegram:
+    bot_token: telegram-token
   active_ai_profile: missing
   ai_profiles:
     codex-gpt5:
@@ -141,9 +141,8 @@ chatdome:
                 encoding="utf-8",
             )
 
-            with patch.dict(os.environ, {"CHATDOME_BOT_TOKEN": "telegram-token"}, clear=True):
-                with self.assertRaisesRegex(ValueError, "does not exist"):
-                    load_config(config_path)
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                load_config(config_path)
 
     def test_command_output_archive_config_is_opt_in(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -151,6 +150,8 @@ chatdome:
             config_path.write_text(
                 """
 chatdome:
+  telegram:
+    bot_token: telegram-token
   active_ai_profile: codex-gpt5
   ai_profiles:
     codex-gpt5:
@@ -165,19 +166,20 @@ chatdome:
                 encoding="utf-8",
             )
 
-            with patch.dict(os.environ, {"CHATDOME_BOT_TOKEN": "telegram-token"}, clear=True):
-                config = load_config(config_path)
+            config = load_config(config_path)
 
         self.assertTrue(config.agent.persist_command_outputs)
         self.assertEqual(config.agent.command_output_retention_days, 3)
         self.assertEqual(config.agent.command_output_max_chars, 1234)
 
-    def test_command_output_archive_env_override_is_supported(self):
+    def test_command_output_archive_env_override_is_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.yaml"
             config_path.write_text(
                 """
 chatdome:
+  telegram:
+    bot_token: telegram-token
   active_ai_profile: codex-gpt5
   ai_profiles:
     codex-gpt5:
@@ -188,18 +190,11 @@ chatdome:
                 encoding="utf-8",
             )
 
-            env = {
-                "CHATDOME_BOT_TOKEN": "telegram-token",
-                "CHATDOME_PERSIST_COMMAND_OUTPUTS": "true",
-                "CHATDOME_COMMAND_OUTPUT_RETENTION_DAYS": "5",
-                "CHATDOME_COMMAND_OUTPUT_MAX_CHARS": "2048",
-            }
-            with patch.dict(os.environ, env, clear=True):
-                config = load_config(config_path)
+            config = load_config(config_path)
 
-        self.assertTrue(config.agent.persist_command_outputs)
-        self.assertEqual(config.agent.command_output_retention_days, 5)
-        self.assertEqual(config.agent.command_output_max_chars, 2048)
+        self.assertFalse(config.agent.persist_command_outputs)
+        self.assertEqual(config.agent.command_output_retention_days, 7)
+        self.assertEqual(config.agent.command_output_max_chars, 8000)
 
 
 if __name__ == "__main__":
