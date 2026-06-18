@@ -31,6 +31,66 @@ from chatdome.logger import setup_logging
 
 
 PID_PATH = Path("chat_data") / "chatdome.pid"
+LOCK_PATH = Path("chat_data") / "chatdome.lock"
+
+
+class _InstanceLock:
+    """Best-effort process lock to prevent local duplicate polling instances."""
+
+    def __init__(self, path: Path = LOCK_PATH) -> None:
+        self.path = path
+        self._fh = None
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = self.path.open("a+", encoding="utf-8")
+
+        if os.name == "posix":
+            import fcntl
+
+            try:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                self._fh.close()
+                self._fh = None
+                return False
+        elif os.name == "nt":
+            import msvcrt
+
+            try:
+                self._fh.seek(0)
+                self._fh.write(" ")
+                self._fh.flush()
+                self._fh.seek(0)
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                self._fh.close()
+                self._fh = None
+                return False
+
+        self._fh.seek(0)
+        self._fh.truncate()
+        self._fh.write(f"{os.getpid()}\n")
+        self._fh.flush()
+        return True
+
+    def release(self) -> None:
+        if self._fh is None:
+            return
+        try:
+            if os.name == "posix":
+                import fcntl
+
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            elif os.name == "nt":
+                import msvcrt
+
+                self._fh.seek(0)
+                with contextlib.suppress(OSError):
+                    msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            self._fh.close()
+            self._fh = None
 
 
 def _write_pid_file(path: Path = PID_PATH) -> None:
@@ -77,6 +137,15 @@ def main() -> None:
     logger = logging.getLogger("chatdome")
 
     args = parse_args()
+    instance_lock = _InstanceLock()
+
+    if not instance_lock.acquire():
+        logger.error(
+            "Another ChatDome process is already running in this working directory. "
+            "Only one Telegram polling instance can use a Bot Token at a time. "
+            "Check systemctl status chatdome and any manually started chatdome-server processes."
+        )
+        sys.exit(1)
 
     # ── Load configuration ──
     try:
@@ -388,6 +457,7 @@ def main() -> None:
         logger.info("Shutting down...")
     finally:
         _remove_pid_file()
+        instance_lock.release()
         # Cleanup is handled by python-telegram-bot's run_polling
         logger.info("ChatDome stopped.")
 

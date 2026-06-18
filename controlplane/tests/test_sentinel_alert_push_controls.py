@@ -43,7 +43,7 @@ class FakeConfig:
     ]
 
 
-def _event(raw_output: str = "login") -> AlertEvent:
+def _event(raw_output: str = "login", state: str = "NEW", previous_state: str = "") -> AlertEvent:
     return AlertEvent(
         timestamp="2026-05-18 13:41:23",
         check_name="SSH success login",
@@ -56,12 +56,20 @@ def _event(raw_output: str = "login") -> AlertEvent:
         raw_output=raw_output,
         pushed=True,
         suppressed=False,
+        alert_state=state,
+        previous_state=previous_state,
     )
 
 
 class SentinelAlertPushControlTests(unittest.TestCase):
     def test_muted_alert_is_recorded_without_telegram_push(self):
         asyncio.run(self._run_muted_alert_is_recorded_without_telegram_push())
+
+    def test_recovery_alert_is_recorded_without_telegram_push(self):
+        asyncio.run(self._run_recovery_alert_is_recorded_without_telegram_push())
+
+    def test_repeat_state_alert_is_recorded_without_telegram_push(self):
+        asyncio.run(self._run_repeat_state_alert_is_recorded_without_telegram_push())
 
     def test_alert_push_mute_state_persists(self):
         old_cwd = os.getcwd()
@@ -224,6 +232,56 @@ class SentinelAlertPushControlTests(unittest.TestCase):
 
                 self.assertTrue(pushed)
                 self.assertEqual(len(alerts), 1)
+            finally:
+                os.chdir(old_cwd)
+
+    async def _run_recovery_alert_is_recorded_without_telegram_push(self):
+        alerts: list[tuple[int, str]] = []
+
+        async def send_alert(chat_id: int, text: str, alert_event=None) -> None:
+            del alert_event
+            alerts.append((chat_id, text))
+
+        old_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.chdir(temp_dir)
+            try:
+                scheduler = self._scheduler(send_alert_fn=send_alert, alert_chat_ids=[123])
+
+                pushed = await scheduler._record_and_maybe_push(
+                    _event(state="RECOVERED", previous_state="RECOVERED_CANDIDATE")
+                )
+                recent = scheduler.history.recent(1)
+
+                self.assertFalse(pushed)
+                self.assertEqual(alerts, [])
+                self.assertFalse(recent[0].pushed)
+                self.assertIn("first_seen_and_escalation_only", recent[0].action_reason)
+            finally:
+                os.chdir(old_cwd)
+
+    async def _run_repeat_state_alert_is_recorded_without_telegram_push(self):
+        alerts: list[tuple[int, str]] = []
+
+        async def send_alert(chat_id: int, text: str, alert_event=None) -> None:
+            del alert_event
+            alerts.append((chat_id, text))
+
+        old_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.chdir(temp_dir)
+            try:
+                scheduler = self._scheduler(send_alert_fn=send_alert, alert_chat_ids=[123])
+
+                pushed = await scheduler._record_and_maybe_push(
+                    _event(state="NEW", previous_state="NEW")
+                )
+                recent = scheduler.history.recent(1)
+
+                self.assertFalse(pushed)
+                self.assertEqual(alerts, [])
+                self.assertFalse(recent[0].pushed)
+                self.assertIn("first_seen_and_escalation_only", recent[0].action_reason)
             finally:
                 os.chdir(old_cwd)
 

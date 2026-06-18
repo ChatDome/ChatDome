@@ -31,8 +31,15 @@ start_service() {
   fi
   cd "$ROOT_DIR"
   nohup $SERVER_BIN --config "$CONFIG_FILE" >>"$LOG_FILE" 2>&1 &
-  echo $! >"$PID_FILE"
-  echo "ChatDome started (pid=$!)."
+  local pid=$!
+  echo "$pid" >"$PID_FILE"
+  sleep 1
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    rm -f "$PID_FILE"
+    echo "ChatDome failed to start. Check $LOG_FILE for details." >&2
+    return 1
+  fi
+  echo "ChatDome started (pid=$pid)."
 }
 
 stop_service() {

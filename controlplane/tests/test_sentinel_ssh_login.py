@@ -119,8 +119,8 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
     def test_learning_round_completes_with_duplicate_check_ids(self):
         asyncio.run(self._run_learning_round_completes_with_duplicate_check_ids())
 
-    def test_repeated_new_ssh_success_login_deltas_are_pushed(self):
-        asyncio.run(self._run_repeated_new_ssh_success_login_deltas_are_pushed())
+    def test_repeated_new_ssh_success_login_deltas_are_archived_without_repeat_push(self):
+        asyncio.run(self._run_repeated_new_ssh_success_login_deltas_are_archived_without_repeat_push())
 
     def test_batch_ssh_success_login_delta_escalates_by_line_count(self):
         asyncio.run(self._run_batch_ssh_success_login_delta_escalates_by_line_count())
@@ -171,6 +171,8 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
             raw_output="login",
             pushed=True,
             suppressed=False,
+            alert_state="NEW",
+            previous_state="",
         )
 
         pushed = await scheduler._record_and_maybe_push(event)
@@ -223,7 +225,7 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
                         await task
                 os.chdir(old_cwd)
 
-    async def _run_repeated_new_ssh_success_login_deltas_are_pushed(self):
+    async def _run_repeated_new_ssh_success_login_deltas_are_archived_without_repeat_push(self):
         baseline = "Apr 23 10:00:00 root 203.0.113.10 22 publickey\n"
         first_delta = baseline + "Apr 23 10:01:00 root 203.0.113.10 22 publickey\n"
         second_delta = first_delta + "Apr 23 10:02:00 root 203.0.113.10 22 publickey\n"
@@ -252,13 +254,13 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
 
                 self.assertTrue(baseline_result.startswith("BASELINE_INIT:"))
                 self.assertIn("pushed", first_result)
-                self.assertIn("pushed", second_result)
-                self.assertEqual(len(alerts), 2)
+                self.assertIn("suppressed", second_result)
+                self.assertEqual(len(alerts), 1)
 
                 events = scheduler.history.recent(2)
                 self.assertEqual(events[0].action_reason[:16], "state_transition")
-                self.assertEqual(events[1].action_reason, "repeat_event")
-                self.assertFalse(events[1].suppressed)
+                self.assertEqual(events[1].action_reason, "no_state_change")
+                self.assertTrue(events[1].suppressed)
             finally:
                 os.chdir(old_cwd)
 

@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 SSH_SUCCESS_CHECK_IDS = {"ssh_success_login", "ssh_success_login_offhours"}
 SSH_ADDED_ONLY_CHECK_IDS = {"ssh_bruteforce"} | SSH_SUCCESS_CHECK_IDS
 SSH_SESSION_COMMANDS_PATROL_CHECK_ID = "ssh_session_commands_patrol"
+TELEGRAM_PUSH_STATES = {"NEW", "ESCALATED_L1", "ESCALATED_L2", "ESCALATED_L3"}
 
 
 @dataclass
@@ -797,7 +798,7 @@ class SentinelScheduler:
             check_id=SSH_SESSION_COMMANDS_PATROL_CHECK_ID,
             severity=check.severity,
             fingerprints=fingerprints,
-            notify_on_repeat=True,
+            notify_on_repeat=False,
             event_weight=added_count,
         )
 
@@ -1090,9 +1091,31 @@ class SentinelScheduler:
 
     # -- Alert recording ---------------------------------------------------
 
+    @staticmethod
+    def _is_telegram_push_eligible(event: AlertEvent) -> bool:
+        """Only push first-seen and escalation transitions to Telegram."""
+        state = (event.alert_state or "").strip()
+        previous = (event.previous_state or "").strip()
+        if state not in TELEGRAM_PUSH_STATES:
+            return False
+        return state != previous
+
     async def _record_and_maybe_push(self, event: AlertEvent) -> bool:
         if event.suppressed:
             self._history.record(event)
+            return False
+
+        if not self._is_telegram_push_eligible(event):
+            event.pushed = False
+            self._append_action_reason(event, "telegram_push_policy=first_seen_and_escalation_only")
+            self._history.record(event)
+            logger.info(
+                "Sentinel alert recorded without Telegram push by policy "
+                "(check_id=%s, state=%s, previous_state=%s)",
+                event.check_id,
+                event.alert_state or "none",
+                event.previous_state or "none",
+            )
             return False
 
         if self._is_alert_push_muted():
@@ -1300,7 +1323,7 @@ class SentinelScheduler:
                 check_id=check_key,
                 severity=check.severity,
                 fingerprints=fingerprints,
-                notify_on_repeat=check_key in SSH_SUCCESS_CHECK_IDS and bool(added_lines),
+                notify_on_repeat=False,
                 event_weight=len(added_lines) if check_key in SSH_ADDED_ONLY_CHECK_IDS else 1,
             )
 

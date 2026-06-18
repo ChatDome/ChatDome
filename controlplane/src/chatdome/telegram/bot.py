@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import Conflict
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -1545,4 +1546,10 @@ class TelegramBot:
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
         """Global error handler."""
+        if isinstance(context.error, Conflict):
+            logger.error(
+                "Telegram polling conflict: another process is using this Bot Token via getUpdates. "
+                "Stop duplicate chatdome-server instances or any other bot process using the same token."
+            )
+            return
         logger.error("Telegram error: %s", context.error, exc_info=context.error)

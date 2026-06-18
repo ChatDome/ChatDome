@@ -67,8 +67,8 @@ class Suppressor:
     """
     Alert suppression engine driven by per-check state machine transitions.
 
-    During debug/testing stage, every state transition is eligible for push,
-    then guarded by global rate limiting.
+    Push eligibility is decided by the scheduler; this class only evaluates
+    state transitions and global rate limiting.
     """
 
     def __init__(
