@@ -17,20 +17,9 @@ chatdome:
   # The old single `chatdome.ai` block is removed in the multi-LLM config model.
   # Select the default runtime model with active_ai_profile, and define every
   # available model under ai_profiles.
-  active_ai_profile: "codex-gpt5"
+  active_ai_profile: ""
 
-  ai_profiles:
-    codex-gpt5:
-      # codex + codex_responses uses native Codex Responses API via OAuth device login.
-      # Users can complete login via the Telegram command /codex_login.
-      provider: "codex"
-      api_mode: "codex_responses"
-      model: "gpt-5.5"
-      temperature: 0.1
-      max_tokens: 2000
-      codex_client_id: ""
-      codex_token_file: ""
-      codex_base_url: "https://chatgpt.com/backend-api/codex"
+  ai_profiles: {}
 
   agent:
     # -------------------------------------------------------------------------

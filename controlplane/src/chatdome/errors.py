@@ -85,7 +85,7 @@ class LLMProfileNotFound(LLMProfileError):
 
 class LLMProfileNotReady(LLMProfileError):
     code = "llm.profile_not_ready"
-    user_message = "LLM profile 尚未就绪。"
+    user_message = "No LLM is configured. Please configure an LLM before use."
 
 
 class LLMAuthenticationError(LLMError):

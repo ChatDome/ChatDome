@@ -120,8 +120,8 @@ llm_menu() {
         pause
         ;;
       3)
-        read -r -p "Profile name [codex-gpt5]: " profile
-        profile="${profile:-codex-gpt5}"
+        read -r -p "Profile name [codex]: " profile
+        profile="${profile:-codex}"
         read -r -p "Model [gpt-5.5]: " model
         model="${model:-gpt-5.5}"
         read -r -p "Client ID (blank = default): " client_id

@@ -482,7 +482,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=set_openai)
 
     p = sub.add_parser("set-codex")
-    p.add_argument("--profile", default="codex-gpt5")
+    p.add_argument("--profile", default="codex")
     p.add_argument("--model", default="gpt-5.5")
     p.add_argument("--client-id", default="")
     p.add_argument("--token-file", default="")

@@ -670,6 +670,8 @@ class TelegramBot:
             return "LLMManager 未启用。"
 
         profiles = manager.list_profiles()
+        if not profiles:
+            return "No LLM is configured. Please configure an LLM before use."
         active = next((item for item in profiles if item.active), None)
         active_name = active.name if active else manager.get_active_profile_name()
 
@@ -797,6 +799,28 @@ class TelegramBot:
         ]
         if len(codex_profiles) == 1:
             return codex_profiles[0]
+
+        if not codex_profiles:
+            import subprocess
+            import sys
+            try:
+                from chatdome.config import AIConfig
+                cli_path = "chatdome-cli.py"
+                subprocess.run([sys.executable, cli_path, "set-codex", "--profile", "codex", "--model", "gpt-5.5", "--client-id", "", "--token-file", "", "--base-url", "https://chatgpt.com/backend-api/codex"], check=True)
+                subprocess.run([sys.executable, cli_path, "set-active-profile", "codex"], check=True)
+                return "codex", AIConfig(
+                    provider="codex",
+                    api_mode="codex_responses",
+                    model="gpt-5.5",
+                    temperature=0.1,
+                    max_tokens=2000,
+                    codex_client_id="",
+                    codex_token_file="",
+                    codex_base_url="https://chatgpt.com/backend-api/codex"
+                )
+            except Exception as e:
+                logger.error("Failed to auto-generate Codex profile: %s", e)
+                raise LLMProfileNotReady("Failed to auto-generate Codex profile. Please run chatdome menu to configure an LLM manually.")
 
         names = ", ".join(name for name, _ in codex_profiles) or "(none)"
         raise LLMProfileNotReady(

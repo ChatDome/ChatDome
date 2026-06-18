@@ -88,7 +88,7 @@ class Agent:
 
     async def _llm_unavailable_message(self, exc: Exception) -> str:
         logger.error("LLM profile is not ready: %s", exc)
-        detail = user_facing_error_message(exc, fallback="LLM 当前不可用，请稍后重试。")
+        detail = user_facing_error_message(exc, fallback="LLM is currently unavailable, please try again later.")
         return f"⚠️ {detail}"
 
     async def _run_loop_compat(

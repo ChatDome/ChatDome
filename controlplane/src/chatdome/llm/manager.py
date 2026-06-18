@@ -44,9 +44,7 @@ class LLMManager:
     """Manage LLM profiles, active profile selection, and client caching."""
 
     def __init__(self, profiles: dict[str, AIConfig], active_profile: str) -> None:
-        if not profiles:
-            raise LLMProfileError("LLMManager requires at least one AI profile.")
-        if active_profile not in profiles:
+        if active_profile and active_profile not in profiles:
             raise LLMProfileNotFound(f"Active AI profile does not exist: {active_profile}")
 
         self._profiles = dict(profiles)
@@ -101,6 +99,8 @@ class LLMManager:
         """Return a validated snapshot of the current active profile."""
         async with self._get_lock():
             profile_name = self._active_profile
+            if not profile_name:
+                raise LLMProfileNotReady("No LLM is configured. Please configure an LLM before use.")
             client = await self._get_client_locked(profile_name, validate=True)
             return LLMSnapshot(
                 profile_name=profile_name,
@@ -116,9 +116,7 @@ class LLMManager:
         only the configuration shape; authentication is still checked lazily when
         a profile is used or selected.
         """
-        if not profiles:
-            raise LLMProfileError("LLMManager requires at least one AI profile.")
-        if active_profile not in profiles:
+        if active_profile and active_profile not in profiles:
             raise LLMProfileNotFound(f"Active AI profile does not exist: {active_profile}")
 
         async with self._get_lock():
