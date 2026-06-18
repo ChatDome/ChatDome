@@ -122,7 +122,7 @@ python3 -m pip install -e .
 
 ### Configure
 
-All runtime settings live in local `config.yaml`. This file contains Telegram Bot tokens and API-key profile credentials, is ignored by Git, and should be kept owner-readable only (`chmod 600` on Linux). Codex OAuth still stores its local token file at `~/.chatdome/auth.json` after `/codex_login`.
+All runtime settings live in local `config.yaml`. This file contains Telegram Bot tokens and API-key profile credentials, is ignored by Git, and should be kept owner-readable only (`chmod 600` on Linux). New Codex OAuth profiles use profile-scoped token files under `~/.chatdome/codex-auth/`; legacy empty token paths still resolve to `~/.chatdome/auth.json`.
 
 ```bash
 cp config.example.yaml config.yaml
@@ -136,7 +136,7 @@ You can also use the interactive local menu from the repository root:
 ./chatdome
 ```
 
-By default, no LLM profile is configured (`active_ai_profile` is empty). After first startup, simply send `/codex_login` in Telegram. ChatDome will automatically generate a `codex` profile for you and start the browser authorization flow. Once it succeeds, ChatDome can call Codex directly. Use `/llm_list` to inspect configured profiles and `/llm <profile_name>` to switch models. Local menu changes to LLM, Sentinel, or Agent policy are written to `config.yaml` and request a runtime reload.
+By default, no LLM profile is configured (`active_ai_profile` is empty). Use the local menu to run `Configure Codex OAuth profile`; ChatDome shows a browser URL and code, then writes the profile only after authorization succeeds. If the bot is already running with another profile, `/codex_login [profile]` can start the same flow from Telegram. Use `/llm_list` to inspect configured profiles and `/llm <profile_name>` to switch models. Local menu changes to LLM, Sentinel, or Agent policy are written to `config.yaml` and request a runtime reload.
 
 ### Run
 
@@ -170,7 +170,7 @@ Look for `"chat":{"id": 123456789}` in the response.
 
 ChatDome now uses `config.yaml` as the single runtime configuration file. Telegram Bot token, allowed Chat IDs, OpenAI-compatible API keys, Sentinel settings, and Agent policy all live there. `config.yaml` is ignored by Git; installer/menu tooling keeps it owner-readable only where possible.
 
-The default installation comes with no API keys or pre-configured profiles. The easiest way to get started is by sending `/codex_login` in Telegram. ChatDome will automatically generate a `codex` profile in the configuration, start the OAuth Device Code login, and store tokens locally in `~/.chatdome/auth.json`.
+The default installation comes with no API keys or pre-configured profiles. The easiest way to get started is `./chatdome` → `AI model management` → `Configure Codex OAuth profile`. ChatDome starts the OAuth Device Code login and writes the profile only after the token is saved.
 
 | Path | Required | Description |
 |------|----------|-------------|
@@ -210,7 +210,7 @@ chatdome:
     proxy_url: ""
     max_message_length: 4000
 
-  # Empty by default upon fresh install. Running /codex_login will automatically generate the codex block below.
+  # Empty by default upon fresh install. Codex setup writes this block after OAuth succeeds.
   active_ai_profile: "codex"
 
   ai_profiles:
@@ -220,7 +220,7 @@ chatdome:
       model: "gpt-5.5"
       temperature: 0.1
       max_tokens: 2000
-      codex_token_file: ""                    # empty = ~/.chatdome/auth.json
+      codex_token_file: "~/.chatdome/codex-auth/codex.json"
       codex_base_url: "https://chatgpt.com/backend-api/codex"
 
     my-openai-profile:

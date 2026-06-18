@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,19 @@ logger = logging.getLogger(__name__)
 
 # Default Client ID associated with Codex CLI
 DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+PROFILE_TOKEN_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def default_token_file_config_for_profile(profile_name: str) -> str:
+    """Return the profile-scoped Codex token path stored in config.yaml."""
+    name = PROFILE_TOKEN_NAME_PATTERN.sub("_", str(profile_name or "codex").strip())
+    name = name.strip("._-") or "codex"
+    return f"~/.chatdome/codex-auth/{name}.json"
+
+
+def default_token_file_for_profile(profile_name: str) -> Path:
+    """Return the profile-scoped Codex token path used by setup tooling."""
+    return Path(default_token_file_config_for_profile(profile_name)).expanduser()
 
 
 class NotAuthenticatedError(CodexAuthError):

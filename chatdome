@@ -27,6 +27,32 @@ run_cli() {
   "$PYTHON_BIN" "$CLI" "$@"
 }
 
+prompt_value() {
+  local var_name="$1"
+  local prompt="$2"
+  local default="${3-}"
+  local value
+  if ! read -r -p "$prompt" value; then
+    echo "Cancelled."
+    return 1
+  fi
+  [[ -z "$value" ]] && value="$default"
+  printf -v "$var_name" '%s' "$value"
+}
+
+prompt_secret() {
+  local var_name="$1"
+  local prompt="$2"
+  local value
+  if ! read -r -s -p "$prompt" value; then
+    echo
+    echo "Cancelled."
+    return 1
+  fi
+  echo
+  printf -v "$var_name" '%s' "$value"
+}
+
 systemctl_available() {
   command -v systemctl >/dev/null 2>&1
 }
@@ -108,28 +134,16 @@ llm_menu() {
     case "$choice" in
       1) run_cli llm-list; pause ;;
       2)
-        read -r -p "Profile name [my-openai-profile]: " profile
-        profile="${profile:-my-openai-profile}"
-        read -r -p "Model [gpt-4o]: " model
-        model="${model:-gpt-4o}"
-        read -r -p "Base URL [https://api.openai.com/v1]: " base_url
-        base_url="${base_url:-https://api.openai.com/v1}"
-        read -r -s -p "API Key: " api_key
-        echo
+        prompt_value profile "Profile name [my-openai-profile]: " "my-openai-profile" || { pause; continue; }
+        prompt_value model "Model [gpt-4o]: " "gpt-4o" || { pause; continue; }
+        prompt_value base_url "Base URL [https://api.openai.com/v1]: " "https://api.openai.com/v1" || { pause; continue; }
+        prompt_secret api_key "API Key: " || { pause; continue; }
         run_cli set-openai --profile "$profile" --model "$model" --base-url "$base_url" --api-key "$api_key"
         pause
         ;;
       3)
-        read -r -p "Profile name [codex]: " profile
-        profile="${profile:-codex}"
-        read -r -p "Model [gpt-5.5]: " model
-        model="${model:-gpt-5.5}"
-        read -r -p "Client ID (blank = default): " client_id
-        read -r -p "Token file (blank = ~/.chatdome/auth.json): " token_file
-        read -r -p "Base URL [https://chatgpt.com/backend-api/codex]: " base_url
-        base_url="${base_url:-https://chatgpt.com/backend-api/codex}"
-        run_cli set-codex --profile "$profile" --model "$model" --client-id "$client_id" --token-file "$token_file" --base-url "$base_url"
-        echo "Use /codex_login $profile in Telegram to finish OAuth."
+        prompt_value profile "Profile name [codex]: " "codex" || { pause; continue; }
+        run_cli codex-login --profile "$profile"
         pause
         ;;
       4)
@@ -147,9 +161,9 @@ OpenAI-compatible:
   3. ChatDome receives an llm hot-reload request automatically.
 
 Codex OAuth:
-  1. Configure the Codex profile here if needed.
-  2. Open Telegram and run /codex_login <profile>.
-  3. Complete the device-code flow in your browser.
+  1. Run Configure Codex OAuth profile.
+  2. Open the URL and enter the code shown in this terminal.
+  3. The profile is saved after authorization succeeds.
 GUIDE
         pause
         ;;

@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -23,6 +25,12 @@ PID_PATH = ROOT / "chat_data" / "chatdome.pid"
 RELOAD_REQUEST_PATH = ROOT / "chat_data" / "reload_request.json"
 RELOAD_STATUS_PATH = ROOT / "chat_data" / "reload_status.json"
 SUPPORTED_RELOAD_DOMAINS = {"llm", "sentinel", "agent", "all"}
+CONTROLPLANE_SRC = ROOT / "controlplane" / "src"
+PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+TOKEN_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
+
+if CONTROLPLANE_SRC.is_dir():
+    sys.path.insert(0, str(CONTROLPLANE_SRC))
 
 
 def _chmod_owner_only(path: Path) -> None:
@@ -32,7 +40,8 @@ def _chmod_owner_only(path: Path) -> None:
         pass
 
 
-def _load_yaml(path: Path = CONFIG_PATH) -> dict[str, Any]:
+def _load_yaml(path: Path | None = None) -> dict[str, Any]:
+    path = path or CONFIG_PATH
     if not path.exists():
         ensure_config()
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -44,7 +53,8 @@ def _load_yaml(path: Path = CONFIG_PATH) -> dict[str, Any]:
     return data
 
 
-def _write_yaml(data: dict[str, Any], path: Path = CONFIG_PATH) -> None:
+def _write_yaml(data: dict[str, Any], path: Path | None = None) -> None:
+    path = path or CONFIG_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
@@ -98,6 +108,81 @@ def _parse_chat_ids(raw: str) -> list[int]:
         except ValueError as exc:
             raise SystemExit(f"invalid chat id: {item}") from exc
     return values
+
+
+def _validate_profile_name(profile: str) -> str:
+    value = str(profile or "").strip()
+    if not PROFILE_NAME_PATTERN.match(value):
+        raise SystemExit("invalid profile name")
+    return value
+
+
+def _default_codex_token_file(profile: str) -> str:
+    name = TOKEN_NAME_PATTERN.sub("_", _validate_profile_name(profile))
+    name = name.strip("._-") or "codex"
+    return f"~/.chatdome/codex-auth/{name}.json"
+
+
+def _codex_token_file_path(token_file: str) -> Path:
+    if str(token_file or "").strip():
+        return Path(token_file).expanduser()
+    return Path.home() / ".chatdome" / "auth.json"
+
+
+def _resolve_codex_token_file(
+    profile_name: str,
+    requested_token_file: str | None,
+    existing_profile: dict[str, Any] | None = None,
+) -> str:
+    requested = None if requested_token_file is None else str(requested_token_file).strip()
+    if requested:
+        return requested
+    if isinstance(existing_profile, dict) and "codex_token_file" in existing_profile:
+        return str(existing_profile.get("codex_token_file") or "")
+    return _default_codex_token_file(profile_name)
+
+
+def _resolve_codex_login_token_file(
+    profile_name: str,
+    requested_token_file: str | None,
+    existing_profile: dict[str, Any] | None = None,
+) -> str:
+    requested = None if requested_token_file is None else str(requested_token_file).strip()
+    if requested:
+        return requested
+    if isinstance(existing_profile, dict):
+        existing_token_file = str(existing_profile.get("codex_token_file") or "").strip()
+        if existing_token_file:
+            return existing_token_file
+    return _default_codex_token_file(profile_name)
+
+
+def _write_codex_profile(
+    data: dict[str, Any],
+    root: dict[str, Any],
+    profiles: dict[str, Any],
+    args: argparse.Namespace,
+    token_file: str,
+    *,
+    reload_source: str,
+) -> None:
+    profile = profiles.setdefault(args.profile, {})
+    profile.update(
+        {
+            "provider": "codex",
+            "api_mode": "codex_responses",
+            "model": args.model,
+            "temperature": args.temperature,
+            "max_tokens": args.max_tokens,
+            "codex_client_id": args.client_id,
+            "codex_token_file": token_file,
+            "codex_base_url": args.base_url,
+        }
+    )
+    if not str(root.get("active_ai_profile") or "").strip():
+        root["active_ai_profile"] = args.profile
+    _write_yaml(data)
+    _request_reload(["llm"], reload_source)
 
 
 def _truthy(raw: str) -> bool:
@@ -184,12 +269,16 @@ def llm_list(args: argparse.Namespace) -> None:
             auth = "ready" if key else "missing api_key"
         else:
             token_file = str(profile.get("codex_token_file") or "~/.chatdome/auth.json")
-            auth = f"oauth token: {token_file}"
+            token_status = "ready" if _codex_token_file_path(token_file).is_file() else "missing"
+            auth = f"oauth {token_status} token_file={token_file}"
         marker = " (active)" if name == active else ""
         print(f"- {name}{marker}: {profile.get('provider')}/{api_mode} model={profile.get('model')} auth={auth}")
 
 
 def set_openai(args: argparse.Namespace) -> None:
+    args.profile = _validate_profile_name(args.profile)
+    if not str(args.api_key or "").strip():
+        raise SystemExit("api_key is required")
     data = _load_yaml()
     root = _chatdome_root(data)
     profiles = _profile_items(root)
@@ -205,31 +294,82 @@ def set_openai(args: argparse.Namespace) -> None:
             "api_key": args.api_key,
         }
     )
+    if not str(root.get("active_ai_profile") or "").strip():
+        root["active_ai_profile"] = args.profile
     _write_yaml(data)
     _request_reload(["llm"], "menu:set-openai")
     print(f"updated OpenAI-compatible profile: {args.profile}")
 
 
 def set_codex(args: argparse.Namespace) -> None:
+    args.profile = _validate_profile_name(args.profile)
     data = _load_yaml()
     root = _chatdome_root(data)
     profiles = _profile_items(root)
-    profile = profiles.setdefault(args.profile, {})
-    profile.update(
-        {
-            "provider": "codex",
-            "api_mode": "codex_responses",
-            "model": args.model,
-            "temperature": args.temperature,
-            "max_tokens": args.max_tokens,
-            "codex_client_id": args.client_id,
-            "codex_token_file": args.token_file,
-            "codex_base_url": args.base_url,
-        }
+    token_file = _resolve_codex_token_file(args.profile, args.token_file, profiles.get(args.profile))
+    if not _codex_token_file_path(token_file).is_file():
+        raise SystemExit("codex token file is missing; run codex-login first")
+    _write_codex_profile(
+        data,
+        root,
+        profiles,
+        args,
+        token_file,
+        reload_source="menu:set-codex",
     )
-    _write_yaml(data)
-    _request_reload(["llm"], "menu:set-codex")
     print(f"updated Codex profile: {args.profile}")
+
+
+async def _codex_login_async(args: argparse.Namespace) -> None:
+    args.profile = _validate_profile_name(args.profile)
+    data = _load_yaml()
+    root = _chatdome_root(data)
+    profiles = _profile_items(root)
+    token_file = _resolve_codex_login_token_file(args.profile, args.token_file, profiles.get(args.profile))
+
+    from chatdome.llm.codex_auth import CodexOAuth
+
+    oauth = CodexOAuth(
+        client_id=args.client_id or None,
+        token_file=token_file or None,
+    )
+    device_info = await oauth.request_device_code()
+    verification_uri = device_info.get("verification_uri", "https://auth.openai.com/codex/device")
+    user_code = device_info["user_code"]
+    interval = int(device_info.get("interval", 5))
+    expires_in = int(device_info.get("expires_in", 300))
+
+    print("Codex OAuth")
+    print(f"- open: {verification_uri}")
+    print(f"- code: {user_code}")
+    print("- waiting for authorization...")
+
+    code, code_verifier = await oauth.poll_device_token(
+        device_code=device_info["device_code"],
+        user_code=user_code,
+        interval=interval,
+        timeout=expires_in,
+    )
+    await oauth.exchange_token(code, code_verifier)
+    data = _load_yaml()
+    root = _chatdome_root(data)
+    profiles = _profile_items(root)
+    _write_codex_profile(
+        data,
+        root,
+        profiles,
+        args,
+        token_file,
+        reload_source="menu:codex-login",
+    )
+    print(f"Codex profile ready: {args.profile}")
+
+
+def codex_login(args: argparse.Namespace) -> None:
+    try:
+        asyncio.run(_codex_login_async(args))
+    except KeyboardInterrupt as exc:
+        raise SystemExit("cancelled") from exc
 
 
 def set_active_profile(args: argparse.Namespace) -> None:
@@ -485,11 +625,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", default="codex")
     p.add_argument("--model", default="gpt-5.5")
     p.add_argument("--client-id", default="")
-    p.add_argument("--token-file", default="")
+    p.add_argument("--token-file", default=None)
     p.add_argument("--base-url", default="https://chatgpt.com/backend-api/codex")
     p.add_argument("--temperature", type=float, default=0.1)
     p.add_argument("--max-tokens", type=int, default=2000)
     p.set_defaults(func=set_codex)
+
+    p = sub.add_parser("codex-login")
+    p.add_argument("--profile", default="codex")
+    p.add_argument("--model", default="gpt-5.5")
+    p.add_argument("--client-id", default="")
+    p.add_argument("--token-file", default=None)
+    p.add_argument("--base-url", default="https://chatgpt.com/backend-api/codex")
+    p.add_argument("--temperature", type=float, default=0.1)
+    p.add_argument("--max-tokens", type=int, default=2000)
+    p.set_defaults(func=codex_login)
 
     p = sub.add_parser("set-active-profile")
     p.add_argument("profile")

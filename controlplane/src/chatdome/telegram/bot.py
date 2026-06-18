@@ -12,6 +12,7 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ from telegram.ext import (
 
 from chatdome.agent.core import Agent
 from chatdome.agent.result import AgentResult, coerce_agent_result
-from chatdome.config import ChatDomeConfig
+from chatdome.config import AIConfig, ChatDomeConfig, PROFILE_NAME_PATTERN
 from chatdome.errors import (
     LLMProfileNotFound,
     LLMProfileNotReady,
@@ -774,23 +775,89 @@ class TelegramBot:
             f"model={snapshot.profile.model})"
         )
 
-    def _resolve_codex_login_profile(self, requested_profile: str = "") -> tuple[str, Any]:
+    @staticmethod
+    def _default_codex_profile(profile_name: str) -> AIConfig:
+        from chatdome.llm.codex_auth import default_token_file_config_for_profile
+
+        return AIConfig(
+            provider="codex",
+            api_mode="codex_responses",
+            model="gpt-5.5",
+            temperature=0.1,
+            max_tokens=2000,
+            codex_client_id="",
+            codex_token_file=default_token_file_config_for_profile(profile_name),
+            codex_base_url="https://chatgpt.com/backend-api/codex",
+        )
+
+    @staticmethod
+    def _login_profile_with_token_file(profile_name: str, profile: AIConfig) -> tuple[AIConfig, bool]:
+        if str(profile.codex_token_file or "").strip():
+            return profile, False
+        from chatdome.llm.codex_auth import default_token_file_config_for_profile
+
+        return (
+            replace(
+                profile,
+                codex_token_file=default_token_file_config_for_profile(profile_name),
+            ),
+            True,
+        )
+
+    async def _persist_codex_login_profile(self, profile_name: str, profile: AIConfig) -> None:
+        import subprocess
+        import sys
+
+        cli_path = Path(__file__).resolve().parents[4] / "chatdome-cli.py"
+        command = [
+            sys.executable,
+            str(cli_path),
+            "set-codex",
+            "--profile",
+            profile_name,
+            "--model",
+            profile.model,
+            "--client-id",
+            profile.codex_client_id,
+            "--token-file",
+            profile.codex_token_file,
+            "--base-url",
+            profile.codex_base_url,
+            "--temperature",
+            str(profile.temperature),
+            "--max-tokens",
+            str(profile.max_tokens),
+        ]
+        await asyncio.to_thread(
+            subprocess.run,
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+    def _resolve_codex_login_profile(self, requested_profile: str = "") -> tuple[str, Any, bool]:
         profiles = self.config.ai_profiles
         requested = str(requested_profile or "").strip()
 
         if requested:
             profile = profiles.get(requested)
             if profile is None:
-                raise LLMProfileNotFound(f"未知 LLM profile: {requested}")
+                if not PROFILE_NAME_PATTERN.match(requested):
+                    raise LLMProfileNotFound(f"未知 LLM profile: {requested}")
+                return requested, self._default_codex_profile(requested), True
             if profile.api_mode != "codex_responses":
                 raise LLMProfileNotReady(f"profile {requested} 不是 Codex OAuth profile。")
-            return requested, profile
+            login_profile, persist_profile = self._login_profile_with_token_file(requested, profile)
+            return requested, login_profile, persist_profile
 
         manager = self._get_llm_manager()
         active_name = manager.get_active_profile_name() if manager else self.config.active_ai_profile
         active_profile = profiles.get(active_name)
         if active_profile and active_profile.api_mode == "codex_responses":
-            return active_name, active_profile
+            login_profile, persist_profile = self._login_profile_with_token_file(active_name, active_profile)
+            return active_name, login_profile, persist_profile
 
         codex_profiles = [
             (name, profile)
@@ -798,29 +865,12 @@ class TelegramBot:
             if profile.api_mode == "codex_responses"
         ]
         if len(codex_profiles) == 1:
-            return codex_profiles[0]
+            name, profile = codex_profiles[0]
+            login_profile, persist_profile = self._login_profile_with_token_file(name, profile)
+            return name, login_profile, persist_profile
 
         if not codex_profiles:
-            import subprocess
-            import sys
-            try:
-                from chatdome.config import AIConfig
-                cli_path = "chatdome-cli.py"
-                subprocess.run([sys.executable, cli_path, "set-codex", "--profile", "codex", "--model", "gpt-5.5", "--client-id", "", "--token-file", "", "--base-url", "https://chatgpt.com/backend-api/codex"], check=True)
-                subprocess.run([sys.executable, cli_path, "set-active-profile", "codex"], check=True)
-                return "codex", AIConfig(
-                    provider="codex",
-                    api_mode="codex_responses",
-                    model="gpt-5.5",
-                    temperature=0.1,
-                    max_tokens=2000,
-                    codex_client_id="",
-                    codex_token_file="",
-                    codex_base_url="https://chatgpt.com/backend-api/codex"
-                )
-            except Exception as e:
-                logger.error("Failed to auto-generate Codex profile: %s", e)
-                raise LLMProfileNotReady("Failed to auto-generate Codex profile. Please run chatdome menu to configure an LLM manually.")
+            return "codex", self._default_codex_profile("codex"), True
 
         names = ", ".join(name for name, _ in codex_profiles) or "(none)"
         raise LLMProfileNotReady(
@@ -839,7 +889,7 @@ class TelegramBot:
         from chatdome.llm.codex_auth import CodexOAuth
 
         try:
-            profile_name, profile = self._resolve_codex_login_profile(
+            profile_name, profile, persist_profile = self._resolve_codex_login_profile(
                 (getattr(context, "args", []) or [""])[0]
             )
         except Exception as e:
@@ -900,13 +950,15 @@ class TelegramBot:
                     timeout=expires_in
                 )
                 await oauth.exchange_token(code, code_verifier)
+                if persist_profile:
+                    await self._persist_codex_login_profile(profile_name, profile)
                 
                 await self._send_bot_text(
                     bot=context.bot,
                     chat_id=chat_id,
                     text=(
                         "✅ *Codex 认证成功！*\n"
-                        f"Profile `{profile_name}` 的授权令牌已安全写入本地 `auth.json`，现已可直连 Codex 后端服务。"
+                        f"Profile `{profile_name}` 已可使用。"
                     ),
                     markup=MessageMarkup.TELEGRAM_MARKDOWN
                 )

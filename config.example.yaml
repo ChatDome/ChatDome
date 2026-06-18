@@ -2,8 +2,8 @@
 #
 # Copy this file to config.yaml and fill in local secrets there.
 # config.yaml is ignored by Git and should be kept owner-readable only
-# (chmod 600 on Linux). Codex OAuth tokens are still created by /codex_login
-# and stored locally in ~/.chatdome/auth.json.
+# (chmod 600 on Linux). New Codex OAuth profiles use profile-scoped
+# token files under ~/.chatdome/codex-auth/.
 
 chatdome:
   telegram:

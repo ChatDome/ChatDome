@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from chatdome.config import ChatDomeConfig
+from chatdome.config import AIConfig, ChatDomeConfig
 from chatdome.telegram.bot import TelegramBot
 
 
@@ -38,6 +38,24 @@ class FakeAgent:
     llm_manager = FakeLLMManager()
 
 
+class FakeOpenAIManager:
+    def get_active_profile_name(self):
+        return "openai"
+
+
+class FakeOpenAIAgent:
+    llm_manager = FakeOpenAIManager()
+
+
+class FakeCodexManager:
+    def get_active_profile_name(self):
+        return "codex-old"
+
+
+class FakeCodexAgent:
+    llm_manager = FakeCodexManager()
+
+
 class TelegramLLMListTests(unittest.TestCase):
     def test_llm_list_is_grouped_and_actionable(self):
         bot = TelegramBot(ChatDomeConfig(), FakeAgent())
@@ -54,6 +72,70 @@ class TelegramLLMListTests(unittest.TestCase):
         self.assertIn("状态: ready，可切换", text)
         self.assertIn("Key: configured fp=12345678", text)
         self.assertNotIn("deepseek | openai/openai_api", text)
+
+    def test_codex_login_default_profile_is_transient_until_success(self):
+        config = ChatDomeConfig(
+            active_ai_profile="openai",
+            ai_profiles={
+                "openai": AIConfig(
+                    provider="openai",
+                    api_mode="openai_api",
+                    model="gpt-4o",
+                    api_key="sk-test",
+                )
+            },
+        )
+        bot = TelegramBot(config, FakeOpenAIAgent())
+
+        name, profile, persist_profile = bot._resolve_codex_login_profile("")
+
+        self.assertEqual(name, "codex")
+        self.assertTrue(persist_profile)
+        self.assertEqual(profile.api_mode, "codex_responses")
+        self.assertEqual(profile.codex_token_file, "~/.chatdome/codex-auth/codex.json")
+        self.assertNotIn("codex", config.ai_profiles)
+
+    def test_codex_login_named_missing_profile_is_transient_until_success(self):
+        config = ChatDomeConfig(
+            active_ai_profile="openai",
+            ai_profiles={
+                "openai": AIConfig(
+                    provider="openai",
+                    api_mode="openai_api",
+                    model="gpt-4o",
+                    api_key="sk-test",
+                )
+            },
+        )
+        bot = TelegramBot(config, FakeOpenAIAgent())
+
+        name, profile, persist_profile = bot._resolve_codex_login_profile("codex-test")
+
+        self.assertEqual(name, "codex-test")
+        self.assertTrue(persist_profile)
+        self.assertEqual(profile.codex_token_file, "~/.chatdome/codex-auth/codex-test.json")
+        self.assertNotIn("codex-test", config.ai_profiles)
+
+    def test_codex_login_migrates_existing_blank_token_file(self):
+        config = ChatDomeConfig(
+            active_ai_profile="codex-old",
+            ai_profiles={
+                "codex-old": AIConfig(
+                    provider="codex",
+                    api_mode="codex_responses",
+                    model="gpt-5.5",
+                    codex_token_file="",
+                )
+            },
+        )
+        bot = TelegramBot(config, FakeCodexAgent())
+
+        name, profile, persist_profile = bot._resolve_codex_login_profile("")
+
+        self.assertEqual(name, "codex-old")
+        self.assertTrue(persist_profile)
+        self.assertEqual(profile.codex_token_file, "~/.chatdome/codex-auth/codex-old.json")
+        self.assertEqual(config.ai_profiles["codex-old"].codex_token_file, "")
 
 
 if __name__ == "__main__":
