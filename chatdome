@@ -108,8 +108,8 @@ llm_menu() {
     case "$choice" in
       1) run_cli llm-list; pause ;;
       2)
-        read -r -p "Profile name [openai-official]: " profile
-        profile="${profile:-openai-official}"
+        read -r -p "Profile name [my-openai-profile]: " profile
+        profile="${profile:-my-openai-profile}"
         read -r -p "Model [gpt-4o]: " model
         model="${model:-gpt-4o}"
         read -r -p "Base URL [https://api.openai.com/v1]: " base_url

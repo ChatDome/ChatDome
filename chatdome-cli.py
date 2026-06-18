@@ -473,7 +473,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("llm-list").set_defaults(func=llm_list)
 
     p = sub.add_parser("set-openai")
-    p.add_argument("--profile", default="openai-official")
+    p.add_argument("--profile", default="my-openai-profile")
     p.add_argument("--model", required=True)
     p.add_argument("--base-url", default="https://api.openai.com/v1")
     p.add_argument("--api-key", required=True)

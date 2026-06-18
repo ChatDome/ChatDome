@@ -32,27 +32,6 @@ chatdome:
       codex_token_file: ""
       codex_base_url: "https://chatgpt.com/backend-api/codex"
 
-    openai-official:
-      # openai + openai_api uses OpenAI-compatible Chat Completions API + API key.
-      # Leave api_key empty until you want to use this profile. The menu can
-      # write the local secret into config.yaml for you.
-      provider: "openai"
-      api_mode: "openai_api"
-      base_url: "https://api.openai.com/v1"
-      model: "gpt-4o"
-      temperature: 0.1
-      max_tokens: 2000
-      api_key: ""
-
-    proxy-deepseek:
-      provider: "openai"
-      api_mode: "openai_api"
-      base_url: "https://api.deepseek.com/v1"
-      model: "deepseek-chat"
-      temperature: 0.1
-      max_tokens: 2000
-      api_key: ""
-
   agent:
     # -------------------------------------------------------------------------
     # allow_generated_commands: The "Infinite Possibilities" Switch
