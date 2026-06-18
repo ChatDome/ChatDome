@@ -136,7 +136,7 @@ You can also use the interactive local menu from the repository root:
 ./chatdome
 ```
 
-The default `active_ai_profile` is `codex-gpt5`. After first startup, send `/codex_login` in Telegram and complete the browser authorization flow; once it succeeds, ChatDome can call Codex directly. Use `/llm_list` to inspect configured profiles and `/llm <profile_name>` to switch models. Local menu changes to LLM, Sentinel, or Agent policy are written to `config.yaml` and request a runtime reload.
+By default, no LLM profile is configured (`active_ai_profile` is empty). After first startup, simply send `/codex_login` in Telegram. ChatDome will automatically generate a `codex` profile for you and start the browser authorization flow. Once it succeeds, ChatDome can call Codex directly. Use `/llm_list` to inspect configured profiles and `/llm <profile_name>` to switch models. Local menu changes to LLM, Sentinel, or Agent policy are written to `config.yaml` and request a runtime reload.
 
 ### Run
 
@@ -170,7 +170,7 @@ Look for `"chat":{"id": 123456789}` in the response.
 
 ChatDome now uses `config.yaml` as the single runtime configuration file. Telegram Bot token, allowed Chat IDs, OpenAI-compatible API keys, Sentinel settings, and Agent policy all live there. `config.yaml` is ignored by Git; installer/menu tooling keeps it owner-readable only where possible.
 
-The default `codex-gpt5` profile does not require an API key. It uses Telegram `/codex_login` to start OAuth Device Code login and stores tokens locally in `~/.chatdome/auth.json`.
+The default installation comes with no API keys or pre-configured profiles. The easiest way to get started is by sending `/codex_login` in Telegram. ChatDome will automatically generate a `codex` profile in the configuration, start the OAuth Device Code login, and store tokens locally in `~/.chatdome/auth.json`.
 
 | Path | Required | Description |
 |------|----------|-------------|
@@ -210,10 +210,11 @@ chatdome:
     proxy_url: ""
     max_message_length: 4000
 
-  active_ai_profile: "codex-gpt5"
+  # Empty by default upon fresh install. Running /codex_login will automatically generate the codex block below.
+  active_ai_profile: "codex"
 
   ai_profiles:
-    codex-gpt5:
+    codex:
       provider: "codex"
       api_mode: "codex_responses"
       model: "gpt-5.5"
@@ -222,7 +223,7 @@ chatdome:
       codex_token_file: ""                    # empty = ~/.chatdome/auth.json
       codex_base_url: "https://chatgpt.com/backend-api/codex"
 
-    openai-official:
+    my-openai-profile:
       provider: "openai"
       api_mode: "openai_api"
       base_url: "https://api.openai.com/v1"

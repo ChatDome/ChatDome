@@ -140,7 +140,7 @@ chmod 600 config.yaml
 ./chatdome
 ```
 
-默认 `active_ai_profile` 是 `codex-gpt5`。首次启动后，在 Telegram 中发送 `/codex_login`，按提示完成浏览器授权；授权成功后即可直连 Codex 后端。使用 `/llm_list` 查看所有 profile，使用 `/llm <profile_name>` 切换模型；在本地菜单中修改 LLM、Sentinel 或 Agent 策略时，会写入 `config.yaml` 并发起热重载请求。
+默认未配置任何大模型（`active_ai_profile` 为空）。首次启动后，直接在 Telegram 中发送 `/codex_login`，系统会自动为你生成一个 `codex` 专属配置并按提示完成浏览器授权；授权成功后即可直连 Codex 后端。使用 `/llm_list` 查看所有 profile，使用 `/llm <profile_name>` 切换模型；在本地菜单中修改 LLM、Sentinel 或 Agent 策略时，会写入 `config.yaml` 并发起热重载请求。
 
 ### 运行
 
@@ -174,7 +174,7 @@ https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 
 ChatDome 当前采用 `config.yaml` 单文件管理运行配置。Telegram Bot Token、允许访问的 Chat IDs、OpenAI-compatible API Key、Sentinel 和 Agent 策略都写在这个文件中；`config.yaml` 已被 `.gitignore` 忽略，安装脚本和菜单会尽量将其权限设为 `600`。
 
-默认 `codex-gpt5` profile 不需要 API Key；它通过 Telegram `/codex_login` 触发 OAuth Device Code 登录，并把 token 保存到本地 `~/.chatdome/auth.json`。
+默认初始安装时不包含任何 API Key 或预设档案。最简单的起步方式是直接通过 Telegram 发送 `/codex_login`，ChatDome 会自动在配置文件中生成一个 `codex` 配置块，触发 OAuth Device Code 登录，并把 token 保存到本地 `~/.chatdome/auth.json`。
 
 | 配置路径 | 必需 | 说明 |
 |----------|------|------|
@@ -214,10 +214,11 @@ chatdome:
     proxy_url: ""
     max_message_length: 4000
 
-  active_ai_profile: "codex-gpt5"
+  # 默认安装时这里为空。执行 /codex_login 会自动生成下方的 codex 配置
+  active_ai_profile: "codex"
 
   ai_profiles:
-    codex-gpt5:
+    codex:
       provider: "codex"
       api_mode: "codex_responses"
       model: "gpt-5.5"
@@ -226,7 +227,7 @@ chatdome:
       codex_token_file: ""                    # 空 = ~/.chatdome/auth.json
       codex_base_url: "https://chatgpt.com/backend-api/codex"
 
-    openai-official:
+    my-openai-profile:
       provider: "openai"
       api_mode: "openai_api"
       base_url: "https://api.openai.com/v1"
