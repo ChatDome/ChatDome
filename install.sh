@@ -19,8 +19,8 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 python3 -m venv "$ROOT_DIR/venv"
-"$ROOT_DIR/venv/bin/python" -m pip install --upgrade pip
-"$ROOT_DIR/venv/bin/python" -m pip install -e "$ROOT_DIR/controlplane"
+"$ROOT_DIR/venv/bin/python" -m pip install --no-cache-dir --upgrade pip
+"$ROOT_DIR/venv/bin/python" -m pip install --no-cache-dir -e "$ROOT_DIR/controlplane"
 
 if [[ ! -f "$ROOT_DIR/config.yaml" ]]; then
   cp "$ROOT_DIR/config.example.yaml" "$ROOT_DIR/config.yaml"

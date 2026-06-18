@@ -43,8 +43,9 @@ class CodexResponsesClient(LLMClient):
         codex_token_file: str | None = None,
     ) -> None:
         # Base constructor parameters. api_key is empty because we manage it via OAuth.
+        # We pass a dummy string because openai SDK rejects empty strings during initialization.
         super().__init__(
-            api_key="",
+            api_key="dummy_oauth_managed",
             base_url=base_url,
             model=model,
             temperature=temperature,
