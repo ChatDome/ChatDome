@@ -1,6 +1,6 @@
 import unittest
 
-from chatdome.sentinel.alerter import AlertEvent, format_alert_message
+from chatdome.sentinel.alerter import AlertEvent, format_alert_detail, format_alert_message
 
 
 class AlertFormatTests(unittest.TestCase):
@@ -42,10 +42,9 @@ class AlertFormatTests(unittest.TestCase):
             )
         )
         self.assertIn("告警时间:", msg)
-        self.assertIn("[DEBUG] 威胁状态:", msg)
-        self.assertIn("[DEBUG] 风险判断:", msg)
-        self.assertIn("[DEBUG] 触发原因:", msg)
-        self.assertIn("[DEBUG] 下一观察点:", msg)
+        self.assertIn("📈 威胁加剧，已升级至二级", msg)
+        self.assertIn("💡 请确认监听端口变化是否符合预期，并排查未知服务。", msg)
+        self.assertNotIn("[DEBUG]", msg)
         self.assertNotIn("当前值:", msg)
         self.assertNotIn("指纹:", msg)
         self.assertNotIn("原始数据:", msg)
@@ -55,15 +54,34 @@ class AlertFormatTests(unittest.TestCase):
 
     def test_new_state_omits_default_suggestion(self):
         msg = format_alert_message(self._event(state="NEW"))
-        self.assertIn("新威胁首次出现", msg)
+        self.assertIn("🆕 首次检测到该威胁", msg)
         self.assertNotIn("先确认是否为已知变更或可信来源", msg)
-        self.assertIn("[DEBUG] 下一观察点:", msg)
+        self.assertNotIn("[DEBUG]", msg)
 
     def test_recovered_state_omits_archive_suggestion(self):
         msg = format_alert_message(self._event(state="RECOVERED", previous="RECOVERED_CANDIDATE"))
-        self.assertIn("观察期通过，威胁归档", msg)
+        self.assertIn("✅ 威胁已归档", msg)
+        self.assertIn("💡 无需操作，持续观察。", msg)
         self.assertNotIn("固化长期防护策略", msg)
-        self.assertIn("[DEBUG] 下一观察点:", msg)
+        self.assertNotIn("[DEBUG]", msg)
+
+    def test_alert_detail_uses_readable_transition_without_internal_reason(self):
+        detail = format_alert_detail(
+            self._event(
+                state="ESCALATED_L2",
+                previous="ESCALATED_L1",
+                rule="line count >= 12",
+            ).to_dict()
+        )
+
+        self.assertIn("威胁阶段: 二级升级", detail)
+        self.assertIn("状态迁移: 一级升级 → 二级升级", detail)
+        self.assertIn("触发规则: line count >= 12", detail)
+        self.assertNotIn("阶段风险", detail)
+        self.assertNotIn("state_transition (", detail)
+
+    def test_alert_detail_without_state_returns_unavailable_message(self):
+        self.assertEqual(format_alert_detail({"alert_state": ""}), "暂无详细状态信息。")
 
     def test_ssh_failed_burst_focuses_on_source_ips(self):
         msg = format_alert_message(
@@ -87,9 +105,12 @@ class AlertFormatTests(unittest.TestCase):
         self.assertIn("数量: 12", msg)
         self.assertIn("失败来源 IP: 45.77.105.217 (2次), 114.246.239.136 (1次)", msg)
         self.assertIn("相关用户: root, admin", msg)
+        self.assertIn("📈 威胁持续，已升级至一级", msg)
+        self.assertIn("💡 请检查来源 IP；确认持续攻击后封禁来源或启用 fail2ban。", msg)
         self.assertIn("失败记录:", msg)
         self.assertIn("时间: Apr 23 10:10:16, Apr 23 10:11:23, Apr 23 10:11:37", msg)
-        self.assertIn("line count", msg)
+        self.assertNotIn("line count >= 10", msg)
+        self.assertNotIn("[DEBUG]", msg)
         self.assertNotIn("原始数据", msg)
         self.assertNotIn("指纹:", msg)
         self.assertNotIn("发生了什么", msg)
@@ -113,6 +134,8 @@ class AlertFormatTests(unittest.TestCase):
 
         self.assertIn("数量: 2", msg)
         self.assertIn("登录来源 IP: 114.246.239.136 (2次)", msg)
+        self.assertIn("🆕 首次检测到该威胁", msg)
+        self.assertIn("💡 请确认登录是否为本人操作", msg)
         self.assertIn("相关用户: root", msg)
         self.assertIn("登录方式: publickey", msg)
         self.assertIn("root@114.246.239.136", msg)
@@ -125,6 +148,7 @@ class AlertFormatTests(unittest.TestCase):
         self.assertNotIn("需要关注", msg)
         self.assertNotIn("建议处理", msg)
         self.assertNotIn(" 至 ", msg)
+        self.assertLess(msg.index("💡"), msg.index("登录来源 IP:"))
 
     def test_ssh_success_login_appends_session_command_summary(self):
         event = self._event(
@@ -178,6 +202,7 @@ class AlertFormatTests(unittest.TestCase):
         msg = format_alert_message(event)
 
         self.assertIn("新增命令: 2", msg)
+        self.assertIn("💡 请确认新增命令是否为授权操作。", msg)
         self.assertIn("命令增量:", msg)
         self.assertIn("root@203.0.113.10:22 (ses=101, sshd PID=12345)", msg)
         self.assertIn("iptables -F", msg)

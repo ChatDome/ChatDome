@@ -1009,6 +1009,11 @@ class TelegramBot:
                 await self._handle_sentinel_alert_analysis(query, chat_id, alert_token)
                 return
 
+            if callback_data.startswith("sentinel_alert_detail:"):
+                alert_token = callback_data.split(":", 1)[1].strip()
+                await self._handle_sentinel_alert_detail(query, chat_id, alert_token)
+                return
+
             approval_action = ""
             approval_id = ""
             if callback_data.startswith("approval:"):
@@ -1336,6 +1341,25 @@ class TelegramBot:
 
         await self._send_long_message(query.message, content)
 
+    async def _handle_sentinel_alert_detail(self, query, chat_id: int, alert_token: str) -> None:
+        cached = self._alert_analysis_cache.get(alert_token)
+        if not cached or cached.get("chat_id") != chat_id:
+            await self._send_long_message(
+                query.message,
+                "告警详情已过期。使用 /sentinel_history 查看告警记录。",
+            )
+            return
+
+        from chatdome.sentinel.alerter import format_alert_detail
+
+        event_data = cached.get("event")
+        detail_text = (
+            format_alert_detail(event_data)
+            if isinstance(event_data, dict)
+            else "暂无详细状态信息。"
+        )
+        await self._send_long_message(query.message, detail_text)
+
     def _check_auth(self, update: Update) -> bool:
         """Check if the message sender is authorized."""
         if update.effective_chat is None:
@@ -1605,7 +1629,16 @@ class TelegramBot:
                     alert_event=alert_event,
                 )
                 reply_markup = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("告警分析", callback_data=f"sentinel_alert_analysis:{token}")]]
+                    [[
+                        InlineKeyboardButton(
+                            "📋 查看详情",
+                            callback_data=f"sentinel_alert_detail:{token}",
+                        ),
+                        InlineKeyboardButton(
+                            "🤖 告警分析",
+                            callback_data=f"sentinel_alert_analysis:{token}",
+                        ),
+                    ]]
                 )
 
             if len(text) > self.max_message_length:

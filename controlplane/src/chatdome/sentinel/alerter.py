@@ -212,43 +212,43 @@ def _state_card(state: str) -> dict[str, str]:
     """Default interpretation per state."""
     cards: dict[str, dict[str, str]] = {
         "NEW": {
+            "headline": "🆕 首次检测到该威胁",
             "label": "新威胁首次出现",
-            "risk": "中",
             "next_watch": "关注 10 分钟内是否继续出现同类异常，决定是否进入升级态。",
             "condition": "10分钟内事件数>=5或独立指纹数>=3 → 一级升级 (ESCALATED_L1)",
             "recovery": "20分钟内无新事件 → 观察期 (RECOVERED_CANDIDATE)",
         },
         "ESCALATED_L1": {
+            "headline": "📈 威胁持续，已升级至一级",
             "label": "一级升级",
-            "risk": "中-高",
             "next_watch": "关注 20 分钟窗口内异常是否继续增多，判断是否升级到 L2。",
             "condition": "20分钟内事件数>=12或独立指纹数>=6 → 二级升级 (ESCALATED_L2)",
             "recovery": "20分钟内无新事件 → 观察期 (RECOVERED_CANDIDATE)",
         },
         "ESCALATED_L2": {
+            "headline": "📈 威胁加剧，已升级至二级",
             "label": "二级升级",
-            "risk": "高",
             "next_watch": "关注 30 分钟窗口内是否达到高强度持续异常，可能升级到 L3。",
             "condition": "30分钟内事件数>=25或独立指纹数>=10 → 三级升级 (ESCALATED_L3)",
             "recovery": "20分钟内无新事件 → 观察期 (RECOVERED_CANDIDATE)",
         },
         "ESCALATED_L3": {
+            "headline": "🔥 威胁严重，已升级至最高级",
             "label": "三级升级",
-            "risk": "严重",
             "next_watch": "持续监控关键指标，直至进入观察期并确认威胁收敛。",
             "condition": "已达最高升级状态 (ESCALATED_L3)",
             "recovery": "20分钟内无新事件 → 观察期 (RECOVERED_CANDIDATE)",
         },
         "RECOVERED_CANDIDATE": {
+            "headline": "📉 威胁趋缓，进入观察期",
             "label": "进入观察期",
-            "risk": "中（待确认）",
             "next_watch": "观察期内若再次出现异常，将回弹到 ESCALATED_L1。",
             "condition": "有任何新事件 → 重新进入 一级升级 (ESCALATED_L1)",
             "recovery": "观察期满 15 分钟无新事件 → 威胁归档 (RECOVERED)",
         },
         "RECOVERED": {
+            "headline": "✅ 威胁已归档",
             "label": "观察期通过，威胁归档",
-            "risk": "低",
             "next_watch": "后续若同类异常再次出现，将按新一轮威胁重新进入状态机。",
             "condition": "有新事件 → 重新进入 新威胁首次出现 (NEW)",
             "recovery": "已归档",
@@ -257,8 +257,8 @@ def _state_card(state: str) -> dict[str, str]:
     return cards.get(
         state,
         {
+            "headline": "",
             "label": "状态更新",
-            "risk": "未知",
             "next_watch": "继续观察后续是否出现新的状态迁移。",
             "condition": "无",
             "recovery": "无",
@@ -274,12 +274,65 @@ def _display_number(value: float | None) -> str:
     return str(value)
 
 
-def _alert_transition(event: AlertEvent) -> str:
-    if not event.alert_state:
-        return "未进入状态机"
-    if event.previous_state and event.previous_state != event.alert_state:
-        return f"{event.previous_state} -> {event.alert_state}"
-    return event.alert_state
+def _action_hint(check_id: str, state: str) -> str:
+    """Return one actionable hint for supported alert types."""
+    if state in {"RECOVERED_CANDIDATE", "RECOVERED"}:
+        return "无需操作，持续观察。"
+
+    hints = {
+        "ssh_success_login": "请确认登录是否为本人操作；发现异常登录时立即修改密码并检查 authorized_keys。",
+        "ssh_success_login_offhours": "请确认非工作时段登录是否为授权操作。",
+        "ssh_failed_burst": "请检查来源 IP；确认持续攻击后封禁来源或启用 fail2ban。",
+        "ssh_bruteforce": "请检查来源 IP；确认持续攻击后封禁来源并加固 SSH 配置。",
+        "ssh_session_commands_patrol": "请确认新增命令是否为授权操作。",
+        "open_ports": "请确认监听端口变化是否符合预期，并排查未知服务。",
+    }
+    return hints.get(check_id, "")
+
+
+def _append_alert_guidance(lines: list[str], event: AlertEvent) -> None:
+    if event.alert_state:
+        headline = _state_card(event.alert_state).get("headline", "")
+        if headline:
+            lines.append(headline)
+
+    hint = _action_hint(event.check_id, event.alert_state)
+    if hint:
+        lines.append(f"💡 {hint}")
+
+
+def format_alert_detail(event_data: dict[str, Any]) -> str:
+    """Format state-machine details from a serialized alert event."""
+    alert_state = str(event_data.get("alert_state") or "")
+    if not alert_state:
+        return "暂无详细状态信息。"
+
+    card = _state_card(alert_state)
+    previous_state = str(event_data.get("previous_state") or "")
+    previous_label = _state_card(previous_state)["label"] if previous_state else "未监控"
+    transition = (
+        f"{previous_label} → {card['label']}"
+        if previous_state != alert_state
+        else card["label"]
+    )
+
+    lines = [
+        "📋 告警详细信息",
+        "",
+        f"威胁阶段: {card['label']}",
+        f"状态迁移: {transition}",
+    ]
+    rule = str(event_data.get("rule") or "").strip()
+    if rule:
+        lines.append(f"触发规则: {rule}")
+    lines.extend(
+        [
+            f"升级条件: {card.get('condition', '')}",
+            f"降级条件: {card.get('recovery', '')}",
+            f"下一观察点: {card['next_watch']}",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _nonempty_lines(raw_output: str) -> list[str]:
@@ -501,7 +554,6 @@ def _format_ssh_login_session_context(context: dict[str, Any]) -> list[str]:
 def _format_ssh_session_commands_alert(event: AlertEvent) -> str:
     emoji = severity_emoji(event.severity)
     label = event.severity_label.upper()
-    card = _state_card(event.alert_state) if event.alert_state else None
     updates = event.context.get("ssh_command_updates", []) if isinstance(event.context, dict) else []
 
     lines = [
@@ -511,18 +563,7 @@ def _format_ssh_session_commands_alert(event: AlertEvent) -> str:
         f"新增命令: {_display_number(event.current_value)}",
     ]
 
-    if card:
-        lines.extend(
-            [
-                f"[DEBUG] 威胁状态: {card['label']} ({_alert_transition(event)})",
-                f"[DEBUG] 风险判断: {card['risk']}",
-                f"[DEBUG] 触发原因: {event.rule}",
-                f"[DEBUG] 变更条件: {card.get('condition', '')}",
-                f"[DEBUG] 降级条件: {card.get('recovery', '')}",
-                f"[DEBUG] 迁移原因: {event.action_reason}",
-                f"[DEBUG] 下一观察点: {card['next_watch']}",
-            ]
-        )
+    _append_alert_guidance(lines, event)
 
     if isinstance(updates, list) and updates:
         lines.extend(["", "命令增量:"])
@@ -552,7 +593,6 @@ def _format_ssh_session_commands_alert(event: AlertEvent) -> str:
 def _format_ssh_alert_message(event: AlertEvent) -> str:
     emoji = severity_emoji(event.severity)
     label = event.severity_label.upper()
-    card = _state_card(event.alert_state) if event.alert_state else None
     success = event.check_id in SSH_SUCCESS_CHECK_IDS
     lines_raw = _nonempty_lines(event.raw_output)
     records = [_parse_ssh_line(line, success=success) for line in lines_raw]
@@ -581,18 +621,7 @@ def _format_ssh_alert_message(event: AlertEvent) -> str:
         f"数量: {count_text}",
     ]
 
-    if card:
-        lines.extend(
-            [
-                f"[DEBUG] 威胁状态: {card['label']} ({_alert_transition(event)})",
-                f"[DEBUG] 风险判断: {card['risk']}",
-                f"[DEBUG] 触发原因: {event.rule}",
-                f"[DEBUG] 变更条件: {card.get('condition', '')}",
-                f"[DEBUG] 降级条件: {card.get('recovery', '')}",
-                f"[DEBUG] 迁移原因: {event.action_reason}",
-                f"[DEBUG] 下一观察点: {card['next_watch']}",
-            ]
-        )
+    _append_alert_guidance(lines, event)
 
     if records:
         lines.extend(
@@ -640,20 +669,7 @@ def format_alert_message(event: AlertEvent) -> str:
         f"{mode_label}: {value_text}",
     ]
 
-    if event.alert_state:
-        card = _state_card(event.alert_state)
-        lines.extend(
-            [
-                "",
-                f"[DEBUG] 威胁状态: {card['label']} ({_alert_transition(event)})",
-                f"[DEBUG] 风险判断: {card['risk']}",
-                f"[DEBUG] 触发原因: {event.rule}",
-                f"[DEBUG] 变更条件: {card.get('condition', '')}",
-                f"[DEBUG] 降级条件: {card.get('recovery', '')}",
-                f"[DEBUG] 迁移原因: {event.action_reason}",
-                f"[DEBUG] 下一观察点: {card['next_watch']}",
-            ]
-        )
+    _append_alert_guidance(lines, event)
 
     raw = (event.raw_output or "").strip()
     if raw:
