@@ -58,7 +58,7 @@ ChatDome is positioned as a **host-security sub-agent**, not a generic main-agen
 ## Features
 
 - **LLM-First Risk Review** — Before execution, generated commands are classified with structured fields (`safety_status`, `risk_level`, `mutation_detected`, `deletion_detected`) and then escalated conservatively by static guardrails.
-- **Runtime Environment Profiling** — At startup, ChatDome automatically collects OS/shell/command availability into `chat_data/environment_profile.md`, injects compatibility context into prompts, and exposes a quick `/env` summary in Telegram.
+- **Runtime Environment Profiling** — At startup, ChatDome automatically collects OS/shell/command availability into `/var/lib/chatdome/environment_profile.md` for system installations, injects compatibility context into prompts, and exposes a quick `/env` summary in Telegram.
 - **Tamper-Evident Command Audit** — Command review/approval/execution events are written to append-only hash-chained JSONL logs with automatic 30-day retention and Telegram-side inspection via `/audit [N]`.
 
 - **Dynamic Command Generation & Dual-Confirmation** — When unlocked, the AI can dynamically generate commands to answer arbitrary questions. These commands are processed by an AI Reviewer for impact analysis and require explicit interactive confirmation (or a mandatory `/confirm` for high-risk actions) before execution.
@@ -102,27 +102,28 @@ Because we use the **Dual-Confirmation Mechanism**, granting the AI this "Infini
 
 First, clone the repository:
 ```bash
-git clone https://github.com/your-username/ChatDome.git
-cd ChatDome/controlplane
+git clone https://github.com/ChatDome/ChatDome.git
+cd ChatDome
 ```
 
 Choose one of the following installation methods:
 
 #### Method A: Standard Install (Recommended for Servers)
-Simply installs the required dependencies.
 ```bash
-python3 -m pip install -r requirements.txt
+sudo bash install.sh
 ```
 
+The installer uses `/etc/chatdome/config.yaml`, `/var/lib/chatdome`, and `/var/log/chatdome/chatdome.log` for configuration, runtime data, and logs.
+
 #### Method B: Development Install (Editable Mode)
-Installs dependencies as well as the globally accessible `chatdome-server` service command.
 ```bash
+cd controlplane
 python3 -m pip install -e .
 ```
 
 ### Configure
 
-All runtime settings live in local `config.yaml`. This file contains Telegram Bot tokens and API-key profile credentials, is ignored by Git, and should be kept owner-readable only (`chmod 600` on Linux). New Codex OAuth profiles use profile-scoped token files under `~/.chatdome/codex-auth/`; legacy empty token paths still resolve to `~/.chatdome/auth.json`.
+Server installations store runtime settings in `/etc/chatdome/config.yaml`; source development uses local `config.yaml`. This file contains Telegram Bot tokens and API-key profile credentials, is ignored by Git, and should be kept owner-readable only (`chmod 600` on Linux). New Codex OAuth profiles use profile-scoped token files under `~/.chatdome/codex-auth/`; legacy empty token paths still resolve to `~/.chatdome/auth.json`.
 
 ```bash
 cp config.example.yaml config.yaml
@@ -136,7 +137,7 @@ You can also use the interactive local menu from the repository root:
 ./chatdome
 ```
 
-By default, no LLM profile is configured (`active_ai_profile` is empty). Use the local menu to run `Configure Codex OAuth profile`; ChatDome shows a browser URL and code, then writes the profile only after authorization succeeds. If the bot is already running with another profile, `/codex_login [profile]` can start the same flow from Telegram. Use `/llm_list` to inspect configured profiles and `/llm <profile_name>` to switch models. Local menu changes to LLM, Sentinel, or Agent policy are written to `config.yaml` and request a runtime reload.
+By default, no LLM profile is configured (`active_ai_profile` is empty). Use the local menu to configure a profile. `System Maintenance` → `Update ChatDome` validates the official origin, fetches `main` with an explicit refspec, replaces the checkout, validates a candidate Python environment, restarts the service, checks application readiness, and restores the previous commit on failure.
 
 ### Run
 
@@ -144,7 +145,7 @@ Depending on your installation method, start ChatDome using one of the following
 
 **If you used Method A (Standard Install):**
 ```bash
-python3 -m chatdome.main
+sudo systemctl start chatdome
 ```
 
 **If you used Method B (Development Install):**
@@ -152,7 +153,7 @@ python3 -m chatdome.main
 chatdome-server --config config.yaml
 ```
 
-When installed with `install.sh`, the `chatdome` command opens the local management menu, and the systemd service runs `chatdome-server --config config.yaml`.
+When installed with `install.sh`, the `chatdome` command opens the local management menu, and the systemd service runs with `/etc/chatdome/config.yaml`.
 
 Open Telegram, send your bot a message. Done.
 
@@ -168,7 +169,7 @@ Look for `"chat":{"id": 123456789}` in the response.
 
 ### Single-File `config.yaml`
 
-ChatDome now uses `config.yaml` as the single runtime configuration file. Telegram Bot token, allowed Chat IDs, OpenAI-compatible API keys, Sentinel settings, and Agent policy all live there. `config.yaml` is ignored by Git; installer/menu tooling keeps it owner-readable only where possible.
+ChatDome uses one runtime configuration file. Server installations use `/etc/chatdome/config.yaml`; source development defaults to repository-local `config.yaml`. Telegram Bot token, allowed Chat IDs, OpenAI-compatible API keys, Sentinel settings, and Agent policy all live there.
 
 The default installation comes with no API keys or pre-configured profiles. The easiest way to get started is `./chatdome` → `AI model management` → `Configure Codex OAuth profile`. ChatDome starts the OAuth Device Code login and writes the profile only after the token is saved.
 
@@ -305,7 +306,7 @@ The AI uses **function calling** (tool use) to interact with the host. It can:
 | `/confirm` | Force-approve and execute the current pending high-risk command |
 | `/reject` | Reject the current pending command |
 | `/clear` | Clear conversation context, start fresh |
-| `/env` | Show runtime environment summary from `chat_data/environment_profile.md` |
+| `/env` | Show runtime environment summary from `/var/lib/chatdome/environment_profile.md` |
 | `/token` | Show token usage statistics for current chat |
 | `/cmd_echo` | Toggle command echo mode in replies |
 | `/audit [N]` | Show latest command audit events for current chat (default 10, max 30) |

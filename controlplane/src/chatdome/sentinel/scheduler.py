@@ -27,6 +27,7 @@ from chatdome.sentinel.evaluator import EvalResult, evaluate
 from chatdome.sentinel.pack_loader import PackLoader
 from chatdome.sentinel.suppressor import SuppressionResult, Suppressor
 from chatdome.sentinel.user_context import UserContextLedger
+from chatdome.runtime_paths import data_path
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +77,10 @@ class SentinelScheduler:
             learning_rounds=config.learning_rounds,
         )
         self._history = AlertHistory(
-            alerts_path=Path("chat_data/sentinel_alerts.jsonl"),
+            alerts_path=data_path("sentinel_alerts.jsonl"),
             retention_days=config.alert_retention_days,
         )
-        self._alert_push_state_path = Path("chat_data/sentinel_alert_push_state.json")
+        self._alert_push_state_path = data_path("sentinel_alert_push_state.json")
         self._alert_push_muted = False
         self._alert_push_muted_until: datetime | None = None
         self._alert_push_mute_reason = ""

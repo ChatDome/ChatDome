@@ -28,6 +28,8 @@ class ChatDomeCLITests(unittest.TestCase):
         self.example_path = self.root / "config.example.yaml"
         self.reload_request_path = self.root / "chat_data" / "reload_request.json"
         self.reload_status_path = self.root / "chat_data" / "reload_status.json"
+        self.ready_path = self.root / "chat_data" / "ready.json"
+        self.pid_path = self.root / "chat_data" / "chatdome.pid"
         self.config_path.write_text(
             yaml.safe_dump(
                 {
@@ -53,6 +55,8 @@ class ChatDomeCLITests(unittest.TestCase):
         self.cli.EXAMPLE_CONFIG_PATH = self.example_path
         self.cli.RELOAD_REQUEST_PATH = self.reload_request_path
         self.cli.RELOAD_STATUS_PATH = self.reload_status_path
+        self.cli.READY_PATH = self.ready_path
+        self.cli.PID_PATH = self.pid_path
 
     def tearDown(self):
         self.tmp_dir.cleanup()
@@ -138,6 +142,23 @@ class ChatDomeCLITests(unittest.TestCase):
         )
 
         self.assertEqual(token_file, "~/.chatdome/codex-auth/codex-old.json")
+
+    def test_health_check_requires_matching_ready_process(self):
+        self.pid_path.parent.mkdir(parents=True, exist_ok=True)
+        self.pid_path.write_text("1234\n", encoding="utf-8")
+        self.ready_path.write_text('{"pid": 1234}', encoding="utf-8")
+
+        with patch.object(self.cli, "_process_running", return_value=True):
+            self.cli.health_check(SimpleNamespace())
+
+    def test_health_check_rejects_stale_ready_file(self):
+        self.pid_path.parent.mkdir(parents=True, exist_ok=True)
+        self.pid_path.write_text("1234\n", encoding="utf-8")
+        self.ready_path.write_text('{"pid": 9999}', encoding="utf-8")
+
+        with patch.object(self.cli, "_process_running", return_value=True):
+            with self.assertRaises(SystemExit):
+                self.cli.health_check(SimpleNamespace())
 
 
 if __name__ == "__main__":

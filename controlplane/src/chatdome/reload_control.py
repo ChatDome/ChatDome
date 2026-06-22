@@ -1,7 +1,7 @@
 """File-based runtime reload request protocol.
 
-The local management menu writes reload requests under ``chat_data/`` and the
-running ChatDome process polls the same files.  This keeps the control path
+The local management menu writes reload requests under the configured runtime
+data directory and the running ChatDome process polls the same files.  This keeps the control path
 simple: no extra daemon, socket, or database is required.
 """
 
@@ -13,6 +13,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from chatdome.runtime_paths import data_dir
 
 
 SUPPORTED_RELOAD_DOMAINS = {"llm", "sentinel", "agent", "all"}
@@ -45,11 +47,11 @@ class ReloadControl:
 
     def __init__(
         self,
-        base_dir: str | Path = "chat_data",
+        base_dir: str | Path | None = None,
         request_file: str = "reload_request.json",
         status_file: str = "reload_status.json",
     ) -> None:
-        self.base_dir = Path(base_dir)
+        self.base_dir = Path(base_dir) if base_dir is not None else data_dir()
         self.request_path = self.base_dir / request_file
         self.status_path = self.base_dir / status_file
 

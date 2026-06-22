@@ -2,10 +2,17 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PID_FILE="$ROOT_DIR/chat_data/chatdome.pid"
-LOG_FILE="$ROOT_DIR/chat_data/chatdome.log"
-CONFIG_FILE="$ROOT_DIR/config.yaml"
+CONFIG_FILE="${CHATDOME_CONFIG:-/etc/chatdome/config.yaml}"
+DATA_DIR="${CHATDOME_DATA_DIR:-/var/lib/chatdome}"
+LOG_DIR="${CHATDOME_LOG_DIR:-/var/log/chatdome}"
+LOG_FILE="${CHATDOME_LOG_FILE:-$LOG_DIR/chatdome.log}"
+PID_FILE="$DATA_DIR/chatdome.pid"
 ACTION="${1:-start}"
+
+export CHATDOME_CONFIG="$CONFIG_FILE"
+export CHATDOME_DATA_DIR="$DATA_DIR"
+export CHATDOME_LOG_DIR="$LOG_DIR"
+export CHATDOME_LOG_FILE="$LOG_FILE"
 
 if [[ -x "$ROOT_DIR/venv/bin/chatdome-server" ]]; then
   SERVER_BIN="$ROOT_DIR/venv/bin/chatdome-server"
@@ -24,19 +31,19 @@ is_running() {
 }
 
 start_service() {
-  mkdir -p "$ROOT_DIR/chat_data"
+  mkdir -p "$DATA_DIR" "$LOG_DIR"
   if is_running; then
     echo "ChatDome already running (pid=$(cat "$PID_FILE"))."
     return
   fi
-  cd "$ROOT_DIR"
-  nohup $SERVER_BIN --config "$CONFIG_FILE" >>"$LOG_FILE" 2>&1 &
+  cd "$DATA_DIR"
+  nohup $SERVER_BIN --config "$CONFIG_FILE" >/dev/null 2>>"$LOG_FILE" &
   local pid=$!
   echo "$pid" >"$PID_FILE"
   sleep 1
   if ! kill -0 "$pid" >/dev/null 2>&1; then
     rm -f "$PID_FILE"
-    echo "ChatDome failed to start. Check $LOG_FILE for details." >&2
+    echo "ChatDome failed to start. Check $LOG_FILE." >&2
     return 1
   fi
   echo "ChatDome started (pid=$pid)."
@@ -75,6 +82,7 @@ case "$ACTION" in
       echo "ChatDome running (pid=$(cat "$PID_FILE"))."
     else
       echo "ChatDome not running."
+      exit 1
     fi
     ;;
   *)

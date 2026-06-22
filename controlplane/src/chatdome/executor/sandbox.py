@@ -93,7 +93,11 @@ class CommandSandbox:
         self.persist_command_outputs = persist_command_outputs
         self.command_output_retention_days = max(1, int(command_output_retention_days))
         self.command_output_max_chars = max(1, int(command_output_max_chars))
-        self.command_output_dir = Path(command_output_dir or Path("chat_data") / "command_outputs")
+        if command_output_dir is None:
+            from chatdome.runtime_paths import data_path
+
+            command_output_dir = data_path("command_outputs")
+        self.command_output_dir = Path(command_output_dir)
         self._pack_loader = pack_loader
         self._last_output_cleanup_ts = 0.0
 

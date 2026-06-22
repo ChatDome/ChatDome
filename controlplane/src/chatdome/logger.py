@@ -6,7 +6,9 @@ such as chatdome.log stay plain and readable in less, grep, and log collectors.
 """
 
 import logging
+from logging.handlers import RotatingFileHandler
 import os
+from pathlib import Path
 import sys
 from typing import Optional
 
@@ -124,6 +126,24 @@ def setup_logging(level: int = logging.INFO, use_colors: Optional[bool] = None) 
         root_logger.removeHandler(h)
 
     root_logger.addHandler(handler)
+
+    log_file = os.environ.get("CHATDOME_LOG_FILE", "").strip()
+    if log_file:
+        log_path = Path(log_file).expanduser()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_path,
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(
+            ChatDomeFormatter(
+                datefmt="%Y-%m-%d %H:%M:%S",
+                use_colors=False,
+            )
+        )
+        root_logger.addHandler(file_handler)
 
     # Suppress noise from dependencies
     logging.getLogger("httpx").setLevel(logging.WARNING)

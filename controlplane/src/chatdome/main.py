@@ -10,9 +10,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 from chatdome import __version__
@@ -28,10 +30,12 @@ from chatdome.sentinel.user_context import UserContextLedger
 from chatdome.agent.engram import EngramStore
 from chatdome.telegram.bot import TelegramBot
 from chatdome.logger import setup_logging
+from chatdome.runtime_paths import data_path
 
 
-PID_PATH = Path("chat_data") / "chatdome.pid"
-LOCK_PATH = Path("chat_data") / "chatdome.lock"
+PID_PATH = data_path("chatdome.pid")
+LOCK_PATH = data_path("chatdome.lock")
+READY_PATH = data_path("ready.json")
 
 
 class _InstanceLock:
@@ -209,7 +213,7 @@ def main() -> None:
     )
 
     # Runtime environment profile (OS/shell/command availability)
-    env_report_path = Path("chat_data/environment_profile.md")
+    env_report_path = data_path("environment_profile.md")
     env_snapshot, runtime_environment_context = collect_and_persist_runtime_environment(
         env_report_path,
     )
@@ -429,6 +433,10 @@ def main() -> None:
     async def _post_init_with_runtime(app_instance):
         nonlocal reload_task
         await original_post_init(app_instance)
+        READY_PATH.write_text(
+            json.dumps({"pid": os.getpid(), "ready_at": time.time()}),
+            encoding="utf-8",
+        )
         if sentinel_scheduler is not None:
             sentinel_scheduler.start()
         reload_task = app_instance.create_task(_reload_watch_loop())
@@ -456,6 +464,7 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
+        READY_PATH.unlink(missing_ok=True)
         _remove_pid_file()
         instance_lock.release()
         # Cleanup is handled by python-telegram-bot's run_polling

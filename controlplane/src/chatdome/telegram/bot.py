@@ -42,6 +42,7 @@ from chatdome.sentinel.alert_controls import (
 )
 from chatdome.telegram.auth import Authenticator
 from chatdome.telegram.formatting import MessageMarkup, TelegramMessageFormatter
+from chatdome.runtime_paths import data_path
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ class TelegramBot:
         self.auth = Authenticator(config.telegram.allowed_chat_ids)
         self.max_message_length = config.telegram.max_message_length
         self._app: Application | None = None
-        self._environment_profile_path = Path("chat_data/environment_profile.md")
+        self._environment_profile_path = data_path("environment_profile.md")
         self._sentinel: Any = None   # SentinelScheduler, injected via set_sentinel()
         self._pack_loader: Any = None
         self._alert_analysis_cache: dict[str, dict[str, Any]] = {}
@@ -1430,7 +1431,7 @@ class TelegramBot:
         if not path.exists():
             return (
                 "ℹ️ 未找到环境档案。\n"
-                "请先重启 ChatDome，让启动流程自动生成 chat_data/environment_profile.md。"
+                "请重启 ChatDome 生成运行环境画像。"
             )
 
         try:

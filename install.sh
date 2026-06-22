@@ -5,9 +5,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="chatdome"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 MENU_LINK="/usr/local/bin/chatdome"
+CONFIG_DIR="${CHATDOME_CONFIG_DIR:-/etc/chatdome}"
+CONFIG_FILE="${CHATDOME_CONFIG:-$CONFIG_DIR/config.yaml}"
+DATA_DIR="${CHATDOME_DATA_DIR:-/var/lib/chatdome}"
+LOG_DIR="${CHATDOME_LOG_DIR:-/var/log/chatdome}"
+LOG_FILE="${CHATDOME_LOG_FILE:-$LOG_DIR/chatdome.log}"
 
 if [[ "${EUID}" -ne 0 ]]; then
-  echo "Please run as root so the installer can create the systemd unit and menu symlink." >&2
+  echo "Run as root: sudo bash $ROOT_DIR/install.sh" >&2
   exit 1
 fi
 
@@ -18,15 +23,35 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
+install -d -m 0750 "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  if [[ -f "$ROOT_DIR/config.yaml" ]]; then
+    cp -p "$ROOT_DIR/config.yaml" "$CONFIG_FILE"
+  else
+    cp "$ROOT_DIR/config.example.yaml" "$CONFIG_FILE"
+  fi
+fi
+chmod 600 "$CONFIG_FILE"
+
+if [[ -d "$ROOT_DIR/chat_data" && ! -L "$ROOT_DIR/chat_data" ]]; then
+  cp -a "$ROOT_DIR/chat_data/." "$DATA_DIR/"
+  rm -rf "$ROOT_DIR/chat_data"
+fi
+if [[ -f "$DATA_DIR/chatdome.log" ]]; then
+  if [[ ! -f "$LOG_FILE" ]]; then
+    mv "$DATA_DIR/chatdome.log" "$LOG_FILE"
+  else
+    rm -f "$DATA_DIR/chatdome.log"
+  fi
+fi
+rm -f "$ROOT_DIR/config.yaml"
+touch "$LOG_FILE"
+chmod 0640 "$LOG_FILE"
+
 python3 -m venv "$ROOT_DIR/venv"
 "$ROOT_DIR/venv/bin/python" -m pip install --no-cache-dir --upgrade pip
 "$ROOT_DIR/venv/bin/python" -m pip install --no-cache-dir -e "$ROOT_DIR/controlplane"
-
-if [[ ! -f "$ROOT_DIR/config.yaml" ]]; then
-  cp "$ROOT_DIR/config.example.yaml" "$ROOT_DIR/config.yaml"
-fi
-chmod 600 "$ROOT_DIR/config.yaml" || true
-mkdir -p "$ROOT_DIR/chat_data"
 
 cat >"$SERVICE_PATH" <<UNIT
 [Unit]
@@ -36,13 +61,17 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=$ROOT_DIR
-ExecStart=$ROOT_DIR/venv/bin/chatdome-server --config $ROOT_DIR/config.yaml
+WorkingDirectory=$DATA_DIR
+ExecStart=$ROOT_DIR/venv/bin/chatdome-server --config $CONFIG_FILE
 Restart=on-failure
 RestartSec=5
 User=root
 Group=root
 Environment=PYTHONUNBUFFERED=1
+Environment=CHATDOME_CONFIG=$CONFIG_FILE
+Environment=CHATDOME_DATA_DIR=$DATA_DIR
+Environment=CHATDOME_LOG_DIR=$LOG_DIR
+Environment=CHATDOME_LOG_FILE=$LOG_FILE
 
 [Install]
 WantedBy=multi-user.target
@@ -62,6 +91,8 @@ Next steps:
   2. Configure Telegram Bot Token and allowed Chat IDs.
   3. Start the service from the menu.
 
-Config: $ROOT_DIR/config.yaml
+Config: $CONFIG_FILE
+Data: $DATA_DIR
+Log: $LOG_FILE
 Service: $SERVICE_PATH
 DONE

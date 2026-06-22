@@ -10,6 +10,8 @@ build/
 # Virtual environments
 venv/
 .venv/
+.venv-update/
+.venv-rollback/
 env/
 
 # Config with secrets

@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Union
 
+from chatdome.runtime_paths import data_path
+
 logger = logging.getLogger(__name__)
 
 # Basic stop words for simple keyword extraction (Chinese & English)
@@ -43,8 +45,10 @@ class EngramStore:
     """
     MAX_PROMPT_ENTRIES = 30
 
-    def __init__(self, storage_path: Union[str, Path] = "chat_data/engram.json"):
-        self.storage_path = Path(storage_path)
+    def __init__(self, storage_path: Union[str, Path, None] = None):
+        self.storage_path = (
+            Path(storage_path) if storage_path is not None else data_path("engram.json")
+        )
         self._engrams: Dict[str, Engram] = {}
         self._load()
 

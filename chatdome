@@ -11,6 +11,19 @@ done
 ROOT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 CLI="$ROOT_DIR/chatdome-cli.py"
 SERVICE_NAME="chatdome"
+SERVICE_PATH="${CHATDOME_SERVICE_PATH:-/etc/systemd/system/${SERVICE_NAME}.service}"
+CONFIG_FILE="${CHATDOME_CONFIG:-/etc/chatdome/config.yaml}"
+CONFIG_DIR="$(dirname "$CONFIG_FILE")"
+DATA_DIR="${CHATDOME_DATA_DIR:-/var/lib/chatdome}"
+LOG_DIR="${CHATDOME_LOG_DIR:-/var/log/chatdome}"
+LOG_FILE="${CHATDOME_LOG_FILE:-$LOG_DIR/chatdome.log}"
+UPDATE_LOCK_FILE="${CHATDOME_UPDATE_LOCK_FILE:-/run/lock/chatdome-update.lock}"
+EXPECTED_ORIGIN_URL="${CHATDOME_ORIGIN_URL:-https://github.com/ChatDome/ChatDome.git}"
+
+export CHATDOME_CONFIG="$CONFIG_FILE"
+export CHATDOME_DATA_DIR="$DATA_DIR"
+export CHATDOME_LOG_DIR="$LOG_DIR"
+export CHATDOME_LOG_FILE="$LOG_FILE"
 
 if command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="python3"
@@ -24,7 +37,11 @@ pause() {
 }
 
 run_cli() {
-  "$PYTHON_BIN" "$CLI" "$@"
+  if [[ -x "$ROOT_DIR/venv/bin/python" ]]; then
+    "$ROOT_DIR/venv/bin/python" "$CLI" "$@"
+  else
+    "$PYTHON_BIN" "$CLI" "$@"
+  fi
 }
 
 prompt_value() {
@@ -108,9 +125,9 @@ service_menu() {
       3) service_action stop; pause ;;
       4)
         if systemctl_available; then
-          sudo journalctl -u "$SERVICE_NAME" -f
+          tail -f "$LOG_FILE"
         else
-          tail -f "$ROOT_DIR/chat_data/chatdome.log"
+          tail -f "$LOG_FILE"
         fi
         ;;
       5) run_cli env-summary; pause ;;
@@ -277,6 +294,305 @@ agent_menu() {
   done
 }
 
+run_as_root() {
+  if [[ "${EUID}" -eq 0 || "${CHATDOME_NO_SUDO:-0}" == "1" ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+prepare_runtime_layout() {
+  run_as_root install -d -m 0750 "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" || return 1
+
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    if [[ -f "$ROOT_DIR/config.yaml" ]]; then
+      run_as_root cp -p "$ROOT_DIR/config.yaml" "$CONFIG_FILE" || return 1
+    else
+      run_as_root cp "$ROOT_DIR/config.example.yaml" "$CONFIG_FILE" || return 1
+    fi
+  fi
+  run_as_root chmod 600 "$CONFIG_FILE" || return 1
+
+  if [[ -d "$ROOT_DIR/chat_data" && ! -L "$ROOT_DIR/chat_data" ]]; then
+    run_as_root cp -a "$ROOT_DIR/chat_data/." "$DATA_DIR/" || return 1
+  fi
+  if [[ -f "$DATA_DIR/chatdome.log" ]]; then
+    if [[ ! -f "$LOG_FILE" ]]; then
+      run_as_root mv "$DATA_DIR/chatdome.log" "$LOG_FILE" || return 1
+    else
+      run_as_root rm -f "$DATA_DIR/chatdome.log" || return 1
+    fi
+  fi
+  run_as_root touch "$LOG_FILE" || return 1
+  run_as_root chmod 0640 "$LOG_FILE" || return 1
+}
+
+cleanup_legacy_runtime_layout() {
+  run_as_root rm -f "$ROOT_DIR/config.yaml" || return 1
+  if [[ -d "$ROOT_DIR/chat_data" && ! -L "$ROOT_DIR/chat_data" ]]; then
+    run_as_root rm -rf "$ROOT_DIR/chat_data" || return 1
+  fi
+}
+
+backup_systemd_unit() {
+  systemctl_available || return 0
+  if [[ -f "$SERVICE_PATH" ]]; then
+    run_as_root cp -p "$SERVICE_PATH" "$DATA_DIR/chatdome.service.rollback" || return 1
+  else
+    run_as_root rm -f "$DATA_DIR/chatdome.service.rollback" || return 1
+  fi
+}
+
+install_systemd_unit() {
+  systemctl_available || return 0
+  local candidate="$DATA_DIR/chatdome.service.update"
+  cat >"$candidate" <<UNIT
+[Unit]
+Description=ChatDome AI Host Security Assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$DATA_DIR
+ExecStart=$ROOT_DIR/venv/bin/chatdome-server --config $CONFIG_FILE
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+Environment=PYTHONUNBUFFERED=1
+Environment=CHATDOME_CONFIG=$CONFIG_FILE
+Environment=CHATDOME_DATA_DIR=$DATA_DIR
+Environment=CHATDOME_LOG_DIR=$LOG_DIR
+Environment=CHATDOME_LOG_FILE=$LOG_FILE
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  run_as_root install -m 0644 "$candidate" "$SERVICE_PATH" || return 1
+  run_as_root systemctl daemon-reload || return 1
+  rm -f "$candidate"
+}
+
+restore_systemd_unit() {
+  systemctl_available || return 0
+  local backup="$DATA_DIR/chatdome.service.rollback"
+  if [[ -f "$backup" ]]; then
+    run_as_root install -m 0644 "$backup" "$SERVICE_PATH" || return 1
+  else
+    run_as_root rm -f "$SERVICE_PATH" || return 1
+  fi
+  run_as_root systemctl daemon-reload
+}
+
+wait_for_rollback_health() {
+  local attempt
+  for attempt in $(seq 1 10); do
+    if systemctl_available; then
+      systemctl is-active --quiet "$SERVICE_NAME" && return 0
+    else
+      local pid_file="$ROOT_DIR/chat_data/chatdome.pid"
+      local pid=""
+      [[ -f "$pid_file" ]] && pid="$(cat "$pid_file" 2>/dev/null || true)"
+      [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1 && return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+normalize_git_url() {
+  local value="${1%/}"
+  value="${value%.git}"
+  printf '%s' "$value"
+}
+
+wait_for_health() {
+  local python_bin="$ROOT_DIR/venv/bin/python"
+  local attempt
+  for attempt in $(seq 1 30); do
+    if systemctl_available; then
+      if systemctl is-active --quiet "$SERVICE_NAME" && "$python_bin" "$CLI" health-check >/dev/null 2>&1; then
+        return 0
+      fi
+    elif "$python_bin" "$CLI" health-check >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+rollback_update() {
+  local old_commit="$1"
+  local reason="$2"
+  local candidate_venv="$ROOT_DIR/.venv-update"
+  local rollback_venv="$ROOT_DIR/.venv-rollback"
+
+  echo "❌ Update failed: $reason"
+  echo "Restoring $old_commit..."
+  service_action stop >/dev/null 2>&1 || true
+  if ! restore_systemd_unit; then
+    echo "❌ Rollback failed: cannot restore the systemd unit."
+    return 1
+  fi
+  if ! git -C "$ROOT_DIR" reset --hard "$old_commit" || ! git -C "$ROOT_DIR" clean -fd; then
+    echo "❌ Rollback failed. Run: git -C $ROOT_DIR reset --hard $old_commit"
+    return 1
+  fi
+  rm -rf "$candidate_venv"
+  if [[ -d "$rollback_venv" ]]; then
+    rm -rf "$ROOT_DIR/venv"
+    if ! mv "$rollback_venv" "$ROOT_DIR/venv"; then
+      echo "❌ Rollback failed: cannot restore the Python environment."
+      return 1
+    fi
+  fi
+  if [[ ! -x "$ROOT_DIR/venv/bin/python" ]]; then
+    echo "❌ Rollback failed: Python environment is missing."
+    return 1
+  fi
+  if ! service_action restart || ! wait_for_rollback_health; then
+    echo "❌ Rollback failed: service health check failed. Check $LOG_FILE."
+    return 1
+  fi
+  echo "✅ Restored ChatDome: $old_commit"
+  return 1
+}
+
+update_chatdome() (
+  local answer actual_origin old_commit update_python candidate_python version
+  local candidate_venv="$ROOT_DIR/.venv-update"
+  local rollback_venv="$ROOT_DIR/.venv-rollback"
+
+  echo "Tracked local changes and untracked non-ignored files will be removed."
+  read -r -p "Continue? [y/N] " answer
+  case "${answer,,}" in
+    y|yes) ;;
+    *) echo "Cancelled."; return 0 ;;
+  esac
+
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "❌ Update failed: install flock from the util-linux package."
+    return 1
+  fi
+  exec 9>"$UPDATE_LOCK_FILE" || {
+    echo "❌ Update failed: cannot open $UPDATE_LOCK_FILE."
+    return 1
+  }
+  if ! flock -n 9; then
+    echo "❌ Another ChatDome update is running."
+    return 1
+  fi
+
+  if ! prepare_runtime_layout; then
+    echo "❌ Update failed: cannot prepare runtime directories."
+    return 1
+  fi
+
+  update_python="$ROOT_DIR/venv/bin/python"
+  if [[ ! -x "$update_python" ]]; then
+    echo "❌ Python environment not found. Run: sudo bash $ROOT_DIR/install.sh"
+    return 1
+  fi
+  if ! "$update_python" "$CLI" validate-config; then
+    echo "❌ Update failed: fix $CONFIG_FILE and retry."
+    return 1
+  fi
+
+  actual_origin="$(git -C "$ROOT_DIR" remote get-url origin 2>/dev/null || true)"
+  if [[ "$(normalize_git_url "$actual_origin")" != "$(normalize_git_url "$EXPECTED_ORIGIN_URL")" ]]; then
+    echo "❌ Update failed: set origin to $EXPECTED_ORIGIN_URL"
+    return 1
+  fi
+
+  old_commit="$(git -C "$ROOT_DIR" rev-parse HEAD)" || {
+    echo "❌ Update failed: cannot read the current commit."
+    return 1
+  }
+  printf '%s\n' "$old_commit" >"$DATA_DIR/previous_commit"
+
+  if ! backup_systemd_unit; then
+    echo "❌ Update failed: cannot back up the systemd unit."
+    return 1
+  fi
+
+  echo "Fetching origin/main..."
+  if ! git -C "$ROOT_DIR" fetch --prune origin '+refs/heads/main:refs/remotes/origin/main'; then
+    echo "❌ Update failed: cannot fetch origin/main."
+    return 1
+  fi
+
+  if ! service_action stop; then
+    echo "❌ Update failed: cannot stop ChatDome."
+    return 1
+  fi
+
+  echo "Replacing local repository files with origin/main..."
+  if ! git -C "$ROOT_DIR" reset --hard origin/main; then
+    rollback_update "$old_commit" "cannot reset to origin/main."
+    return 1
+  fi
+  if ! git -C "$ROOT_DIR" clean -fd; then
+    rollback_update "$old_commit" "cannot remove untracked files."
+    return 1
+  fi
+
+  update_python="$ROOT_DIR/venv/bin/python"
+  if [[ ! -x "$update_python" ]]; then
+    rollback_update "$old_commit" "Python environment is missing."
+    return 1
+  fi
+  if [[ -e "$rollback_venv" ]]; then
+    rollback_update "$old_commit" "recovery directory exists: $rollback_venv"
+    return 1
+  fi
+  rm -rf "$candidate_venv"
+  if ! "$update_python" -m venv "$candidate_venv"; then
+    rollback_update "$old_commit" "cannot create the candidate Python environment."
+    return 1
+  fi
+  candidate_python="$candidate_venv/bin/python"
+  if ! "$candidate_python" -m pip install -e "$ROOT_DIR/controlplane"; then
+    rollback_update "$old_commit" "dependency installation failed."
+    return 1
+  fi
+  if ! "$candidate_python" "$CLI" validate-config; then
+    rollback_update "$old_commit" "configuration validation failed."
+    return 1
+  fi
+  if ! mv "$ROOT_DIR/venv" "$rollback_venv"; then
+    rollback_update "$old_commit" "cannot preserve the current Python environment."
+    return 1
+  fi
+  if ! mv "$candidate_venv" "$ROOT_DIR/venv"; then
+    mv "$rollback_venv" "$ROOT_DIR/venv" || true
+    rollback_update "$old_commit" "cannot activate the candidate Python environment."
+    return 1
+  fi
+  if ! install_systemd_unit; then
+    rollback_update "$old_commit" "cannot install the systemd unit."
+    return 1
+  fi
+  if ! service_action restart; then
+    rollback_update "$old_commit" "service restart failed."
+    return 1
+  fi
+  if ! wait_for_health; then
+    rollback_update "$old_commit" "service health check failed. Check $LOG_FILE."
+    return 1
+  fi
+
+  if ! cleanup_legacy_runtime_layout; then
+    echo "⚠️ Update completed. Remove $ROOT_DIR/config.yaml and $ROOT_DIR/chat_data after verifying backups."
+  fi
+  run_as_root rm -f "$DATA_DIR/chatdome.service.rollback" || true
+  rm -rf "$rollback_venv"
+  version="$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
+  echo "✅ ChatDome updated: $version"
+)
+
 maintenance_menu() {
   while true; do
     show_header
@@ -288,9 +604,7 @@ maintenance_menu() {
     read -r -p "Select: " choice
     case "$choice" in
       1)
-        git -C "$ROOT_DIR" pull
-        "$PYTHON_BIN" -m pip install -e "$ROOT_DIR/controlplane"
-        service_action restart
+        update_chatdome
         pause
         ;;
       2)
@@ -317,6 +631,10 @@ maintenance_menu() {
 }
 
 main_menu() {
+  if ! prepare_runtime_layout; then
+    echo "❌ Cannot prepare ChatDome runtime directories."
+    exit 1
+  fi
   run_cli ensure-config >/dev/null
   while true; do
     show_header
@@ -343,4 +661,7 @@ main_menu() {
   done
 }
 
-main_menu
+case "${1:-}" in
+  --update) update_chatdome ;;
+  *) main_menu ;;
+esac

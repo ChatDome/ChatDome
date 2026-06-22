@@ -1,14 +1,14 @@
 import json
 import logging
-import os
 import time
 from typing import Dict, TypedDict
 
+from chatdome.runtime_paths import data_dir, data_path
+
 logger = logging.getLogger(__name__)
 
-# Constants
-DATA_DIR = "chat_data"
-USAGE_FILE = f"{DATA_DIR}/token_usage.jsonl"
+DATA_DIR = data_dir()
+USAGE_FILE = data_path("token_usage.jsonl")
 
 
 class TokenStats(TypedDict):
@@ -35,7 +35,7 @@ class TokenTracker:
         total_tokens: int
     ) -> None:
         """Append token usage details to the persistent JSON Lines log."""
-        os.makedirs(DATA_DIR, exist_ok=True)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
         
         record = {
             "timestamp": int(time.time()),
@@ -62,7 +62,7 @@ class TokenTracker:
             "total_tokens": 0
         }
         
-        if not os.path.exists(USAGE_FILE):
+        if not USAGE_FILE.exists():
             return stats
             
         try:

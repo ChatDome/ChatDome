@@ -19,11 +19,13 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = ROOT / "config.yaml"
+CONFIG_PATH = Path(os.environ.get("CHATDOME_CONFIG", str(ROOT / "config.yaml"))).expanduser()
 EXAMPLE_CONFIG_PATH = ROOT / "config.example.yaml"
-PID_PATH = ROOT / "chat_data" / "chatdome.pid"
-RELOAD_REQUEST_PATH = ROOT / "chat_data" / "reload_request.json"
-RELOAD_STATUS_PATH = ROOT / "chat_data" / "reload_status.json"
+DATA_DIR = Path(os.environ.get("CHATDOME_DATA_DIR", str(ROOT / "chat_data"))).expanduser()
+PID_PATH = DATA_DIR / "chatdome.pid"
+READY_PATH = DATA_DIR / "ready.json"
+RELOAD_REQUEST_PATH = DATA_DIR / "reload_request.json"
+RELOAD_STATUS_PATH = DATA_DIR / "reload_status.json"
 SUPPORTED_RELOAD_DOMAINS = {"llm", "sentinel", "agent", "all"}
 CONTROLPLANE_SRC = ROOT / "controlplane" / "src"
 PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -211,6 +213,28 @@ def _read_pid() -> int:
         return 0
 
 
+def validate_config(args: argparse.Namespace) -> None:
+    del args
+    from chatdome.config import load_config
+
+    load_config(CONFIG_PATH)
+    print(f"config valid: {CONFIG_PATH}")
+
+
+def health_check(args: argparse.Namespace) -> None:
+    del args
+    pid = _read_pid()
+    if not _process_running(pid):
+        raise SystemExit("ChatDome process is not running.")
+    try:
+        ready = json.loads(READY_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+        raise SystemExit("ChatDome application is not ready.") from exc
+    if int(ready.get("pid", 0)) != pid:
+        raise SystemExit("ChatDome health state does not match the running process.")
+    print(f"ChatDome healthy: pid={pid}")
+
+
 def show_status(args: argparse.Namespace) -> None:
     del args
     data = _load_yaml()
@@ -225,6 +249,7 @@ def show_status(args: argparse.Namespace) -> None:
     print("ChatDome status")
     print(f"- root: {ROOT}")
     print(f"- config: {CONFIG_PATH}")
+    print(f"- data: {DATA_DIR}")
     print(f"- running: {'yes' if running else 'no'}")
     print(f"- pid: {pid or '(none)'}")
     print(f"- active LLM: {active_profile}")
@@ -237,7 +262,7 @@ def show_status(args: argparse.Namespace) -> None:
 
 def show_env_summary(args: argparse.Namespace) -> None:
     del args
-    path = ROOT / "chat_data" / "environment_profile.md"
+    path = DATA_DIR / "environment_profile.md"
     if not path.exists():
         print(f"environment profile not found: {path}")
         return
@@ -608,6 +633,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("ensure-config").set_defaults(func=ensure_config)
+    sub.add_parser("validate-config").set_defaults(func=validate_config)
+    sub.add_parser("health-check").set_defaults(func=health_check)
     sub.add_parser("status").set_defaults(func=show_status)
     sub.add_parser("env-summary").set_defaults(func=show_env_summary)
     sub.add_parser("llm-list").set_defaults(func=llm_list)

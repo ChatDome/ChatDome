@@ -10,11 +10,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-import os
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from chatdome.runtime_paths import data_dir, data_path
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +257,7 @@ class AgentSession:
     def append_raw_log(self, text: str) -> None:
         """Append raw interaction text to persistent log file."""
         try:
-            with open(f"chat_data/{self.chat_id}_raw.log", "a", encoding="utf-8") as f:
+            with data_path(f"{self.chat_id}_raw.log").open("a", encoding="utf-8") as f:
                 f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
         except Exception as e:
             logger.error("Failed to write raw log: %s", e)
@@ -322,10 +323,10 @@ class AgentSession:
             self.messages = [self.messages[0], summarized_msg] + self.messages[cut_idx:]
             
             # Dump to memory vault
-            memory_file = f"chat_data/{self.chat_id}_memory.json"
+            memory_file = data_path(f"{self.chat_id}_memory.json")
             # Merge if exists
             existing_summary = ""
-            if os.path.exists(memory_file):
+            if memory_file.exists():
                 try:
                     with open(memory_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
@@ -424,7 +425,7 @@ class SessionManager:
         self.engram_store = engram_store
         self._sessions: dict[int, AgentSession] = {}
         self._cleanup_task: asyncio.Task | None = None
-        self._chat_data_dir = Path("chat_data")
+        self._chat_data_dir = data_dir()
         self._session_store_dir = self._chat_data_dir / "sessions"
         self._chat_data_dir.mkdir(parents=True, exist_ok=True)
         self._session_store_dir.mkdir(parents=True, exist_ok=True)

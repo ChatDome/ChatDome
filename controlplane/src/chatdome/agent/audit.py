@@ -1,7 +1,7 @@
 """
 Command audit tracker with tamper-evident hash chain.
 
-Stores append-only JSONL records under chat_data/audit, one file per UTC day.
+Stores append-only JSONL records under the configured runtime data directory.
 """
 
 from __future__ import annotations
@@ -15,10 +15,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from chatdome.runtime_paths import data_path
+
 logger = logging.getLogger(__name__)
 
 
-AUDIT_DIR = Path("chat_data") / "audit"
+AUDIT_DIR = data_path("audit")
 AUDIT_FILE_PREFIX = "audit-"
 AUDIT_FILE_SUFFIX = ".jsonl"
 GENESIS_HASH = "0" * 64
