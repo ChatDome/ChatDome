@@ -76,6 +76,10 @@ def _create_fixture(tmp_path: Path):
     command_log = tmp_path / "python.log"
     service_log = tmp_path / "service.log"
     pip_count = tmp_path / "pip-count"
+    active_file = tmp_path / "service-active"
+    enabled_file = tmp_path / "service-enabled"
+    active_file.touch()
+    enabled_file.touch()
 
     _write_executable(
         deploy / "venv" / "bin" / "python",
@@ -106,8 +110,21 @@ exit 0
     )
     (deploy / "venv" / "ORIGINAL").write_text("original\n", encoding="utf-8")
     _write_executable(fake_bin / "systemctl", """#!/usr/bin/env bash
+set -eu
 echo "$*" >>"$FAKE_SERVICE_LOG"
-exit 0
+case "${1:-}" in
+  is-active) [[ -f "$FAKE_ACTIVE_FILE" ]] ;;
+  is-enabled) [[ -f "$FAKE_ENABLED_FILE" ]] ;;
+  start|restart) touch "$FAKE_ACTIVE_FILE" ;;
+  stop) rm -f "$FAKE_ACTIVE_FILE" ;;
+  enable) touch "$FAKE_ENABLED_FILE" ;;
+  disable)
+    rm -f "$FAKE_ENABLED_FILE"
+    [[ " $* " == *" --now "* ]] && rm -f "$FAKE_ACTIVE_FILE"
+    ;;
+  daemon-reload) ;;
+  *) ;;
+esac
 """)
     _write_executable(fake_bin / "sleep", "#!/usr/bin/env bash\nexit 0\n")
     _write_executable(fake_bin / "sudo", '#!/usr/bin/env bash\nexec "$@"\n')
@@ -126,6 +143,8 @@ exit 0
         "FAKE_PYTHON_LOG": str(command_log),
         "FAKE_SERVICE_LOG": str(service_log),
         "FAKE_PIP_COUNT": str(pip_count),
+        "FAKE_ACTIVE_FILE": str(active_file),
+        "FAKE_ENABLED_FILE": str(enabled_file),
     })
     return locals()
 
@@ -245,3 +264,38 @@ def test_update_lock_rejects_concurrent_update(tmp_path):
 
     assert result.returncode != 0
     assert "Another ChatDome update is running." in result.stdout
+
+
+def test_stop_reports_success_and_repeated_state(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    deploy = fixture["deploy"]
+
+    first = _run(["bash", deploy / "chatdome", "--stop"], env=fixture["env"], check=False)
+    second = _run(["bash", deploy / "chatdome", "--stop"], env=fixture["env"], check=False)
+
+    assert first.returncode == 0
+    assert "ChatDome stopped." in first.stdout
+    assert second.returncode == 0
+    assert "already stopped" in second.stdout
+
+
+def test_disable_reports_success_and_repeated_state(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    deploy = fixture["deploy"]
+
+    first = _run(
+        ["bash", deploy / "chatdome", "--disable-service"],
+        env=fixture["env"],
+        check=False,
+    )
+    second = _run(
+        ["bash", deploy / "chatdome", "--disable-service"],
+        env=fixture["env"],
+        check=False,
+    )
+
+    assert first.returncode == 0
+    assert "stopped and disabled" in first.stdout
+    assert "Config and data were retained" in first.stdout
+    assert second.returncode == 0
+    assert "already stopped and disabled" in second.stdout
