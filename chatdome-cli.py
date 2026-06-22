@@ -217,7 +217,10 @@ def validate_config(args: argparse.Namespace) -> None:
     del args
     from chatdome.config import load_config
 
-    load_config(CONFIG_PATH)
+    try:
+        load_config(CONFIG_PATH)
+    except Exception as exc:
+        raise SystemExit(f"Configuration error: {exc}") from None
     print(f"config valid: {CONFIG_PATH}")
 
 

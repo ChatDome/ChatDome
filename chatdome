@@ -487,6 +487,7 @@ wait_for_health() {
 rollback_update() {
   local old_commit="$1"
   local reason="$2"
+  local restart_after_rollback="${3:-1}"
   local candidate_venv="$ROOT_DIR/.venv-update"
   local rollback_venv="$ROOT_DIR/.venv-rollback"
 
@@ -513,6 +514,11 @@ rollback_update() {
     echo "❌ Rollback failed: Python environment is missing."
     return 1
   fi
+  if [[ "$restart_after_rollback" != "1" ]]; then
+    echo "✅ Restored ChatDome: $old_commit"
+    echo "⚠️ ChatDome remains stopped. Fix $CONFIG_FILE before starting it."
+    return 1
+  fi
   if ! service_action restart || ! wait_for_rollback_health; then
     echo "❌ Rollback failed: service health check failed. Check $LOG_FILE."
     return 1
@@ -523,6 +529,8 @@ rollback_update() {
 
 update_chatdome() (
   local answer actual_origin old_commit update_python candidate_python version
+  local config_was_valid=0
+  local candidate_config_valid=0
   local candidate_venv="$ROOT_DIR/.venv-update"
   local rollback_venv="$ROOT_DIR/.venv-rollback"
 
@@ -556,11 +564,6 @@ update_chatdome() (
     echo "❌ Python environment not found. Run: sudo bash $ROOT_DIR/install.sh"
     return 1
   fi
-  if ! "$update_python" "$CLI" validate-config; then
-    echo "❌ Update failed: fix $CONFIG_FILE and retry."
-    return 1
-  fi
-
   actual_origin="$(git -C "$ROOT_DIR" remote get-url origin 2>/dev/null || true)"
   if [[ "$(normalize_git_url "$actual_origin")" != "$(normalize_git_url "$EXPECTED_ORIGIN_URL")" ]]; then
     echo "❌ Update failed: set origin to $EXPECTED_ORIGIN_URL"
@@ -584,6 +587,12 @@ update_chatdome() (
     return 1
   fi
 
+  if "$update_python" "$CLI" validate-config; then
+    config_was_valid=1
+  else
+    echo "⚠️ Configuration is invalid. ChatDome will remain stopped after the update."
+  fi
+
   if ! service_action stop; then
     echo "❌ Update failed: cannot stop ChatDome."
     return 1
@@ -591,57 +600,69 @@ update_chatdome() (
 
   echo "Replacing local repository files with origin/main..."
   if ! git -C "$ROOT_DIR" reset --hard origin/main; then
-    rollback_update "$old_commit" "cannot reset to origin/main."
+    rollback_update "$old_commit" "cannot reset to origin/main." "$config_was_valid"
     return 1
   fi
   if ! git -C "$ROOT_DIR" clean -fd; then
-    rollback_update "$old_commit" "cannot remove untracked files."
+    rollback_update "$old_commit" "cannot remove untracked files." "$config_was_valid"
     return 1
   fi
 
   update_python="$ROOT_DIR/venv/bin/python"
   if [[ ! -x "$update_python" ]]; then
-    rollback_update "$old_commit" "Python environment is missing."
+    rollback_update "$old_commit" "Python environment is missing." "$config_was_valid"
     return 1
   fi
   if [[ -e "$rollback_venv" ]]; then
-    rollback_update "$old_commit" "recovery directory exists: $rollback_venv"
+    rollback_update "$old_commit" "recovery directory exists: $rollback_venv" "$config_was_valid"
     return 1
   fi
   rm -rf "$candidate_venv"
   if ! "$update_python" -m venv "$candidate_venv"; then
-    rollback_update "$old_commit" "cannot create the candidate Python environment."
+    rollback_update "$old_commit" "cannot create the candidate Python environment." "$config_was_valid"
     return 1
   fi
   candidate_python="$candidate_venv/bin/python"
-  if ! "$candidate_python" -m pip install -e "$ROOT_DIR/controlplane"; then
-    rollback_update "$old_commit" "dependency installation failed."
+  if ! "$candidate_python" -m ensurepip --upgrade; then
+    rollback_update "$old_commit" "cannot initialize pip." "$config_was_valid"
     return 1
   fi
-  if ! "$candidate_python" "$CLI" validate-config; then
-    rollback_update "$old_commit" "configuration validation failed."
+  if ! "$candidate_python" -m pip install --no-cache-dir --upgrade pip setuptools wheel; then
+    rollback_update "$old_commit" "cannot update Python packaging tools." "$config_was_valid"
+    return 1
+  fi
+  if ! "$candidate_python" -m pip install -e "$ROOT_DIR/controlplane"; then
+    rollback_update "$old_commit" "dependency installation failed." "$config_was_valid"
+    return 1
+  fi
+  if "$candidate_python" "$CLI" validate-config; then
+    candidate_config_valid=1
+  elif [[ "$config_was_valid" == "1" ]]; then
+    rollback_update "$old_commit" "configuration validation failed." "$config_was_valid"
     return 1
   fi
   if ! mv "$ROOT_DIR/venv" "$rollback_venv"; then
-    rollback_update "$old_commit" "cannot preserve the current Python environment."
+    rollback_update "$old_commit" "cannot preserve the current Python environment." "$config_was_valid"
     return 1
   fi
   if ! mv "$candidate_venv" "$ROOT_DIR/venv"; then
     mv "$rollback_venv" "$ROOT_DIR/venv" || true
-    rollback_update "$old_commit" "cannot activate the candidate Python environment."
+    rollback_update "$old_commit" "cannot activate the candidate Python environment." "$config_was_valid"
     return 1
   fi
   if ! install_systemd_unit; then
-    rollback_update "$old_commit" "cannot install the systemd unit."
+    rollback_update "$old_commit" "cannot install the systemd unit." "$config_was_valid"
     return 1
   fi
-  if ! service_action restart; then
-    rollback_update "$old_commit" "service restart failed."
-    return 1
-  fi
-  if ! wait_for_health; then
-    rollback_update "$old_commit" "service health check failed. Check $LOG_FILE."
-    return 1
+  if [[ "$config_was_valid" == "1" ]]; then
+    if ! service_action restart; then
+      rollback_update "$old_commit" "service restart failed." "$config_was_valid"
+      return 1
+    fi
+    if ! wait_for_health; then
+      rollback_update "$old_commit" "service health check failed. Check $LOG_FILE." "$config_was_valid"
+      return 1
+    fi
   fi
 
   if ! cleanup_legacy_runtime_layout; then
@@ -651,6 +672,13 @@ update_chatdome() (
   rm -rf "$rollback_venv"
   version="$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
   echo "✅ ChatDome updated: $version"
+  if [[ "$config_was_valid" != "1" ]]; then
+    if [[ "$candidate_config_valid" == "1" ]]; then
+      echo "ℹ️ ChatDome remains stopped. Start it from the menu."
+    else
+      echo "⚠️ Fix $CONFIG_FILE, then start ChatDome from the menu."
+    fi
+  fi
 )
 
 maintenance_menu() {

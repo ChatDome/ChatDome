@@ -93,12 +93,22 @@ if [[ "${1:-}" == "-m" && "${2:-}" == "venv" ]]; then
   touch "$3/CANDIDATE"
   exit 0
 fi
-if [[ "${1:-}" == "-m" && "${2:-}" == "pip" ]]; then
+if [[ "${1:-}" == "-m" && "${2:-}" == "pip" && " $* " == *" -e "* ]]; then
   count=0
   [[ -f "$FAKE_PIP_COUNT" ]] && count="$(cat "$FAKE_PIP_COUNT")"
   count=$((count + 1))
   echo "$count" >"$FAKE_PIP_COUNT"
   if [[ "${FAIL_FIRST_INSTALL:-0}" == "1" && "$count" == "1" ]]; then
+    exit 1
+  fi
+fi
+if [[ "${2:-}" == "validate-config" ]]; then
+  if [[ "${FAIL_CONFIG:-0}" == "1" ]]; then
+    echo "Configuration error: chatdome.active_ai_profile is required." >&2
+    exit 1
+  fi
+  if [[ "${FAIL_CANDIDATE_CONFIG:-0}" == "1" && "$0" == *"/.venv-update/"* ]]; then
+    echo "Configuration error: chatdome.new_required_field is required." >&2
     exit 1
   fi
 fi
@@ -174,13 +184,80 @@ def test_update_replaces_checkout_migrates_runtime_and_checks_health(tmp_path):
 
     python_calls = fixture["command_log"].read_text(encoding="utf-8")
     assert "validate-config" in python_calls
+    assert "-m ensurepip --upgrade" in python_calls
+    assert "-m pip install --no-cache-dir --upgrade pip setuptools wheel" in python_calls
     assert "-m pip install -e" in python_calls
+    assert python_calls.index("-m ensurepip --upgrade") < python_calls.index("-m pip install -e")
     assert "health-check" in python_calls
     service_calls = fixture["service_log"].read_text(encoding="utf-8")
     assert "stop chatdome" in service_calls
     assert "restart chatdome" in service_calls
     assert "is-active --quiet chatdome" in service_calls
 
+
+def test_update_preserves_existing_standard_config(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    deploy = fixture["deploy"]
+    standard_config = fixture["config_dir"] / "config.yaml"
+    standard_config.parent.mkdir(parents=True)
+    standard_config.write_text("standard config\n", encoding="utf-8")
+    (deploy / "config.yaml").write_text("legacy config\n", encoding="utf-8")
+
+    result = _run(
+        ["bash", deploy / "chatdome", "--update"],
+        env=fixture["env"],
+        input_text="y\n",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert standard_config.read_text(encoding="utf-8") == "standard config\n"
+    assert not (deploy / "config.yaml").exists()
+
+
+def test_update_rolls_back_when_previously_valid_config_becomes_invalid(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    deploy = fixture["deploy"]
+    before = _git(deploy, "rev-parse", "HEAD")
+    failing_env = fixture["env"].copy()
+    failing_env["FAIL_CANDIDATE_CONFIG"] = "1"
+
+    result = _run(
+        ["bash", deploy / "chatdome", "--update"],
+        env=failing_env,
+        input_text="y\n",
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "configuration validation failed" in result.stdout
+    assert "Restored ChatDome" in result.stdout
+    assert _git(deploy, "rev-parse", "HEAD") == before
+    assert (deploy / "venv" / "ORIGINAL").exists()
+
+
+def test_update_with_invalid_existing_config_updates_but_stays_stopped(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    deploy = fixture["deploy"]
+    invalid_env = fixture["env"].copy()
+    invalid_env["FAIL_CONFIG"] = "1"
+
+    result = _run(
+        ["bash", deploy / "chatdome", "--update"],
+        env=invalid_env,
+        input_text="y\n",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _git(deploy, "rev-parse", "HEAD") == fixture["target_commit"]
+    assert (deploy / "venv" / "CANDIDATE").exists()
+    assert "Fix " in result.stdout
+    assert "then start ChatDome from the menu" in result.stdout
+    assert not fixture["active_file"].exists()
+    service_calls = fixture["service_log"].read_text(encoding="utf-8")
+    assert "stop chatdome" in service_calls
+    assert "restart chatdome" not in service_calls
 
 def test_update_rolls_back_commit_when_dependency_installation_fails(tmp_path):
     fixture = _create_fixture(tmp_path)

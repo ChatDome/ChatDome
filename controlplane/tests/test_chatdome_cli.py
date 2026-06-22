@@ -65,6 +65,15 @@ class ChatDomeCLITests(unittest.TestCase):
         data = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
         return data["chatdome"]["ai_profiles"]
 
+    def test_validate_config_reports_error_without_traceback(self):
+        self.config_path.write_text("chatdome: {}\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            SystemExit,
+            "Configuration error: chatdome.active_ai_profile is required",
+        ):
+            self.cli.validate_config(SimpleNamespace())
+
     def test_set_openai_blank_key_does_not_create_profile(self):
         args = SimpleNamespace(
             profile="empty-openai",
