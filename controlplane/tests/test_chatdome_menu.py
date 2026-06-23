@@ -1,7 +1,9 @@
 import os
 import shutil
+import signal
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -38,6 +40,48 @@ def _write_executable(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _read_pty_until(master_fd: int, needle: str, timeout: float = 5.0) -> str:
+    import select
+
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    expected = needle.encode()
+    while expected not in output:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(f"Timed out waiting for {needle!r}. Output: {output.decode(errors='replace')}")
+        ready, _, _ = select.select([master_fd], [], [], remaining)
+        if not ready:
+            continue
+        try:
+            chunk = os.read(master_fd, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        output.extend(chunk)
+    text = output.decode(errors="replace")
+    assert needle in text, text
+    return text
+
+
+def _spawn_interactive_menu(deploy: Path, env: dict[str, str]):
+    import pty
+
+    master_fd, slave_fd = pty.openpty()
+    process = subprocess.Popen(
+        ["bash", str(deploy / "chatdome")],
+        env=env,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        start_new_session=True,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    return process, master_fd
 
 
 def _create_fixture(tmp_path: Path):
@@ -193,6 +237,43 @@ def test_update_replaces_checkout_migrates_runtime_and_checks_health(tmp_path):
     assert "stop chatdome" in service_calls
     assert "restart chatdome" in service_calls
     assert "is-active --quiet chatdome" in service_calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX terminal signals")
+def test_ctrl_c_cancels_openai_configuration_and_exits_main_menu(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    process, master_fd = _spawn_interactive_menu(fixture["deploy"], fixture["env"])
+
+    try:
+        _read_pty_until(master_fd, "Select: ")
+        os.write(master_fd, b"3\n")
+        output = _read_pty_until(master_fd, "Select: ")
+        assert "LLM Management" in output
+        os.write(master_fd, b"2\n")
+        _read_pty_until(master_fd, "Profile name [my-openai-profile]: ")
+        os.write(master_fd, b"broken-profile\n")
+        _read_pty_until(master_fd, "Model [gpt-4o]: ")
+
+        os.killpg(process.pid, signal.SIGINT)
+        output = _read_pty_until(master_fd, "Select: ")
+
+        assert "Cancelled." in output
+        assert "LLM Management" in output
+        assert process.poll() is None
+        python_calls = fixture["command_log"].read_text(encoding="utf-8")
+        assert "set-openai" not in python_calls
+
+        os.write(master_fd, b"0\n")
+        output = _read_pty_until(master_fd, "Select: ")
+        assert "1) Start service" in output
+        os.killpg(process.pid, signal.SIGINT)
+
+        assert process.wait(timeout=5) == 130
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        os.close(master_fd)
 
 
 def test_update_preserves_existing_standard_config(tmp_path):

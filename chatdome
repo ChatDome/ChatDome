@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -uo pipefail
-trap 'echo' INT
 
 SOURCE="${BASH_SOURCE[0]}"
 while [[ -L "$SOURCE" ]]; do
@@ -68,6 +67,30 @@ prompt_secret() {
   fi
   echo
   printf -v "$var_name" '%s' "$value"
+}
+
+configure_openai_profile() {
+  local profile profile_state model base_url api_key overwrite
+  trap 'printf "\n"; echo "Cancelled."; return 130' INT
+
+  prompt_value profile "Profile name [my-openai-profile]: " "my-openai-profile" || return $?
+  if ! profile_state="$(run_cli llm-profile-state "$profile")"; then
+    pause
+    return 1
+  fi
+  if [[ "$profile_state" == "exists" ]]; then
+    echo "Profile already exists: $profile"
+    read -r -p "Overwrite this profile? [y/N] " overwrite
+    case "${overwrite,,}" in
+      y|yes) ;;
+      *) echo "Cancelled."; pause; return 0 ;;
+    esac
+  fi
+  prompt_value model "Model [gpt-4o]: " "gpt-4o" || return $?
+  prompt_value base_url "Base URL [https://api.openai.com/v1]: " "https://api.openai.com/v1" || return $?
+  prompt_secret api_key "API Key: " || return $?
+  run_cli set-openai --profile "$profile" --model "$model" --base-url "$base_url" --api-key "$api_key"
+  pause
 }
 
 systemctl_available() {
@@ -198,6 +221,7 @@ service_menu() {
 
 llm_menu() {
   while true; do
+    trap 'printf "\n"; return 130' INT
     show_header
     echo "LLM Management"
     echo "1) List profiles"
@@ -210,26 +234,7 @@ llm_menu() {
     read -r -p "Select: " choice
     case "$choice" in
       1) run_cli llm-list; pause ;;
-      2)
-        prompt_value profile "Profile name [my-openai-profile]: " "my-openai-profile" || { pause; continue; }
-        if ! profile_state="$(run_cli llm-profile-state "$profile")"; then
-          pause
-          continue
-        fi
-        if [[ "$profile_state" == "exists" ]]; then
-          echo "Profile already exists: $profile"
-          read -r -p "Overwrite this profile? [y/N] " overwrite
-          case "${overwrite,,}" in
-            y|yes) ;;
-            *) echo "Cancelled."; pause; continue ;;
-          esac
-        fi
-        prompt_value model "Model [gpt-4o]: " "gpt-4o" || { pause; continue; }
-        prompt_value base_url "Base URL [https://api.openai.com/v1]: " "https://api.openai.com/v1" || { pause; continue; }
-        prompt_secret api_key "API Key: " || { pause; continue; }
-        run_cli set-openai --profile "$profile" --model "$model" --base-url "$base_url" --api-key "$api_key"
-        pause
-        ;;
+      2) configure_openai_profile || true ;;
       3)
         prompt_value profile "Profile name [codex]: " "codex" || { pause; continue; }
         run_cli codex-login --profile "$profile"
@@ -731,6 +736,7 @@ main_menu() {
   fi
   run_cli ensure-config >/dev/null
   while true; do
+    trap 'printf "\n"; exit 130' INT
     show_header
     echo "1) Start service"
     echo "2) Service management"
