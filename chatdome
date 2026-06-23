@@ -212,6 +212,18 @@ llm_menu() {
       1) run_cli llm-list; pause ;;
       2)
         prompt_value profile "Profile name [my-openai-profile]: " "my-openai-profile" || { pause; continue; }
+        if ! profile_state="$(run_cli llm-profile-state "$profile")"; then
+          pause
+          continue
+        fi
+        if [[ "$profile_state" == "exists" ]]; then
+          echo "Profile already exists: $profile"
+          read -r -p "Overwrite this profile? [y/N] " overwrite
+          case "${overwrite,,}" in
+            y|yes) ;;
+            *) echo "Cancelled."; pause; continue ;;
+          esac
+        fi
         prompt_value model "Model [gpt-4o]: " "gpt-4o" || { pause; continue; }
         prompt_value base_url "Base URL [https://api.openai.com/v1]: " "https://api.openai.com/v1" || { pause; continue; }
         prompt_secret api_key "API Key: " || { pause; continue; }

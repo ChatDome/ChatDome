@@ -74,6 +74,48 @@ class ChatDomeCLITests(unittest.TestCase):
         ):
             self.cli.validate_config(SimpleNamespace())
 
+    def test_llm_profile_state_reports_exact_name_match(self):
+        with patch("builtins.print") as output:
+            self.cli.llm_profile_state(SimpleNamespace(profile="base"))
+            output.assert_called_once_with("exists")
+
+        with patch("builtins.print") as output:
+            self.cli.llm_profile_state(SimpleNamespace(profile="Base"))
+            output.assert_called_once_with("missing")
+
+    def test_set_openai_reports_created_and_updated(self):
+        created_args = SimpleNamespace(
+            profile="new-profile",
+            model="new-model",
+            base_url="https://example.com/v1",
+            api_key="sk-new",
+            temperature=0.2,
+            max_tokens=3000,
+        )
+        with patch("builtins.print") as output:
+            self.cli.set_openai(created_args)
+            output.assert_called_once_with(
+                "created OpenAI-compatible profile: new-profile"
+            )
+
+        updated_args = SimpleNamespace(
+            profile="base",
+            model="updated-model",
+            base_url="https://example.com/v1",
+            api_key="sk-updated",
+            temperature=0.3,
+            max_tokens=4000,
+        )
+        with patch("builtins.print") as output:
+            self.cli.set_openai(updated_args)
+            output.assert_called_once_with(
+                "updated OpenAI-compatible profile: base"
+            )
+
+        profiles = self._load_profiles()
+        self.assertEqual(profiles["new-profile"]["model"], "new-model")
+        self.assertEqual(profiles["base"]["model"], "updated-model")
+
     def test_set_openai_blank_key_does_not_create_profile(self):
         args = SimpleNamespace(
             profile="empty-openai",

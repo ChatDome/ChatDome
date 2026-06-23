@@ -303,6 +303,13 @@ def llm_list(args: argparse.Namespace) -> None:
         print(f"- {name}{marker}: {profile.get('provider')}/{api_mode} model={profile.get('model')} auth={auth}")
 
 
+def llm_profile_state(args: argparse.Namespace) -> None:
+    name = _validate_profile_name(args.profile)
+    data = _load_yaml()
+    profiles = _profile_items(_chatdome_root(data))
+    print("exists" if name in profiles else "missing")
+
+
 def set_openai(args: argparse.Namespace) -> None:
     args.profile = _validate_profile_name(args.profile)
     if not str(args.api_key or "").strip():
@@ -310,7 +317,11 @@ def set_openai(args: argparse.Namespace) -> None:
     data = _load_yaml()
     root = _chatdome_root(data)
     profiles = _profile_items(root)
-    profile = profiles.setdefault(args.profile, {})
+    created = args.profile not in profiles
+    profile = profiles.get(args.profile)
+    if not isinstance(profile, dict):
+        profile = {}
+        profiles[args.profile] = profile
     profile.update(
         {
             "provider": "openai",
@@ -326,7 +337,8 @@ def set_openai(args: argparse.Namespace) -> None:
         root["active_ai_profile"] = args.profile
     _write_yaml(data)
     _request_reload(["llm"], "menu:set-openai")
-    print(f"updated OpenAI-compatible profile: {args.profile}")
+    action = "created" if created else "updated"
+    print(f"{action} OpenAI-compatible profile: {args.profile}")
 
 
 def set_codex(args: argparse.Namespace) -> None:
@@ -641,6 +653,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status").set_defaults(func=show_status)
     sub.add_parser("env-summary").set_defaults(func=show_env_summary)
     sub.add_parser("llm-list").set_defaults(func=llm_list)
+    p = sub.add_parser("llm-profile-state")
+    p.add_argument("profile")
+    p.set_defaults(func=llm_profile_state)
 
     p = sub.add_parser("set-openai")
     p.add_argument("--profile", default="my-openai-profile")
