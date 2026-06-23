@@ -118,12 +118,16 @@ sudo bash install.sh
 ```
 
 安装后配置、运行数据和日志分别位于 `/etc/chatdome/config.yaml`、`/var/lib/chatdome` 和 `/var/log/chatdome/chatdome.log`。
+安装脚本会注册 systemd 服务并设置开机自启，但不会立即启动服务。完成配置后，运行 `chatdome` 并选择 `Start service`，或执行 `sudo systemctl start chatdome`。
 
 #### 方式 B：开发模式安装（Editable Mode）
 ```bash
-cd controlplane
-python3 -m pip install -e .
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ./controlplane
 ```
+
+开发模式将源码以 editable 方式安装到当前虚拟环境，修改 Python 源码后无需重新安装。它不会注册 systemd 服务，也不会创建 `/etc/chatdome`、`/var/lib/chatdome` 或 `chatdome` 系统命令，适用于本地开发和测试；服务器常驻运行请使用标准安装。
 
 ### 配置
 
@@ -152,7 +156,7 @@ chmod 600 config.yaml
 sudo systemctl start chatdome
 ```
 
-**如果使用 方式 B（开发模式安装）：**
+**如果使用方式 B（开发模式安装，并已激活 `.venv`）：**
 ```bash
 chatdome-server --config config.yaml
 ```

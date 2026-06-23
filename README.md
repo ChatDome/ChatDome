@@ -114,12 +114,16 @@ sudo bash install.sh
 ```
 
 The installer uses `/etc/chatdome/config.yaml`, `/var/lib/chatdome`, and `/var/log/chatdome/chatdome.log` for configuration, runtime data, and logs.
+It registers the systemd service and enables it at boot, but does not start it immediately. After configuration, run `chatdome` and select `Start service`, or run `sudo systemctl start chatdome`.
 
 #### Method B: Development Install (Editable Mode)
 ```bash
-cd controlplane
-python3 -m pip install -e .
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ./controlplane
 ```
+
+Development mode installs the source tree into the active virtual environment in editable mode, so Python source changes do not require reinstallation. It does not register a systemd service, create `/etc/chatdome` or `/var/lib/chatdome`, or install the system-wide `chatdome` command. Use it for local development and testing; use the standard install for a persistent server deployment.
 
 ### Configure
 
@@ -148,7 +152,7 @@ Depending on your installation method, start ChatDome using one of the following
 sudo systemctl start chatdome
 ```
 
-**If you used Method B (Development Install):**
+**If you used Method B (Development Install, with `.venv` activated):**
 ```bash
 chatdome-server --config config.yaml
 ```
