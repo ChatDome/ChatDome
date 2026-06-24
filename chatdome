@@ -15,6 +15,7 @@ COMMAND_PATH="${CHATDOME_COMMAND_PATH:-/usr/local/bin/chatdome}"
 CONFIG_FILE="${CHATDOME_CONFIG:-/etc/chatdome/config.yaml}"
 CONFIG_DIR="$(dirname "$CONFIG_FILE")"
 DATA_DIR="${CHATDOME_DATA_DIR:-/var/lib/chatdome}"
+VENV_ROOT="${CHATDOME_VENV_ROOT:-$DATA_DIR/venvs}"
 LOG_DIR="${CHATDOME_LOG_DIR:-/var/log/chatdome}"
 LOG_FILE="${CHATDOME_LOG_FILE:-$LOG_DIR/chatdome.log}"
 UPDATE_LOCK_FILE="${CHATDOME_UPDATE_LOCK_FILE:-/run/lock/chatdome-update.lock}"
@@ -577,6 +578,7 @@ backup_systemd_unit() {
 
 install_systemd_unit() {
   systemctl_available || return 0
+  local runtime_python="${1:-$ROOT_DIR/venv/bin/python}"
   local candidate="$DATA_DIR/chatdome.service.update"
   cat >"$candidate" <<UNIT
 [Unit]
@@ -587,7 +589,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$DATA_DIR
-ExecStart=$ROOT_DIR/venv/bin/python -m chatdome.main --config $CONFIG_FILE
+ExecStart=$runtime_python -m chatdome.main --config $CONFIG_FILE
 Restart=on-failure
 RestartSec=5
 User=root
@@ -659,8 +661,10 @@ rollback_update() {
   local old_commit="$1"
   local reason="$2"
   local restart_after_rollback="${3:-1}"
-  local candidate_venv="$ROOT_DIR/.venv-update"
-  local rollback_venv="$ROOT_DIR/.venv-rollback"
+  local candidate_venv="${4:-}"
+  local previous_venv="${5:-}"
+  local venv_switched="${6:-0}"
+  local legacy_rollback="$ROOT_DIR/.venv-rollback"
 
   echo "❌ Update failed: $reason"
   echo "Restoring $old_commit..."
@@ -673,13 +677,23 @@ rollback_update() {
     echo "❌ Rollback failed. Run: git -C $ROOT_DIR reset --hard $old_commit"
     return 1
   fi
-  rm -rf "$candidate_venv"
-  if [[ -d "$rollback_venv" ]]; then
-    rm -rf "$ROOT_DIR/venv"
-    if ! mv "$rollback_venv" "$ROOT_DIR/venv"; then
-      echo "❌ Rollback failed: cannot restore the Python environment."
-      return 1
+
+  if [[ "$venv_switched" == "1" ]]; then
+    rm -f "$ROOT_DIR/venv"
+    if [[ -d "$legacy_rollback" && ! -L "$legacy_rollback" ]]; then
+      if ! mv "$legacy_rollback" "$ROOT_DIR/venv"; then
+        echo "❌ Rollback failed: cannot restore the Python environment."
+        return 1
+      fi
+    elif [[ -n "$previous_venv" && -x "$previous_venv/bin/python" ]]; then
+      if ! ln -s "$previous_venv" "$ROOT_DIR/venv"; then
+        echo "❌ Rollback failed: cannot restore the Python environment link."
+        return 1
+      fi
     fi
+  fi
+  if [[ -n "$candidate_venv" && -d "$candidate_venv" ]]; then
+    run_as_root rm -rf "$candidate_venv" || true
   fi
   if [[ ! -x "$ROOT_DIR/venv/bin/python" ]]; then
     echo "❌ Rollback failed: Python environment is missing."
@@ -698,12 +712,23 @@ rollback_update() {
   return 1
 }
 
+cleanup_versioned_venvs() {
+  local current_venv="$1" previous_venv="${2:-}" path
+  [[ -d "$VENV_ROOT" ]] || return 0
+  for path in "$VENV_ROOT"/*; do
+    [[ -d "$path" ]] || continue
+    if [[ "$path" != "$current_venv" && "$path" != "$previous_venv" ]]; then
+      run_as_root rm -rf "$path" || return 1
+    fi
+  done
+}
 update_chatdome() (
   local answer actual_origin old_commit target_commit update_python candidate_python version runtime_check_output
+  local previous_venv="" candidate_venv=""
+  local legacy_rollback="$ROOT_DIR/.venv-rollback"
+  local venv_switched=0
   local config_was_valid=0
   local candidate_config_valid=0
-  local candidate_venv="$ROOT_DIR/.venv-update"
-  local rollback_venv="$ROOT_DIR/.venv-rollback"
 
   if ! command -v flock >/dev/null 2>&1; then
     echo "❌ Update failed: install flock from the util-linux package."
@@ -752,6 +777,11 @@ update_chatdome() (
     echo "ChatDome is already up to date: ${old_commit:0:12}"
     return 0
   fi
+  if [[ ! "$target_commit" =~ ^[0-9a-f]{40,64}$ ]]; then
+    echo "❌ Update failed: invalid origin/main commit."
+    return 1
+  fi
+  candidate_venv="$VENV_ROOT/$target_commit"
 
   echo "Update available: ${old_commit:0:12} -> ${target_commit:0:12}"
   echo "Tracked local changes and untracked non-ignored files will be removed."
@@ -760,6 +790,21 @@ update_chatdome() (
     y|yes) ;;
     *) echo "Cancelled."; return 0 ;;
   esac
+
+  if [[ -L "$ROOT_DIR/venv" ]]; then
+    previous_venv="$(readlink -f "$ROOT_DIR/venv")"
+    if [[ -z "$previous_venv" || ! -x "$previous_venv/bin/python" ]]; then
+      echo "❌ Update failed: current Python environment link is invalid."
+      return 1
+    fi
+  elif [[ ! -d "$ROOT_DIR/venv" ]]; then
+    echo "❌ Update failed: current Python environment is missing."
+    return 1
+  fi
+  if [[ -e "$legacy_rollback" ]]; then
+    echo "❌ Update failed: recovery directory exists: $legacy_rollback"
+    return 1
+  fi
 
   printf '%s\n' "$old_commit" >"$DATA_DIR/previous_commit"
   if ! backup_systemd_unit; then
@@ -780,59 +825,51 @@ update_chatdome() (
 
   echo "Replacing local repository files with origin/main..."
   if ! git -C "$ROOT_DIR" reset --hard origin/main; then
-    rollback_update "$old_commit" "cannot reset to origin/main." "$config_was_valid"
+    rollback_update "$old_commit" "cannot reset to origin/main." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
     return 1
   fi
   if ! git -C "$ROOT_DIR" clean -fd; then
-    rollback_update "$old_commit" "cannot remove untracked files." "$config_was_valid"
+    rollback_update "$old_commit" "cannot remove untracked files." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
     return 1
   fi
 
-  update_python="$ROOT_DIR/venv/bin/python"
-  if [[ ! -x "$update_python" ]]; then
-    rollback_update "$old_commit" "Python environment is missing." "$config_was_valid"
+  run_as_root mkdir -p "$VENV_ROOT" || {
+    rollback_update "$old_commit" "cannot prepare versioned Python environments." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
     return 1
+  }
+  if [[ -e "$candidate_venv" ]]; then
+    run_as_root rm -rf "$candidate_venv" || {
+      rollback_update "$old_commit" "cannot clear the candidate Python environment." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
+      return 1
+    }
   fi
-  if [[ -e "$rollback_venv" ]]; then
-    rollback_update "$old_commit" "recovery directory exists: $rollback_venv" "$config_was_valid"
-    return 1
-  fi
-  rm -rf "$candidate_venv"
-  if ! "$update_python" -m venv "$candidate_venv"; then
-    rollback_update "$old_commit" "cannot create the candidate Python environment." "$config_was_valid"
+  if ! "$PYTHON_BIN" -m venv "$candidate_venv"; then
+    rollback_update "$old_commit" "cannot create the candidate Python environment." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
     return 1
   fi
   candidate_python="$candidate_venv/bin/python"
   if ! "$candidate_python" -m ensurepip --upgrade; then
-    rollback_update "$old_commit" "cannot initialize pip." "$config_was_valid"
+    rollback_update "$old_commit" "cannot initialize pip." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
     return 1
   fi
   if ! "$candidate_python" -m pip install --no-cache-dir --upgrade pip setuptools wheel; then
-    rollback_update "$old_commit" "cannot update Python packaging tools." "$config_was_valid"
+    rollback_update "$old_commit" "cannot update Python packaging tools." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
     return 1
   fi
   if ! "$candidate_python" -m pip install -e "$ROOT_DIR/controlplane"; then
-    rollback_update "$old_commit" "dependency installation failed." "$config_was_valid"
+    rollback_update "$old_commit" "dependency installation failed." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
     return 1
   fi
   if "$candidate_python" "$CLI" validate-config; then
     candidate_config_valid=1
   elif [[ "$config_was_valid" == "1" ]]; then
-    rollback_update "$old_commit" "configuration validation failed." "$config_was_valid"
+    rollback_update "$old_commit" "configuration validation failed." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
     return 1
   fi
-  if ! mv "$ROOT_DIR/venv" "$rollback_venv"; then
-    rollback_update "$old_commit" "cannot preserve the current Python environment." "$config_was_valid"
-    return 1
-  fi
-  if ! mv "$candidate_venv" "$ROOT_DIR/venv"; then
-    mv "$rollback_venv" "$ROOT_DIR/venv" || true
-    rollback_update "$old_commit" "cannot activate the candidate Python environment." "$config_was_valid"
-    return 1
-  fi
+
   run_as_root rm -f "$UPDATE_RUNTIME_LOG" || true
-  if ! runtime_check_output="$("$ROOT_DIR/venv/bin/python" -m chatdome.main --help 2>&1)"; then
-    echo "Activated runtime check failed:"
+  if ! runtime_check_output="$("$candidate_python" -m chatdome.main --help 2>&1)"; then
+    echo "Candidate runtime check failed:"
     printf '%s\n' "$runtime_check_output"
     printf '%s\n' "$runtime_check_output" | run_as_root tee "$UPDATE_RUNTIME_LOG" >/dev/null || true
     if command -v systemd-cat >/dev/null 2>&1; then
@@ -840,20 +877,43 @@ update_chatdome() (
     elif command -v logger >/dev/null 2>&1; then
       printf '%s\n' "$runtime_check_output" | logger -t chatdome-update || true
     fi
-    rollback_update "$old_commit" "activated Python environment cannot start ChatDome. Details: $UPDATE_RUNTIME_LOG" "$config_was_valid"
+    rollback_update "$old_commit" "candidate Python environment cannot start ChatDome. Details: $UPDATE_RUNTIME_LOG" "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
     return 1
   fi
-  if ! install_systemd_unit; then
-    rollback_update "$old_commit" "cannot install the systemd unit." "$config_was_valid"
+
+  if [[ -L "$ROOT_DIR/venv" ]]; then
+    rm -f "$ROOT_DIR/venv" || {
+      rollback_update "$old_commit" "cannot replace the current Python environment link." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
+      return 1
+    }
+  else
+    if ! mv "$ROOT_DIR/venv" "$legacy_rollback"; then
+      rollback_update "$old_commit" "cannot preserve the legacy Python environment." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
+      return 1
+    fi
+  fi
+  if ! ln -s "$candidate_venv" "$ROOT_DIR/venv"; then
+    if [[ -d "$legacy_rollback" ]]; then
+      mv "$legacy_rollback" "$ROOT_DIR/venv" || true
+    elif [[ -n "$previous_venv" ]]; then
+      ln -s "$previous_venv" "$ROOT_DIR/venv" || true
+    fi
+    rollback_update "$old_commit" "cannot activate the versioned Python environment." "$config_was_valid" "$candidate_venv" "$previous_venv" "0"
+    return 1
+  fi
+  venv_switched=1
+
+  if ! install_systemd_unit "$candidate_python"; then
+    rollback_update "$old_commit" "cannot install the systemd unit." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
     return 1
   fi
   if [[ "$config_was_valid" == "1" ]]; then
     if ! service_action restart; then
-      rollback_update "$old_commit" "service restart failed." "$config_was_valid"
+      rollback_update "$old_commit" "service restart failed." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
       return 1
     fi
     if ! wait_for_health; then
-      rollback_update "$old_commit" "service health check failed. Check $LOG_FILE." "$config_was_valid"
+      rollback_update "$old_commit" "service health check failed. Check $LOG_FILE." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
       return 1
     fi
   fi
@@ -862,7 +922,12 @@ update_chatdome() (
     echo "⚠️ Update completed. Remove $ROOT_DIR/config.yaml and $ROOT_DIR/chat_data after verifying backups."
   fi
   run_as_root rm -f "$DATA_DIR/chatdome.service.rollback" || true
-  rm -rf "$rollback_venv"
+  if [[ -d "$legacy_rollback" && ! -L "$legacy_rollback" ]]; then
+    run_as_root rm -rf "$legacy_rollback" || true
+  fi
+  if ! cleanup_versioned_venvs "$candidate_venv" "$previous_venv"; then
+    echo "⚠️ Update completed, but older Python environments could not be removed."
+  fi
   version="$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
   echo "✅ ChatDome updated: $version"
   if [[ "$config_was_valid" != "1" ]]; then
@@ -873,7 +938,6 @@ update_chatdome() (
     fi
   fi
 )
-
 maintenance_menu() {
   while true; do
     show_header

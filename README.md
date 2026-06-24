@@ -141,7 +141,7 @@ You can also use the interactive local menu from the repository root:
 ./chatdome
 ```
 
-By default, no LLM profile is configured (`active_ai_profile` is empty). Use the local menu to configure a profile. `System Maintenance` → `Update ChatDome` validates the official origin, fetches `main` with an explicit refspec, skips the update when commits match, replaces the checkout, validates the candidate and activated Python environments, restarts the service through the Python module entrypoint, checks application readiness, and restores the previous commit on failure.
+By default, no LLM profile is configured (`active_ai_profile` is empty). Use the local menu to configure a profile. `System Maintenance` → `Update ChatDome` validates the official origin, fetches `main` with an explicit refspec, skips the update when commits match, replaces the checkout, builds and validates a fixed-path versioned Python environment, switches the service without moving the venv, retains the current and previous environments, restarts through the Python module entrypoint, checks application readiness, and restores the previous commit on failure.
 
 ### Run
 

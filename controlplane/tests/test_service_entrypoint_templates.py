@@ -5,19 +5,27 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_service_templates_use_python_module_entrypoint():
-    for relative_path in ("chatdome", "install.sh", "chatdome.service"):
-        content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-        assert "venv/bin/python -m chatdome.main --config" in content
-        assert "venv/bin/chatdome-server" not in content
+    service_template = (REPO_ROOT / "chatdome.service").read_text(encoding="utf-8")
+    assert "venv/bin/python -m chatdome.main --config" in service_template
+    assert "venv/bin/chatdome-server" not in service_template
+
+    installer = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
+    assert "ExecStart=$VENV_PATH/bin/python -m chatdome.main --config" in installer
+    assert 'VENV_PATH="$VENV_ROOT/$VERSION_ID"' in installer
+    assert 'ln -s "$VENV_PATH" "$ROOT_DIR/venv"' in installer
+
+    updater = (REPO_ROOT / "chatdome").read_text(encoding="utf-8")
+    assert "ExecStart=$runtime_python -m chatdome.main --config" in updater
+    assert 'install_systemd_unit "$candidate_python"' in updater
 
     fallback = (REPO_ROOT / "scripts/start.sh").read_text(encoding="utf-8")
     assert 'SERVER_CMD=("$ROOT_DIR/venv/bin/python" -m chatdome.main)' in fallback
     assert "venv/bin/chatdome-server" not in fallback
 
 
-def test_update_validates_activated_module_entrypoint():
+def test_update_validates_candidate_module_entrypoint():
     content = (REPO_ROOT / "chatdome").read_text(encoding="utf-8")
-    assert '"$ROOT_DIR/venv/bin/python" -m chatdome.main --help' in content
+    assert '"$candidate_python" -m chatdome.main --help' in content
 
 
 def test_start_menu_uses_state_specific_actions():
@@ -46,10 +54,10 @@ def test_permanent_removal_uses_typed_confirmation_and_path_checks():
 def test_update_runtime_failure_is_persisted_and_journaled():
     content = (REPO_ROOT / "chatdome").read_text(encoding="utf-8")
     assert "update-runtime-check.log" in content
-    assert "Activated runtime check failed:" in content
+    assert "Candidate runtime check failed:" in content
     assert "systemd-cat -t chatdome-update" in content
     assert "chatdome.main --help >/dev/null 2>&1" not in content
-    assert 'runtime_check_output="$("$ROOT_DIR/venv/bin/python"' in content
+    assert 'runtime_check_output="$("$candidate_python"' in content
 
 
 def test_update_checks_origin_before_confirmation():
@@ -59,3 +67,17 @@ def test_update_checks_origin_before_confirmation():
     prompt_index = content.index("Tracked local changes and untracked non-ignored files")
     assert check_index < compare_index < prompt_index
     assert "ChatDome is already up to date:" in content
+
+
+def test_update_uses_fixed_versioned_venv_paths():
+    content = (REPO_ROOT / "chatdome").read_text(encoding="utf-8")
+    assert 'VENV_ROOT="${CHATDOME_VENV_ROOT:-$DATA_DIR/venvs}"' in content
+    assert 'candidate_venv="$VENV_ROOT/$target_commit"' in content
+    assert 'ln -s "$candidate_venv" "$ROOT_DIR/venv"' in content
+    assert 'mv "$candidate_venv" "$ROOT_DIR/venv"' not in content
+    assert 'cleanup_versioned_venvs "$candidate_venv" "$previous_venv"' in content
+
+
+def test_gitignore_preserves_active_venv_symlink():
+    patterns = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "venv" in patterns

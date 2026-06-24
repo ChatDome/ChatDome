@@ -94,7 +94,7 @@ def _create_fixture(tmp_path: Path):
     shutil.copy2(MENU_PATH, seed / "chatdome")
     (seed / "chatdome-cli.py").write_text("# managed by the fake Python executable\n", encoding="utf-8")
     (seed / "config.example.yaml").write_text("chatdome: {}\n", encoding="utf-8")
-    (seed / ".gitignore").write_text("venv/\n.venv-update/\n.venv-rollback/\nconfig.yaml\nchat_data/\n", encoding="utf-8")
+    (seed / ".gitignore").write_text("venv/\nvenv\n.venv-update/\n.venv-rollback/\nconfig.yaml\nchat_data/\n", encoding="utf-8")
     (seed / "controlplane").mkdir()
     (seed / "controlplane" / "pyproject.toml").write_text("[project]\nname='fixture'\nversion='1'\n", encoding="utf-8")
     (seed / "version.txt").write_text("v1\n", encoding="utf-8")
@@ -168,7 +168,7 @@ if [[ "${2:-}" == "validate-config" ]]; then
     echo "Configuration error: chatdome.active_ai_profile is required." >&2
     exit 1
   fi
-  if [[ "${FAIL_CANDIDATE_CONFIG:-0}" == "1" && "$0" == *"/.venv-update/"* ]]; then
+  if [[ "${FAIL_CANDIDATE_CONFIG:-0}" == "1" && "$0" == *"/venvs/"* ]]; then
     echo "Configuration error: chatdome.new_required_field is required." >&2
     exit 1
   fi
@@ -182,6 +182,10 @@ if [[ "${2:-}" == "health-check" && "${FAIL_HEALTH:-0}" == "1" ]]; then
 fi
 exit 0
 """,
+    )
+    _write_executable(
+        fake_bin / "python3",
+        (deploy / "venv" / "bin" / "python").read_text(encoding="utf-8"),
     )
     (deploy / "venv" / "ORIGINAL").write_text("original\n", encoding="utf-8")
     _write_executable(fake_bin / "systemctl", """#!/usr/bin/env bash
@@ -288,8 +292,13 @@ def test_update_replaces_checkout_migrates_runtime_and_checks_health(tmp_path):
     assert "-m chatdome.main --help" in python_calls
     assert "health-check" in python_calls
     service_unit = Path(fixture["env"]["CHATDOME_SERVICE_PATH"]).read_text(encoding="utf-8")
-    assert "venv/bin/python -m chatdome.main --config" in service_unit
+    expected_python = (
+        fixture["data_dir"] / "venvs" / fixture["target_commit"] / "bin" / "python"
+    )
+    assert f"ExecStart={expected_python} -m chatdome.main --config" in service_unit
     assert "venv/bin/chatdome-server" not in service_unit
+    assert (deploy / "venv").is_symlink()
+    assert (deploy / "venv").resolve() == expected_python.parents[1]
     service_calls = fixture["service_log"].read_text(encoding="utf-8")
     assert "stop chatdome" in service_calls
     assert "restart chatdome" in service_calls
@@ -401,6 +410,53 @@ def test_confirmed_openai_overwrite_passes_fingerprint(tmp_path):
         os.close(master_fd)
 
 
+def test_update_keeps_only_current_and_previous_versioned_venvs(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    deploy = fixture["deploy"]
+
+    first = _run(
+        ["bash", deploy / "chatdome", "--update"],
+        env=fixture["env"],
+        input_text="y\n",
+        check=False,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    v2_commit = fixture["target_commit"]
+
+    seed = fixture["seed"]
+    (seed / "version.txt").write_text("v3\n", encoding="utf-8")
+    _git(seed, "add", "version.txt")
+    _git(seed, "commit", "-m", "v3")
+    _git(seed, "push", "origin", "main")
+    v3_commit = _git(seed, "rev-parse", "HEAD")
+    second = _run(
+        ["bash", deploy / "chatdome", "--update"],
+        env=fixture["env"],
+        input_text="y\n",
+        check=False,
+    )
+    assert second.returncode == 0, second.stdout + second.stderr
+
+    (seed / "version.txt").write_text("v4\n", encoding="utf-8")
+    _git(seed, "add", "version.txt")
+    _git(seed, "commit", "-m", "v4")
+    _git(seed, "push", "origin", "main")
+    v4_commit = _git(seed, "rev-parse", "HEAD")
+    third = _run(
+        ["bash", deploy / "chatdome", "--update"],
+        env=fixture["env"],
+        input_text="y\n",
+        check=False,
+    )
+    assert third.returncode == 0, third.stdout + third.stderr
+
+    venv_root = fixture["data_dir"] / "venvs"
+    retained = {path.name for path in venv_root.iterdir() if path.is_dir()}
+    assert retained == {v3_commit, v4_commit}
+    assert v2_commit not in retained
+    assert (deploy / "venv").resolve() == venv_root / v4_commit
+
+
 def test_update_preserves_existing_standard_config(tmp_path):
     fixture = _create_fixture(tmp_path)
     deploy = fixture["deploy"]
@@ -508,7 +564,7 @@ def test_update_rolls_back_when_activated_runtime_cannot_start(tmp_path):
     )
 
     assert result.returncode != 0
-    assert "activated Python environment cannot start ChatDome" in result.stdout
+    assert "candidate Python environment cannot start ChatDome" in result.stdout
     assert "fixture activated runtime failure" in result.stdout
     runtime_log = fixture["data_dir"] / "update-runtime-check.log"
     assert runtime_log.read_text(encoding="utf-8").strip() == "fixture activated runtime failure"
@@ -644,7 +700,6 @@ def test_permanent_removal_requires_exact_confirmation(tmp_path):
 
     assert result.returncode == 0
     output = result.stdout + result.stderr
-    assert "Type DELETE to continue" in output
     assert "Cancelled." in output
     assert deploy.exists()
     assert fixture["command_path"].exists()

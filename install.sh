@@ -10,6 +10,7 @@ CONFIG_FILE="${CHATDOME_CONFIG:-$CONFIG_DIR/config.yaml}"
 DATA_DIR="${CHATDOME_DATA_DIR:-/var/lib/chatdome}"
 LOG_DIR="${CHATDOME_LOG_DIR:-/var/log/chatdome}"
 LOG_FILE="${CHATDOME_LOG_FILE:-$LOG_DIR/chatdome.log}"
+VENV_ROOT="${CHATDOME_VENV_ROOT:-$DATA_DIR/venvs}"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run as root: sudo bash $ROOT_DIR/install.sh" >&2
@@ -49,9 +50,19 @@ rm -f "$ROOT_DIR/config.yaml"
 touch "$LOG_FILE"
 chmod 0640 "$LOG_FILE"
 
-python3 -m venv "$ROOT_DIR/venv"
-"$ROOT_DIR/venv/bin/python" -m pip install --no-cache-dir --upgrade pip
-"$ROOT_DIR/venv/bin/python" -m pip install --no-cache-dir -e "$ROOT_DIR/controlplane"
+VERSION_ID="${CHATDOME_VERSION_ID:-$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || date -u +install-%Y%m%d%H%M%S)}"
+VENV_PATH="$VENV_ROOT/$VERSION_ID"
+
+if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+  systemctl stop "$SERVICE_NAME"
+fi
+install -d -m 0750 "$VENV_ROOT"
+rm -rf "$VENV_PATH"
+python3 -m venv "$VENV_PATH"
+"$VENV_PATH/bin/python" -m pip install --no-cache-dir --upgrade pip
+"$VENV_PATH/bin/python" -m pip install --no-cache-dir -e "$ROOT_DIR/controlplane"
+rm -rf "$ROOT_DIR/venv"
+ln -s "$VENV_PATH" "$ROOT_DIR/venv"
 
 cat >"$SERVICE_PATH" <<UNIT
 [Unit]
@@ -62,7 +73,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$DATA_DIR
-ExecStart=$ROOT_DIR/venv/bin/python -m chatdome.main --config $CONFIG_FILE
+ExecStart=$VENV_PATH/bin/python -m chatdome.main --config $CONFIG_FILE
 Restart=on-failure
 RestartSec=5
 User=root
