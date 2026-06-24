@@ -18,6 +18,7 @@ DATA_DIR="${CHATDOME_DATA_DIR:-/var/lib/chatdome}"
 LOG_DIR="${CHATDOME_LOG_DIR:-/var/log/chatdome}"
 LOG_FILE="${CHATDOME_LOG_FILE:-$LOG_DIR/chatdome.log}"
 UPDATE_LOCK_FILE="${CHATDOME_UPDATE_LOCK_FILE:-/run/lock/chatdome-update.lock}"
+UPDATE_RUNTIME_LOG="${CHATDOME_UPDATE_RUNTIME_LOG:-$DATA_DIR/update-runtime-check.log}"
 EXPECTED_ORIGIN_URL="${CHATDOME_ORIGIN_URL:-https://github.com/ChatDome/ChatDome.git}"
 
 export CHATDOME_CONFIG="$CONFIG_FILE"
@@ -698,7 +699,7 @@ rollback_update() {
 }
 
 update_chatdome() (
-  local answer actual_origin old_commit update_python candidate_python version
+  local answer actual_origin old_commit update_python candidate_python version runtime_check_output
   local config_was_valid=0
   local candidate_config_valid=0
   local candidate_venv="$ROOT_DIR/.venv-update"
@@ -820,8 +821,17 @@ update_chatdome() (
     rollback_update "$old_commit" "cannot activate the candidate Python environment." "$config_was_valid"
     return 1
   fi
-  if ! "$ROOT_DIR/venv/bin/python" -m chatdome.main --help >/dev/null 2>&1; then
-    rollback_update "$old_commit" "activated Python environment cannot start ChatDome." "$config_was_valid"
+  run_as_root rm -f "$UPDATE_RUNTIME_LOG" || true
+  if ! runtime_check_output="$("$ROOT_DIR/venv/bin/python" -m chatdome.main --help 2>&1)"; then
+    echo "Activated runtime check failed:"
+    printf '%s\n' "$runtime_check_output"
+    printf '%s\n' "$runtime_check_output" | run_as_root tee "$UPDATE_RUNTIME_LOG" >/dev/null || true
+    if command -v systemd-cat >/dev/null 2>&1; then
+      printf '%s\n' "$runtime_check_output" | systemd-cat -t chatdome-update || true
+    elif command -v logger >/dev/null 2>&1; then
+      printf '%s\n' "$runtime_check_output" | logger -t chatdome-update || true
+    fi
+    rollback_update "$old_commit" "activated Python environment cannot start ChatDome. Details: $UPDATE_RUNTIME_LOG" "$config_was_valid"
     return 1
   fi
   if ! install_systemd_unit; then

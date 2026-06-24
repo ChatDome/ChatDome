@@ -41,3 +41,12 @@ def test_permanent_removal_uses_typed_confirmation_and_path_checks():
     assert "Type DELETE to continue:" in content
     assert "safe_removal_directory" in content
     assert "Show full removal commands" not in content
+
+
+def test_update_runtime_failure_is_persisted_and_journaled():
+    content = (REPO_ROOT / "chatdome").read_text(encoding="utf-8")
+    assert "update-runtime-check.log" in content
+    assert "Activated runtime check failed:" in content
+    assert "systemd-cat -t chatdome-update" in content
+    assert "chatdome.main --help >/dev/null 2>&1" not in content
+    assert 'runtime_check_output="$("$ROOT_DIR/venv/bin/python"' in content

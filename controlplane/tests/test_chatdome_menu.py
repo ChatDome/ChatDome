@@ -174,6 +174,7 @@ if [[ "${2:-}" == "validate-config" ]]; then
   fi
 fi
 if [[ "${1:-}" == "-m" && "${2:-}" == "chatdome.main" && "${FAIL_ACTIVATED_RUNTIME:-0}" == "1" ]]; then
+  echo "fixture activated runtime failure" >&2
   exit 1
 fi
 if [[ "${2:-}" == "health-check" && "${FAIL_HEALTH:-0}" == "1" ]]; then
@@ -477,6 +478,9 @@ def test_update_rolls_back_when_activated_runtime_cannot_start(tmp_path):
 
     assert result.returncode != 0
     assert "activated Python environment cannot start ChatDome" in result.stdout
+    assert "fixture activated runtime failure" in result.stdout
+    runtime_log = fixture["data_dir"] / "update-runtime-check.log"
+    assert runtime_log.read_text(encoding="utf-8").strip() == "fixture activated runtime failure"
     assert "Restored ChatDome" in result.stdout
     assert _git(deploy, "rev-parse", "HEAD") == before
     assert (deploy / "venv" / "ORIGINAL").exists()
