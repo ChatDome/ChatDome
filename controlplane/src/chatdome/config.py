@@ -33,6 +33,7 @@ class TelegramConfig:
     """Telegram bot connection settings."""
     bot_token: str = ""
     allowed_chat_ids: list[int] = field(default_factory=list)
+    admin_chat_ids: list[int] = field(default_factory=list)
     proxy_url: str = ""
     max_message_length: int = 4000
 
@@ -118,16 +119,24 @@ def _dict_to_dataclass(cls, data: dict | None) -> Any:
     return cls(**filtered)
 
 
-def _parse_chat_ids(raw: str) -> list[int]:
-    """Parse a comma-separated string of chat IDs into a list of ints."""
-    ids = []
-    for part in raw.split(","):
-        part = part.strip()
+def _parse_chat_ids(raw: Any) -> list[int]:
+    """Normalize chat IDs without I/O or logging side effects."""
+    if isinstance(raw, str):
+        values = raw.split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        values = raw
+    elif raw is None:
+        values = []
+    else:
+        values = [raw]
+    ids: list[int] = []
+    for part in values:
+        part = str(part).strip()
         if part:
             try:
                 ids.append(int(part))
-            except ValueError:
-                logger.warning("Invalid chat ID ignored: %s", part)
+            except (TypeError, ValueError):
+                continue
     return ids
 
 
@@ -152,7 +161,7 @@ def _normalize_api_mode(raw: str) -> str:
     return aliases[value]
 
 
-def _validate_profile_name(name: str) -> str:
+def validate_profile_name(name: str) -> str:
     value = str(name or "").strip()
     if not PROFILE_NAME_PATTERN.match(value):
         raise ValueError(
@@ -211,7 +220,7 @@ def _load_ai_profiles(yaml_data: dict[str, Any]) -> tuple[str, dict[str, AIConfi
 
     profiles: dict[str, AIConfig] = {}
     for raw_name, raw_profile in raw_profiles.items():
-        name = _validate_profile_name(str(raw_name))
+        name = validate_profile_name(str(raw_name))
         profiles[name] = _normalize_ai_profile(name, raw_profile)
 
     if active not in profiles:
@@ -224,6 +233,57 @@ def _load_ai_profiles(yaml_data: dict[str, Any]) -> tuple[str, dict[str, AIConfi
 # ---------------------------------------------------------------------------
 # Loader
 # ---------------------------------------------------------------------------
+
+def parse_config_document(raw_document: Any) -> ChatDomeConfig:
+    """Parse one full YAML document without file, environment, or log access."""
+    if raw_document is None:
+        raw_document = {}
+    if not isinstance(raw_document, dict):
+        raise ValueError("configuration document must be a mapping.")
+    yaml_data = raw_document.get("chatdome") or {}
+    if not isinstance(yaml_data, dict):
+        raise ValueError("chatdome configuration must be a mapping.")
+
+    active_ai_profile, ai_profiles = _load_ai_profiles(yaml_data)
+    config = ChatDomeConfig(
+        telegram=_dict_to_dataclass(TelegramConfig, yaml_data.get("telegram")),
+        active_ai_profile=active_ai_profile,
+        ai_profiles=ai_profiles,
+        agent=_dict_to_dataclass(AgentConfig, yaml_data.get("agent")),
+        sentinel=_dict_to_dataclass(SentinelConfig, yaml_data.get("sentinel")),
+    )
+    config.telegram.allowed_chat_ids = _parse_chat_ids(config.telegram.allowed_chat_ids)
+    config.telegram.admin_chat_ids = _parse_chat_ids(config.telegram.admin_chat_ids)
+    return config
+
+
+def validate_llm_config(config: ChatDomeConfig) -> None:
+    """Validate only the LLM configuration domain."""
+    if not config.ai_profiles:
+        raise ValueError("chatdome.ai_profiles must contain at least one profile.")
+    if config.active_ai_profile not in config.ai_profiles:
+        raise ValueError(
+            f"chatdome.active_ai_profile {config.active_ai_profile!r} "
+            "does not exist in chatdome.ai_profiles."
+        )
+
+
+def validate_runtime_config(config: ChatDomeConfig) -> list[str]:
+    """Validate process startup requirements and return non-fatal warnings."""
+    validate_llm_config(config)
+    if not config.telegram.bot_token:
+        raise ValueError(
+            "Telegram Bot Token is not configured.\n"
+            "Set chatdome.telegram.bot_token in config.yaml."
+        )
+    warnings: list[str] = []
+    if config.sentinel.enabled and not config.sentinel.checks:
+        warnings.append(
+            "Sentinel is enabled but no checks are configured. "
+            "Define chatdome.sentinel.checks in config.yaml."
+        )
+    return warnings
+
 
 def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     """
@@ -239,56 +299,21 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
         config_path = os.environ.get("CHATDOME_CONFIG", "config.yaml")
 
     path = Path(config_path)
-    yaml_data: dict[str, Any] = {}
+    raw_document: dict[str, Any] = {}
 
     if path.is_file():
         logger.info("Loading configuration from %s", path.resolve())
         with open(path, "r", encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh)
-        if raw and "chatdome" in raw:
-            yaml_data = raw["chatdome"] or {}
+            raw_document = yaml.safe_load(fh) or {}
     else:
         logger.info(
             "No config file found at %s, using defaults",
             path.resolve(),
         )
 
-    if not isinstance(yaml_data, dict):
-        raise ValueError("chatdome configuration must be a mapping.")
-
-    active_ai_profile, ai_profiles = _load_ai_profiles(yaml_data)
-
-    config = ChatDomeConfig(
-        telegram=_dict_to_dataclass(TelegramConfig, yaml_data.get("telegram")),
-        active_ai_profile=active_ai_profile,
-        ai_profiles=ai_profiles,
-        agent=_dict_to_dataclass(AgentConfig, yaml_data.get("agent")),
-        sentinel=_dict_to_dataclass(SentinelConfig, yaml_data.get("sentinel")),
-    )
-
-    if isinstance(config.telegram.allowed_chat_ids, str):
-        config.telegram.allowed_chat_ids = _parse_chat_ids(config.telegram.allowed_chat_ids)
-    else:
-        parsed_chat_ids: list[int] = []
-        for raw_chat_id in config.telegram.allowed_chat_ids or []:
-            try:
-                parsed_chat_ids.append(int(raw_chat_id))
-            except (TypeError, ValueError):
-                logger.warning("Invalid chat ID ignored: %s", raw_chat_id)
-        config.telegram.allowed_chat_ids = parsed_chat_ids
-
-    if config.sentinel.enabled and not config.sentinel.checks:
-        logger.warning(
-            "Sentinel is enabled but no checks are configured. "
-            "Define chatdome.sentinel.checks in config.yaml (copy config.example.yaml as a base), "
-            "or provide CHATDOME_CONFIG pointing to that file.",
-        )
-
-    if not config.telegram.bot_token:
-        raise ValueError(
-            "Telegram Bot Token is not configured.\n"
-            "Set chatdome.telegram.bot_token in config.yaml."
-        )
+    config = parse_config_document(raw_document)
+    for warning in validate_runtime_config(config):
+        logger.warning("%s", warning)
 
     active_profile = config.ai_profiles[config.active_ai_profile]
     logger.info(

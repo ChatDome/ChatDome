@@ -9,6 +9,8 @@ chatdome:
   telegram:
     bot_token: ""
     allowed_chat_ids: []
+    # Only these private chats can add, overwrite, delete, or switch LLM profiles.
+    admin_chat_ids: []
     proxy_url: ""
     max_message_length: 4000
 

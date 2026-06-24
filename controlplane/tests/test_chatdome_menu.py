@@ -130,6 +130,21 @@ def _create_fixture(tmp_path: Path):
         """#!/usr/bin/env bash
 set -eu
 echo "$*" >>"$FAKE_PYTHON_LOG"
+if [[ "${2:-}" == "llm-profile-state" && "${FAKE_PROFILE_EXISTS:-0}" == "1" ]]; then
+  echo "exists"
+  exit 0
+fi
+if [[ "${2:-}" == "llm-profile-info" && "${FAKE_PROFILE_EXISTS:-0}" == "1" ]]; then
+  case "${5:-}" in
+    api-mode) echo "openai_api" ;;
+    model) echo "gpt-4o" ;;
+    base-url) echo "https://api.openai.com/v1" ;;
+    fingerprint) echo "fixture-fingerprint" ;;
+    active) echo "false" ;;
+    has-api-key) echo "true" ;;
+  esac
+  exit 0
+fi
 if [[ "${1:-}" == "-m" && "${2:-}" == "venv" ]]; then
   mkdir -p "$3/bin"
   cp "$0" "$3/bin/python"
@@ -269,6 +284,74 @@ def test_ctrl_c_cancels_openai_configuration_and_exits_main_menu(tmp_path):
         os.killpg(process.pid, signal.SIGINT)
 
         assert process.wait(timeout=5) == 130
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        os.close(master_fd)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX terminal signals")
+def test_existing_openai_profile_requires_explicit_overwrite(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    env = fixture["env"].copy()
+    env["FAKE_PROFILE_EXISTS"] = "1"
+    process, master_fd = _spawn_interactive_menu(fixture["deploy"], env)
+
+    try:
+        _read_pty_until(master_fd, "Select: ")
+        os.write(master_fd, b"3\n")
+        _read_pty_until(master_fd, "Select: ")
+        os.write(master_fd, b"2\n")
+        _read_pty_until(master_fd, "Profile name [my-openai-profile]: ")
+        os.write(master_fd, b"base\n")
+        output = _read_pty_until(master_fd, "Overwrite this profile? [y/N] ")
+        assert "Profile already exists: base" in output
+
+        os.write(master_fd, b"n\n")
+        output = _read_pty_until(master_fd, "Select: ")
+        assert "LLM Management" in output
+        calls = fixture["command_log"].read_text(encoding="utf-8")
+        assert "set-openai" not in calls
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        os.close(master_fd)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX terminal signals")
+def test_confirmed_openai_overwrite_passes_fingerprint(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    env = fixture["env"].copy()
+    env["FAKE_PROFILE_EXISTS"] = "1"
+    process, master_fd = _spawn_interactive_menu(fixture["deploy"], env)
+
+    try:
+        _read_pty_until(master_fd, "Select: ")
+        os.write(master_fd, b"3\n")
+        _read_pty_until(master_fd, "Select: ")
+        os.write(master_fd, b"2\n")
+        _read_pty_until(master_fd, "Profile name [my-openai-profile]: ")
+        os.write(master_fd, b"base\n")
+        _read_pty_until(master_fd, "Overwrite this profile? [y/N] ")
+        os.write(master_fd, b"y\n")
+        _read_pty_until(master_fd, "Model [gpt-4o]: ")
+        os.write(master_fd, b"\n")
+        _read_pty_until(master_fd, "Base URL [https://api.openai.com/v1]: ")
+        os.write(master_fd, b"\n")
+        _read_pty_until(master_fd, "API Key (blank = keep current): ")
+        os.write(master_fd, b"\n")
+        _read_pty_until(master_fd, "Update profile 'base'? [y/N] ")
+        os.write(master_fd, b"y\n")
+        _read_pty_until(master_fd, "Press Enter to continue...")
+        os.write(master_fd, b"\n")
+        _read_pty_until(master_fd, "Select: ")
+
+        calls = fixture["command_log"].read_text(encoding="utf-8")
+        assert "set-openai" in calls
+        assert "--overwrite" in calls
+        assert "--expected-profile-fingerprint fixture-fingerprint" in calls
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)

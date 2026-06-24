@@ -175,19 +175,20 @@ Look for `"chat":{"id": 123456789}` in the response.
 
 ChatDome uses one runtime configuration file. Server installations use `/etc/chatdome/config.yaml`; source development defaults to repository-local `config.yaml`. Telegram Bot token, allowed Chat IDs, OpenAI-compatible API keys, Sentinel settings, and Agent policy all live there.
 
-The default installation comes with no API keys or pre-configured profiles. The easiest way to get started is `./chatdome` → `AI model management` → `Configure Codex OAuth profile`. ChatDome starts the OAuth Device Code login and writes the profile only after the token is saved.
+The default installation comes with no API keys or pre-configured profiles. The easiest way to get started is `./chatdome` → `AI model management` → `Add Codex OAuth LLM`. ChatDome starts the OAuth Device Code login and writes the profile only after the token is saved.
 
 | Path | Required | Description |
 |------|----------|-------------|
 | `chatdome.telegram.bot_token` | ✅ | Telegram Bot token |
 | `chatdome.telegram.allowed_chat_ids` | ❌ | Allowed Chat IDs; empty list means no chat restriction |
+| `chatdome.telegram.admin_chat_ids` | Required for remote LLM management | Private-chat administrators allowed to add, delete, and switch LLM profiles; IDs must also be allowed |
 | `chatdome.telegram.proxy_url` | ❌ | Telegram Bot API proxy URL |
 | `chatdome.ai_profiles.<name>.api_key` | Profile-dependent | OpenAI-compatible profile API key, stored directly in local `config.yaml` |
 | `chatdome.sentinel.enabled` | ❌ | Enable 7x24 Sentinel proactive monitoring |
 | `chatdome.agent.allow_generated_commands` | ❌ | Allow AI-generated commands |
 | `chatdome.agent.allow_unrestricted_commands` | ❌ | Enable unrestricted command mode |
 
-> ⚠️ **Security**: Never commit `config.yaml` to version control. It contains secrets.
+> ⚠️ **Security**: Never commit `config.yaml` to version control. It contains secrets. Remote LLM management is available only in private chats listed in `admin_chat_ids`. API key messages are deleted before the profile is saved.
 
 ### 🎛️ Core Capability Switches (Advanced)
 
@@ -316,7 +317,10 @@ The AI uses **function calling** (tool use) to interact with the host. It can:
 | `/audit [N]` | Show latest command audit events for current chat (default 10, max 30) |
 | `/codex_login [profile]` | Start Codex OAuth device-code login for the current or named Codex profile |
 | `/llm_list` | Show configured LLM profiles and auth status |
-| `/llm [profile]` | Show or switch the active LLM profile |
+| `/llm [profile]` | Show profiles or switch the active LLM profile as an administrator |
+| `/llm_add` | Add or overwrite an LLM profile as an administrator |
+| `/llm_delete` | Delete an inactive LLM profile as an administrator |
+| `/llm_cancel` | Cancel the current LLM management flow |
 | `/help` | Show usage guide and example questions |
 
 No rigid command syntax — just talk to it.

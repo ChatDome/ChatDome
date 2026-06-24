@@ -88,6 +88,21 @@ class LLMProfileNotReady(LLMProfileError):
     user_message = "No LLM is configured. Please configure an LLM before use."
 
 
+class LLMProfileConflict(LLMProfileError):
+    code = "llm.profile_conflict"
+    user_message = "同名 LLM profile 已存在。"
+
+
+class LLMProfileChanged(LLMProfileError):
+    code = "llm.profile_changed"
+    user_message = "LLM profile 已发生变化，请重新开始操作。"
+
+
+class LLMProfileDeleteForbidden(LLMProfileError):
+    code = "llm.profile_delete_forbidden"
+    user_message = "当前 LLM profile 不能删除。"
+
+
 class LLMAuthenticationError(LLMError):
     code = "llm.authentication_error"
     user_message = "LLM 认证失败，请检查 API Key 或重新登录。"
@@ -173,6 +188,9 @@ __all__ = [
     "ConfigError",
     "LLMAuthenticationError",
     "LLMError",
+    "LLMProfileChanged",
+    "LLMProfileConflict",
+    "LLMProfileDeleteForbidden",
     "LLMProfileError",
     "LLMProfileNotFound",
     "LLMProfileNotReady",

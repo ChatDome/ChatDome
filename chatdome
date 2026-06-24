@@ -70,26 +70,113 @@ prompt_secret() {
 }
 
 configure_openai_profile() {
-  local profile profile_state model base_url api_key overwrite
+  local profile profile_state model base_url api_key overwrite confirm
+  local existing_mode="" existing_model="" existing_base_url="" fingerprint=""
+  local -a args
   trap 'printf "\n"; echo "Cancelled."; return 130' INT
 
   prompt_value profile "Profile name [my-openai-profile]: " "my-openai-profile" || return $?
-  if ! profile_state="$(run_cli llm-profile-state "$profile")"; then
-    pause
-    return 1
-  fi
+  profile_state="$(run_cli llm-profile-state "$profile")" || return 1
   if [[ "$profile_state" == "exists" ]]; then
+    existing_mode="$(run_cli llm-profile-info "$profile" --field api-mode)" || return 1
+    existing_model="$(run_cli llm-profile-info "$profile" --field model)" || return 1
+    existing_base_url="$(run_cli llm-profile-info "$profile" --field base-url)" || return 1
+    fingerprint="$(run_cli llm-profile-info "$profile" --field fingerprint)" || return 1
     echo "Profile already exists: $profile"
+    echo "- type: $existing_mode"
+    echo "- model: $existing_model"
+    echo "- address: $existing_base_url"
     read -r -p "Overwrite this profile? [y/N] " overwrite
     case "${overwrite,,}" in
       y|yes) ;;
       *) echo "Cancelled."; pause; return 0 ;;
     esac
   fi
-  prompt_value model "Model [gpt-4o]: " "gpt-4o" || return $?
-  prompt_value base_url "Base URL [https://api.openai.com/v1]: " "https://api.openai.com/v1" || return $?
-  prompt_secret api_key "API Key: " || return $?
-  run_cli set-openai --profile "$profile" --model "$model" --base-url "$base_url" --api-key "$api_key"
+
+  [[ "$existing_mode" == "openai_api" ]] || existing_model=""
+  [[ "$existing_mode" == "openai_api" ]] || existing_base_url=""
+  prompt_value model "Model [${existing_model:-gpt-4o}]: " "${existing_model:-gpt-4o}" || return $?
+  prompt_value base_url "Base URL [${existing_base_url:-https://api.openai.com/v1}]: " "${existing_base_url:-https://api.openai.com/v1}" || return $?
+  if [[ "$existing_mode" == "openai_api" ]]; then
+    prompt_secret api_key "API Key (blank = keep current): " || return $?
+  else
+    prompt_secret api_key "API Key: " || return $?
+  fi
+
+  if [[ "$profile_state" == "exists" ]]; then
+    read -r -p "Update profile '$profile'? [y/N] " confirm
+  else
+    read -r -p "Add profile '$profile'? [y/N] " confirm
+  fi
+  case "${confirm,,}" in
+    y|yes) ;;
+    *) echo "Cancelled."; pause; return 0 ;;
+  esac
+
+  args=(set-openai --profile "$profile" --model "$model" --base-url "$base_url" --api-key-stdin)
+  if [[ "$profile_state" == "exists" ]]; then
+    args+=(--overwrite --expected-profile-fingerprint "$fingerprint")
+  fi
+  printf '%s\n' "$api_key" | run_cli "${args[@]}"
+  pause
+}
+
+configure_codex_profile() {
+  local profile profile_state overwrite confirm fingerprint=""
+  local existing_mode="" existing_model="" existing_base_url=""
+  local -a args
+  trap 'printf "\n"; echo "Cancelled."; return 130' INT
+
+  prompt_value profile "Profile name [codex]: " "codex" || return $?
+  profile_state="$(run_cli llm-profile-state "$profile")" || return 1
+  if [[ "$profile_state" == "exists" ]]; then
+    existing_mode="$(run_cli llm-profile-info "$profile" --field api-mode)" || return 1
+    existing_model="$(run_cli llm-profile-info "$profile" --field model)" || return 1
+    existing_base_url="$(run_cli llm-profile-info "$profile" --field base-url)" || return 1
+    fingerprint="$(run_cli llm-profile-info "$profile" --field fingerprint)" || return 1
+    echo "Profile already exists: $profile"
+    echo "- type: $existing_mode"
+    echo "- model: $existing_model"
+    echo "- address: $existing_base_url"
+    read -r -p "Overwrite this profile? [y/N] " overwrite
+    case "${overwrite,,}" in
+      y|yes) ;;
+      *) echo "Cancelled."; pause; return 0 ;;
+    esac
+  else
+    read -r -p "Add Codex profile '$profile'? [y/N] " confirm
+    case "${confirm,,}" in
+      y|yes) ;;
+      *) echo "Cancelled."; pause; return 0 ;;
+    esac
+  fi
+
+  args=(codex-login --profile "$profile")
+  if [[ "$profile_state" == "exists" ]]; then
+    args+=(--overwrite --expected-profile-fingerprint "$fingerprint")
+  fi
+  run_cli "${args[@]}"
+  pause
+}
+
+delete_llm_profile() {
+  local profile active confirm
+  trap 'printf "\n"; echo "Cancelled."; return 130' INT
+
+  run_cli llm-list
+  echo
+  prompt_value profile "Profile to delete: " || return $?
+  active="$(run_cli llm-profile-info "$profile" --field active)" || { pause; return 1; }
+  if [[ "$active" == "true" ]]; then
+    echo "Switch LLM before deleting this profile."
+    pause
+    return 0
+  fi
+  read -r -p "Delete profile '$profile'? [y/N] " confirm
+  case "${confirm,,}" in
+    y|yes) run_cli delete-profile "$profile" ;;
+    *) echo "Cancelled." ;;
+  esac
   pause
 }
 
@@ -225,37 +312,35 @@ llm_menu() {
     show_header
     echo "LLM Management"
     echo "1) List profiles"
-    echo "2) Configure OpenAI-compatible API"
-    echo "3) Configure Codex OAuth profile"
-    echo "4) Switch default profile"
-    echo "5) Show setup guide"
+    echo "2) Add OpenAI-compatible LLM"
+    echo "3) Add Codex OAuth LLM"
+    echo "4) Delete LLM"
+    echo "5) Switch LLM"
+    echo "6) Show setup guide"
     echo "0) Back"
     echo
     read -r -p "Select: " choice
     case "$choice" in
       1) run_cli llm-list; pause ;;
       2) configure_openai_profile || true ;;
-      3)
-        prompt_value profile "Profile name [codex]: " "codex" || { pause; continue; }
-        run_cli codex-login --profile "$profile"
-        pause
-        ;;
-      4)
+      3) configure_codex_profile || true ;;
+      4) delete_llm_profile || true ;;
+      5)
         run_cli llm-list
         echo
         read -r -p "Profile to activate: " profile
         run_cli set-active-profile "$profile"
         pause
         ;;
-      5)
+      6)
         cat <<'GUIDE'
 OpenAI-compatible:
   1. Choose a profile name, model, base URL, and API key.
-  2. The key is written to local config.yaml.
-  3. ChatDome receives an llm hot-reload request automatically.
+  2. Confirm before adding or overwriting a profile.
+  3. ChatDome applies the LLM configuration automatically.
 
 Codex OAuth:
-  1. Run Configure Codex OAuth profile.
+  1. Run Add Codex OAuth LLM.
   2. Open the URL and enter the code shown in this terminal.
   3. The profile is saved after authorization succeeds.
 GUIDE

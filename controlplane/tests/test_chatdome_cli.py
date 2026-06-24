@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import tempfile
 import unittest
@@ -57,6 +58,8 @@ class ChatDomeCLITests(unittest.TestCase):
         self.cli.RELOAD_STATUS_PATH = self.reload_status_path
         self.cli.READY_PATH = self.ready_path
         self.cli.PID_PATH = self.pid_path
+        self.cli.DATA_DIR = self.root / "chat_data"
+        self.cli.PROFILE_AUDIT_RECORDER = lambda *args, **kwargs: None
 
     def tearDown(self):
         self.tmp_dir.cleanup()
@@ -98,6 +101,9 @@ class ChatDomeCLITests(unittest.TestCase):
                 "created OpenAI-compatible profile: new-profile"
             )
 
+        summary = asyncio.run(
+            self.cli._profile_admin_service("test").get_profile_summary("base")
+        )
         updated_args = SimpleNamespace(
             profile="base",
             model="updated-model",
@@ -105,6 +111,8 @@ class ChatDomeCLITests(unittest.TestCase):
             api_key="sk-updated",
             temperature=0.3,
             max_tokens=4000,
+            overwrite=True,
+            expected_profile_fingerprint=summary.fingerprint,
         )
         with patch("builtins.print") as output:
             self.cli.set_openai(updated_args)
@@ -179,7 +187,7 @@ class ChatDomeCLITests(unittest.TestCase):
             max_tokens=2000,
         )
 
-        with patch.object(self.cli, "_codex_token_file_path", return_value=token_file):
+        with patch("chatdome.llm.profile_admin.Path.is_file", return_value=True):
             self.cli.set_codex(args)
 
         profile = self._load_profiles()["codex-test"]
@@ -210,6 +218,27 @@ class ChatDomeCLITests(unittest.TestCase):
         with patch.object(self.cli, "_process_running", return_value=True):
             with self.assertRaises(SystemExit):
                 self.cli.health_check(SimpleNamespace())
+
+
+    def test_delete_profile_and_profile_info(self):
+        args = SimpleNamespace(
+            profile="second",
+            model="gpt-4o-mini",
+            base_url="https://api.openai.com/v1",
+            api_key="sk-second",
+            temperature=0.1,
+            max_tokens=2000,
+        )
+        self.cli.set_openai(args)
+
+        with patch("builtins.print") as output:
+            self.cli.llm_profile_info(
+                SimpleNamespace(profile="second", field="model")
+            )
+            output.assert_called_once_with("gpt-4o-mini")
+
+        self.cli.delete_profile(SimpleNamespace(profile="second"))
+        self.assertNotIn("second", self._load_profiles())
 
 
 if __name__ == "__main__":

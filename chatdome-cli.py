@@ -28,11 +28,22 @@ RELOAD_REQUEST_PATH = DATA_DIR / "reload_request.json"
 RELOAD_STATUS_PATH = DATA_DIR / "reload_status.json"
 SUPPORTED_RELOAD_DOMAINS = {"llm", "sentinel", "agent", "all"}
 CONTROLPLANE_SRC = ROOT / "controlplane" / "src"
-PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 TOKEN_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
 
 if CONTROLPLANE_SRC.is_dir():
     sys.path.insert(0, str(CONTROLPLANE_SRC))
+
+from chatdome.agent.audit import CommandAuditTracker
+from chatdome.config import validate_profile_name
+from chatdome.llm.profile_admin import (
+    CreateCodexProfileRequest,
+    CreateOpenAIProfileRequest,
+    LLMProfileAdminService,
+    ProfileActor,
+    ProfileConfigStore,
+)
+
+PROFILE_AUDIT_RECORDER = CommandAuditTracker.record_event
 
 
 def _chmod_owner_only(path: Path) -> None:
@@ -113,10 +124,10 @@ def _parse_chat_ids(raw: str) -> list[int]:
 
 
 def _validate_profile_name(profile: str) -> str:
-    value = str(profile or "").strip()
-    if not PROFILE_NAME_PATTERN.match(value):
-        raise SystemExit("invalid profile name")
-    return value
+    try:
+        return validate_profile_name(profile)
+    except ValueError as exc:
+        raise SystemExit("invalid profile name") from exc
 
 
 def _default_codex_token_file(profile: str) -> str:
@@ -157,34 +168,6 @@ def _resolve_codex_login_token_file(
         if existing_token_file:
             return existing_token_file
     return _default_codex_token_file(profile_name)
-
-
-def _write_codex_profile(
-    data: dict[str, Any],
-    root: dict[str, Any],
-    profiles: dict[str, Any],
-    args: argparse.Namespace,
-    token_file: str,
-    *,
-    reload_source: str,
-) -> None:
-    profile = profiles.setdefault(args.profile, {})
-    profile.update(
-        {
-            "provider": "codex",
-            "api_mode": "codex_responses",
-            "model": args.model,
-            "temperature": args.temperature,
-            "max_tokens": args.max_tokens,
-            "codex_client_id": args.client_id,
-            "codex_token_file": token_file,
-            "codex_base_url": args.base_url,
-        }
-    )
-    if not str(root.get("active_ai_profile") or "").strip():
-        root["active_ai_profile"] = args.profile
-    _write_yaml(data)
-    _request_reload(["llm"], reload_source)
 
 
 def _truthy(raw: str) -> bool:
@@ -281,6 +264,34 @@ def _profile_items(root: dict[str, Any]) -> dict[str, Any]:
     return profiles
 
 
+def _record_profile_audit(event_type: str, actor: ProfileActor, fields: dict[str, Any]) -> None:
+    PROFILE_AUDIT_RECORDER(
+        event_type,
+        chat_id=actor.chat_id,
+        source=actor.source,
+        user_id=actor.user_id,
+        **fields,
+    )
+
+
+def _profile_admin_service(source: str) -> LLMProfileAdminService:
+    async def apply_runtime(_config, action: str) -> None:
+        _request_reload(["llm"], f"{source}:{action}")
+
+    return LLMProfileAdminService(
+        ProfileConfigStore(CONFIG_PATH, DATA_DIR / "llm-profile.lock"),
+        runtime_apply=apply_runtime,
+        audit_recorder=_record_profile_audit,
+    )
+
+
+def _run_profile_admin(awaitable):
+    try:
+        return asyncio.run(awaitable)
+    except Exception as exc:
+        raise SystemExit(str(exc)) from None
+
+
 def llm_list(args: argparse.Namespace) -> None:
     del args
     data = _load_yaml()
@@ -304,67 +315,85 @@ def llm_list(args: argparse.Namespace) -> None:
 
 
 def llm_profile_state(args: argparse.Namespace) -> None:
-    name = _validate_profile_name(args.profile)
-    data = _load_yaml()
-    profiles = _profile_items(_chatdome_root(data))
-    print("exists" if name in profiles else "missing")
+    summary = _run_profile_admin(
+        _profile_admin_service("menu:profile-state").get_profile_summary(args.profile)
+    )
+    print("exists" if summary is not None else "missing")
+
+
+def llm_profile_info(args: argparse.Namespace) -> None:
+    summary = _run_profile_admin(
+        _profile_admin_service("menu:profile-info").get_profile_summary(args.profile)
+    )
+    if summary is None:
+        raise SystemExit(f"unknown profile: {args.profile}")
+    values = {
+        "provider": summary.provider,
+        "api-mode": summary.api_mode,
+        "model": summary.model,
+        "base-url": summary.base_url,
+        "fingerprint": summary.fingerprint,
+        "active": "true" if summary.active else "false",
+        "has-api-key": "true" if summary.has_api_key else "false",
+    }
+    print(values[args.field])
 
 
 def set_openai(args: argparse.Namespace) -> None:
-    args.profile = _validate_profile_name(args.profile)
-    if not str(args.api_key or "").strip():
-        raise SystemExit("api_key is required")
-    data = _load_yaml()
-    root = _chatdome_root(data)
-    profiles = _profile_items(root)
-    created = args.profile not in profiles
-    profile = profiles.get(args.profile)
-    if not isinstance(profile, dict):
-        profile = {}
-        profiles[args.profile] = profile
-    profile.update(
-        {
-            "provider": "openai",
-            "api_mode": "openai_api",
-            "base_url": args.base_url,
-            "model": args.model,
-            "temperature": args.temperature,
-            "max_tokens": args.max_tokens,
-            "api_key": args.api_key,
-        }
+    api_key = str(getattr(args, "api_key", "") or "")
+    if getattr(args, "api_key_stdin", False):
+        api_key = sys.stdin.readline().rstrip("\r\n")
+    request = CreateOpenAIProfileRequest(
+        name=args.profile,
+        model=args.model,
+        base_url=args.base_url,
+        api_key=api_key,
+        temperature=args.temperature,
+        max_tokens=args.max_tokens,
+        overwrite_existing=bool(getattr(args, "overwrite", False)),
+        expected_profile_fingerprint=getattr(args, "expected_profile_fingerprint", None),
     )
-    if not str(root.get("active_ai_profile") or "").strip():
-        root["active_ai_profile"] = args.profile
-    _write_yaml(data)
-    _request_reload(["llm"], "menu:set-openai")
-    action = "created" if created else "updated"
-    print(f"{action} OpenAI-compatible profile: {args.profile}")
+    result = _run_profile_admin(
+        _profile_admin_service("menu:set-openai").create_openai(
+            request,
+            ProfileActor(source="menu"),
+        )
+    )
+    print(f"{result.action} OpenAI-compatible profile: {result.profile_name}")
+
+
+def _codex_request(args: argparse.Namespace, token_file: str) -> CreateCodexProfileRequest:
+    return CreateCodexProfileRequest(
+        name=args.profile,
+        model=args.model,
+        client_id=args.client_id,
+        token_file=token_file,
+        base_url=args.base_url,
+        temperature=args.temperature,
+        max_tokens=args.max_tokens,
+        overwrite_existing=bool(getattr(args, "overwrite", False)),
+        expected_profile_fingerprint=getattr(args, "expected_profile_fingerprint", None),
+    )
 
 
 def set_codex(args: argparse.Namespace) -> None:
     args.profile = _validate_profile_name(args.profile)
     data = _load_yaml()
-    root = _chatdome_root(data)
-    profiles = _profile_items(root)
+    profiles = _profile_items(_chatdome_root(data))
     token_file = _resolve_codex_token_file(args.profile, args.token_file, profiles.get(args.profile))
-    if not _codex_token_file_path(token_file).is_file():
-        raise SystemExit("codex token file is missing; run codex-login first")
-    _write_codex_profile(
-        data,
-        root,
-        profiles,
-        args,
-        token_file,
-        reload_source="menu:set-codex",
+    result = _run_profile_admin(
+        _profile_admin_service("menu:set-codex").create_codex(
+            _codex_request(args, token_file),
+            ProfileActor(source="menu"),
+        )
     )
-    print(f"updated Codex profile: {args.profile}")
+    print(f"{result.action} Codex profile: {result.profile_name}")
 
 
 async def _codex_login_async(args: argparse.Namespace) -> None:
     args.profile = _validate_profile_name(args.profile)
     data = _load_yaml()
-    root = _chatdome_root(data)
-    profiles = _profile_items(root)
+    profiles = _profile_items(_chatdome_root(data))
     token_file = _resolve_codex_login_token_file(args.profile, args.token_file, profiles.get(args.profile))
 
     from chatdome.llm.codex_auth import CodexOAuth
@@ -391,18 +420,14 @@ async def _codex_login_async(args: argparse.Namespace) -> None:
         timeout=expires_in,
     )
     await oauth.exchange_token(code, code_verifier)
-    data = _load_yaml()
-    root = _chatdome_root(data)
-    profiles = _profile_items(root)
-    _write_codex_profile(
-        data,
-        root,
-        profiles,
-        args,
-        token_file,
-        reload_source="menu:codex-login",
-    )
-    print(f"Codex profile ready: {args.profile}")
+    try:
+        result = await _profile_admin_service("menu:codex-login").create_codex(
+            _codex_request(args, token_file),
+            ProfileActor(source="menu"),
+        )
+    except Exception as exc:
+        raise SystemExit(str(exc)) from None
+    print(f"{result.action} Codex profile: {result.profile_name}")
 
 
 def codex_login(args: argparse.Namespace) -> None:
@@ -413,15 +438,23 @@ def codex_login(args: argparse.Namespace) -> None:
 
 
 def set_active_profile(args: argparse.Namespace) -> None:
-    data = _load_yaml()
-    root = _chatdome_root(data)
-    profiles = _profile_items(root)
-    if args.profile not in profiles:
-        raise SystemExit(f"unknown profile: {args.profile}")
-    root["active_ai_profile"] = args.profile
-    _write_yaml(data)
-    _request_reload(["llm"], "menu:set-active-profile")
-    print(f"active profile set to: {args.profile}")
+    result = _run_profile_admin(
+        _profile_admin_service("menu:set-active-profile").set_active_profile(
+            args.profile,
+            ProfileActor(source="menu"),
+        )
+    )
+    print(f"active profile set to: {result.profile_name}")
+
+
+def delete_profile(args: argparse.Namespace) -> None:
+    result = _run_profile_admin(
+        _profile_admin_service("menu:delete-profile").delete_profile(
+            args.profile,
+            ProfileActor(source="menu"),
+        )
+    )
+    print(f"deleted LLM profile: {result.profile_name}")
 
 
 def telegram_status(args: argparse.Namespace) -> None:
@@ -656,14 +689,25 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("llm-profile-state")
     p.add_argument("profile")
     p.set_defaults(func=llm_profile_state)
+    p = sub.add_parser("llm-profile-info")
+    p.add_argument("profile")
+    p.add_argument(
+        "--field",
+        required=True,
+        choices=["provider", "api-mode", "model", "base-url", "fingerprint", "active", "has-api-key"],
+    )
+    p.set_defaults(func=llm_profile_info)
 
     p = sub.add_parser("set-openai")
     p.add_argument("--profile", default="my-openai-profile")
     p.add_argument("--model", required=True)
     p.add_argument("--base-url", default="https://api.openai.com/v1")
-    p.add_argument("--api-key", required=True)
+    p.add_argument("--api-key", default="")
+    p.add_argument("--api-key-stdin", action="store_true")
     p.add_argument("--temperature", type=float, default=0.1)
     p.add_argument("--max-tokens", type=int, default=2000)
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--expected-profile-fingerprint")
     p.set_defaults(func=set_openai)
 
     p = sub.add_parser("set-codex")
@@ -674,6 +718,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--base-url", default="https://chatgpt.com/backend-api/codex")
     p.add_argument("--temperature", type=float, default=0.1)
     p.add_argument("--max-tokens", type=int, default=2000)
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--expected-profile-fingerprint")
     p.set_defaults(func=set_codex)
 
     p = sub.add_parser("codex-login")
@@ -684,11 +730,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--base-url", default="https://chatgpt.com/backend-api/codex")
     p.add_argument("--temperature", type=float, default=0.1)
     p.add_argument("--max-tokens", type=int, default=2000)
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--expected-profile-fingerprint")
     p.set_defaults(func=codex_login)
 
     p = sub.add_parser("set-active-profile")
     p.add_argument("profile")
     p.set_defaults(func=set_active_profile)
+    p = sub.add_parser("delete-profile")
+    p.add_argument("profile")
+    p.set_defaults(func=delete_profile)
 
     sub.add_parser("telegram-status").set_defaults(func=telegram_status)
     p = sub.add_parser("set-bot-token")

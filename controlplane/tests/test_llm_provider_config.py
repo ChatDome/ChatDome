@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from chatdome.config import load_config
+from chatdome.config import load_config, parse_config_document, validate_llm_config, validate_runtime_config
 
 
 class LLMProviderConfigTests(unittest.TestCase):
@@ -195,6 +195,72 @@ chatdome:
         self.assertFalse(config.agent.persist_command_outputs)
         self.assertEqual(config.agent.command_output_retention_days, 7)
         self.assertEqual(config.agent.command_output_max_chars, 8000)
+
+
+    def test_pure_llm_validation_does_not_require_telegram_token(self):
+        config = parse_config_document(
+            {
+                "chatdome": {
+                    "active_ai_profile": "base",
+                    "ai_profiles": {
+                        "base": {
+                            "provider": "openai",
+                            "api_mode": "openai_api",
+                            "model": "gpt-4o",
+                            "api_key": "sk-test",
+                        }
+                    },
+                }
+            }
+        )
+
+        validate_llm_config(config)
+        with self.assertRaisesRegex(ValueError, "Telegram Bot Token"):
+            validate_runtime_config(config)
+
+    def test_scalar_admin_chat_id_is_normalized(self):
+        config = parse_config_document(
+            {
+                "chatdome": {
+                    "telegram": {"admin_chat_ids": 123},
+                    "active_ai_profile": "base",
+                    "ai_profiles": {
+                        "base": {
+                            "provider": "openai",
+                            "api_mode": "openai_api",
+                            "model": "gpt-4o",
+                            "api_key": "sk-test",
+                        }
+                    },
+                }
+            }
+        )
+
+        self.assertEqual(config.telegram.admin_chat_ids, [123])
+
+    def test_admin_chat_ids_are_normalized_without_logging(self):
+        config = parse_config_document(
+            {
+                "chatdome": {
+                    "telegram": {
+                        "allowed_chat_ids": ["1", "invalid"],
+                        "admin_chat_ids": "2,invalid,3",
+                    },
+                    "active_ai_profile": "base",
+                    "ai_profiles": {
+                        "base": {
+                            "provider": "openai",
+                            "api_mode": "openai_api",
+                            "model": "gpt-4o",
+                            "api_key": "sk-test",
+                        }
+                    },
+                }
+            }
+        )
+
+        self.assertEqual(config.telegram.allowed_chat_ids, [1])
+        self.assertEqual(config.telegram.admin_chat_ids, [2, 3])
 
 
 if __name__ == "__main__":

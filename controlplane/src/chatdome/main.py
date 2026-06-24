@@ -20,9 +20,15 @@ from pathlib import Path
 from chatdome import __version__
 from chatdome.config import load_config
 from chatdome.agent.core import Agent
+from chatdome.agent.audit import CommandAuditTracker
 from chatdome.agent.prompts import build_system_prompt, build_tools
 from chatdome.executor.sandbox import CommandSandbox
 from chatdome.llm.manager import LLMManager
+from chatdome.llm.profile_admin import (
+    LLMProfileAdminService,
+    ProfileActor,
+    ProfileConfigStore,
+)
 from chatdome.reload_control import ReloadControl
 from chatdome.runtime_environment import collect_and_persist_runtime_environment
 from chatdome.sentinel.pack_loader import PackLoader
@@ -245,8 +251,37 @@ def main() -> None:
         engram_store=engram_store,
     )
 
+    async def _apply_llm_profile_config(new_config, action: str) -> None:
+        if action in {"switched", "updated"}:
+            candidate_manager = LLMManager(
+                new_config.ai_profiles,
+                new_config.active_ai_profile,
+            )
+            await candidate_manager.validate_profile_ready(new_config.active_ai_profile)
+        await llm_manager.reload_profiles(
+            new_config.ai_profiles,
+            new_config.active_ai_profile,
+        )
+        config.active_ai_profile = new_config.active_ai_profile
+        config.ai_profiles = new_config.ai_profiles
+
+    def _record_profile_audit(event_type: str, actor: ProfileActor, fields: dict) -> None:
+        CommandAuditTracker.record_event(
+            event_type,
+            chat_id=actor.chat_id,
+            source=actor.source,
+            user_id=actor.user_id,
+            **fields,
+        )
+
+    profile_admin = LLMProfileAdminService(
+        ProfileConfigStore(args.config, data_path("llm-profile.lock")),
+        runtime_apply=_apply_llm_profile_config,
+        audit_recorder=_record_profile_audit,
+    )
+
     # Telegram Bot
-    bot = TelegramBot(config=config, agent=agent)
+    bot = TelegramBot(config=config, agent=agent, profile_admin=profile_admin)
 
     sentinel_scheduler = None
 
@@ -366,12 +401,7 @@ def main() -> None:
         applied: list[str] = []
 
         if "llm" in requested:
-            await llm_manager.reload_profiles(
-                new_config.ai_profiles,
-                new_config.active_ai_profile,
-            )
-            config.active_ai_profile = new_config.active_ai_profile
-            config.ai_profiles = new_config.ai_profiles
+            await _apply_llm_profile_config(new_config, "reload")
             applied.append("llm")
 
         sentinel_changed = "sentinel" in requested
