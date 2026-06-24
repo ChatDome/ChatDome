@@ -145,7 +145,7 @@ chmod 600 config.yaml
 ./chatdome
 ```
 
-默认未配置任何大模型（`active_ai_profile` 为空）。可通过本地菜单配置 profile。`System Maintenance` → `Update ChatDome` 会校验官方远端、精确拉取 `main`、覆盖代码、校验候选环境和激活后的 Python 模块入口、重启并检查应用就绪状态；失败时恢复旧 commit。
+默认未配置任何大模型（`active_ai_profile` 为空）。可通过本地菜单配置 profile。`System Maintenance` → `Update ChatDome` 会校验官方远端、精确拉取 `main`，commit 相同时直接结束，否则覆盖代码、校验候选环境和激活后的 Python 模块入口、重启并检查应用就绪状态；失败时恢复旧 commit。
 
 ### 运行
 

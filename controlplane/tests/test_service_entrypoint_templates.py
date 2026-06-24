@@ -50,3 +50,12 @@ def test_update_runtime_failure_is_persisted_and_journaled():
     assert "systemd-cat -t chatdome-update" in content
     assert "chatdome.main --help >/dev/null 2>&1" not in content
     assert 'runtime_check_output="$("$ROOT_DIR/venv/bin/python"' in content
+
+
+def test_update_checks_origin_before_confirmation():
+    content = (REPO_ROOT / "chatdome").read_text(encoding="utf-8")
+    check_index = content.index("Checking origin/main...")
+    compare_index = content.index('if [[ "$old_commit" == "$target_commit" ]]')
+    prompt_index = content.index("Tracked local changes and untracked non-ignored files")
+    assert check_index < compare_index < prompt_index
+    assert "ChatDome is already up to date:" in content

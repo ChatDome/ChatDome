@@ -225,6 +225,37 @@ esac
     return locals()
 
 
+def test_update_skips_when_origin_main_matches_head(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    deploy = fixture["deploy"]
+    _git(
+        deploy,
+        "fetch",
+        "origin",
+        "+refs/heads/main:refs/remotes/origin/main",
+    )
+    _git(deploy, "reset", "--hard", "origin/main")
+    fixture["service_log"].unlink(missing_ok=True)
+
+    result = _run(
+        ["bash", deploy / "chatdome", "--update"],
+        env=fixture["env"],
+        input_text="",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ChatDome is already up to date:" in result.stdout
+    assert not (deploy / ".venv-update").exists()
+    service_calls = (
+        fixture["service_log"].read_text(encoding="utf-8")
+        if fixture["service_log"].exists()
+        else ""
+    )
+    assert "stop chatdome" not in service_calls
+    assert "restart chatdome" not in service_calls
+
+
 def test_update_replaces_checkout_migrates_runtime_and_checks_health(tmp_path):
     fixture = _create_fixture(tmp_path)
     deploy = fixture["deploy"]
@@ -612,8 +643,9 @@ def test_permanent_removal_requires_exact_confirmation(tmp_path):
     )
 
     assert result.returncode == 0
-    assert "Type DELETE to continue" in result.stdout
-    assert "Cancelled." in result.stdout
+    output = result.stdout + result.stderr
+    assert "Type DELETE to continue" in output
+    assert "Cancelled." in output
     assert deploy.exists()
     assert fixture["command_path"].exists()
 

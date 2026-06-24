@@ -699,18 +699,11 @@ rollback_update() {
 }
 
 update_chatdome() (
-  local answer actual_origin old_commit update_python candidate_python version runtime_check_output
+  local answer actual_origin old_commit target_commit update_python candidate_python version runtime_check_output
   local config_was_valid=0
   local candidate_config_valid=0
   local candidate_venv="$ROOT_DIR/.venv-update"
   local rollback_venv="$ROOT_DIR/.venv-rollback"
-
-  echo "Tracked local changes and untracked non-ignored files will be removed."
-  read -r -p "Continue? [y/N] " answer
-  case "${answer,,}" in
-    y|yes) ;;
-    *) echo "Cancelled."; return 0 ;;
-  esac
 
   if ! command -v flock >/dev/null 2>&1; then
     echo "❌ Update failed: install flock from the util-linux package."
@@ -745,16 +738,32 @@ update_chatdome() (
     echo "❌ Update failed: cannot read the current commit."
     return 1
   }
-  printf '%s\n' "$old_commit" >"$DATA_DIR/previous_commit"
 
-  if ! backup_systemd_unit; then
-    echo "❌ Update failed: cannot back up the systemd unit."
-    return 1
-  fi
-
-  echo "Fetching origin/main..."
+  echo "Checking origin/main..."
   if ! git -C "$ROOT_DIR" fetch --prune origin '+refs/heads/main:refs/remotes/origin/main'; then
     echo "❌ Update failed: cannot fetch origin/main."
+    return 1
+  fi
+  target_commit="$(git -C "$ROOT_DIR" rev-parse refs/remotes/origin/main)" || {
+    echo "❌ Update failed: cannot read origin/main."
+    return 1
+  }
+  if [[ "$old_commit" == "$target_commit" ]]; then
+    echo "ChatDome is already up to date: ${old_commit:0:12}"
+    return 0
+  fi
+
+  echo "Update available: ${old_commit:0:12} -> ${target_commit:0:12}"
+  echo "Tracked local changes and untracked non-ignored files will be removed."
+  read -r -p "Continue? [y/N] " answer
+  case "${answer,,}" in
+    y|yes) ;;
+    *) echo "Cancelled."; return 0 ;;
+  esac
+
+  printf '%s\n' "$old_commit" >"$DATA_DIR/previous_commit"
+  if ! backup_systemd_unit; then
+    echo "❌ Update failed: cannot back up the systemd unit."
     return 1
   fi
 
