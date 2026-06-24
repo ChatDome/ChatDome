@@ -118,7 +118,7 @@ sudo bash install.sh
 ```
 
 安装后配置、运行数据和日志分别位于 `/etc/chatdome/config.yaml`、`/var/lib/chatdome` 和 `/var/log/chatdome/chatdome.log`。
-安装脚本会注册 systemd 服务并设置开机自启，但不会立即启动服务。完成配置后，运行 `chatdome` 并选择 `Start service`，或执行 `sudo systemctl start chatdome`。
+安装脚本会注册 systemd 服务并设置开机自启，但不会立即启动服务。完成配置后，运行 `chatdome` 并选择 `Start service`，或执行 `sudo systemctl start chatdome`。 系统维护菜单可选择保留配置和数据并停用服务，或在输入 `DELETE` 确认后彻底删除全部 ChatDome 文件。
 
 #### 方式 B：开发模式安装（Editable Mode）
 ```bash

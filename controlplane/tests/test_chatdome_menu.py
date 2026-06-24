@@ -124,6 +124,8 @@ def _create_fixture(tmp_path: Path):
     enabled_file = tmp_path / "service-enabled"
     active_file.touch()
     enabled_file.touch()
+    command_path = fake_bin / "chatdome"
+    _write_executable(command_path, "#!/usr/bin/env bash\nexit 0\n")
 
     _write_executable(
         deploy / "venv" / "bin" / "python",
@@ -210,6 +212,7 @@ esac
         "CHATDOME_LOG_FILE": str(log_dir / "chatdome.log"),
         "CHATDOME_UPDATE_LOCK_FILE": str(lock_file),
         "CHATDOME_SERVICE_PATH": str(tmp_path / "chatdome.service"),
+        "CHATDOME_COMMAND_PATH": str(command_path),
         "CHATDOME_ORIGIN_URL": str(origin),
         "CHATDOME_NO_SUDO": "1",
         "FAKE_PYTHON_LOG": str(command_log),
@@ -536,6 +539,50 @@ def test_update_lock_rejects_concurrent_update(tmp_path):
     assert "Another ChatDome update is running." in result.stdout
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX pseudo terminals")
+def test_start_menu_starts_stopped_service(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    fixture["active_file"].unlink()
+    process, master_fd = _spawn_interactive_menu(fixture["deploy"], fixture["env"])
+
+    try:
+        _read_pty_until(master_fd, "Select: ")
+        os.write(master_fd, b"1\n")
+        output = _read_pty_until(master_fd, "Start ChatDome service now? [y/N] ")
+        assert "Restart ChatDome service now?" not in output
+        os.write(master_fd, b"y\n")
+        _read_pty_until(master_fd, "Press Enter to continue...")
+        service_calls = fixture["service_log"].read_text(encoding="utf-8")
+        assert "start chatdome" in service_calls
+        assert "restart chatdome" not in service_calls
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        os.close(master_fd)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX pseudo terminals")
+def test_start_menu_restarts_running_service(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    process, master_fd = _spawn_interactive_menu(fixture["deploy"], fixture["env"])
+
+    try:
+        _read_pty_until(master_fd, "Select: ")
+        os.write(master_fd, b"1\n")
+        output = _read_pty_until(master_fd, "Restart ChatDome service now? [y/N] ")
+        assert "Start ChatDome service now?" not in output
+        os.write(master_fd, b"y\n")
+        _read_pty_until(master_fd, "Press Enter to continue...")
+        service_calls = fixture["service_log"].read_text(encoding="utf-8")
+        assert "restart chatdome" in service_calls
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        os.close(master_fd)
+
+
 def test_stop_reports_success_and_repeated_state(tmp_path):
     fixture = _create_fixture(tmp_path)
     deploy = fixture["deploy"]
@@ -547,6 +594,49 @@ def test_stop_reports_success_and_repeated_state(tmp_path):
     assert "ChatDome stopped." in first.stdout
     assert second.returncode == 0
     assert "already stopped" in second.stdout
+
+
+def test_permanent_removal_requires_exact_confirmation(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    deploy = fixture["deploy"]
+
+    result = _run(
+        ["bash", deploy / "chatdome"],
+        env=fixture["env"],
+        input_text="7\n2\n2\nNO\n\n0\n0\n",
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Type DELETE to continue" in result.stdout
+    assert "Cancelled." in result.stdout
+    assert deploy.exists()
+    assert fixture["command_path"].exists()
+
+
+def test_permanent_removal_deletes_program_config_data_and_service(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    deploy = fixture["deploy"]
+    service_path = Path(fixture["env"]["CHATDOME_SERVICE_PATH"])
+    service_path.write_text("unit\n", encoding="utf-8")
+
+    result = _run(
+        ["bash", deploy / "chatdome"],
+        env=fixture["env"],
+        input_text="7\n2\n2\nDELETE\n",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ChatDome was permanently removed." in result.stdout
+    assert not deploy.exists()
+    assert not fixture["config_dir"].exists()
+    assert not fixture["data_dir"].exists()
+    assert not fixture["log_dir"].exists()
+    assert not service_path.exists()
+    assert not fixture["command_path"].exists()
+    assert not fixture["active_file"].exists()
+    assert not fixture["enabled_file"].exists()
 
 
 def test_disable_reports_success_and_repeated_state(tmp_path):

@@ -11,6 +11,7 @@ ROOT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 CLI="$ROOT_DIR/chatdome-cli.py"
 SERVICE_NAME="chatdome"
 SERVICE_PATH="${CHATDOME_SERVICE_PATH:-/etc/systemd/system/${SERVICE_NAME}.service}"
+COMMAND_PATH="${CHATDOME_COMMAND_PATH:-/usr/local/bin/chatdome}"
 CONFIG_FILE="${CHATDOME_CONFIG:-/etc/chatdome/config.yaml}"
 CONFIG_DIR="$(dirname "$CONFIG_FILE")"
 DATA_DIR="${CHATDOME_DATA_DIR:-/var/lib/chatdome}"
@@ -213,6 +214,15 @@ stop_service_with_result() {
   echo "✅ ChatDome stopped."
 }
 
+start_service_with_result() {
+  if service_action start >/dev/null 2>&1 && wait_for_health; then
+    echo "✅ ChatDome started and healthy."
+    return 0
+  fi
+  echo "❌ Start failed. Check $LOG_FILE."
+  return 1
+}
+
 restart_service_with_result() {
   if service_action restart >/dev/null 2>&1 && wait_for_health; then
     echo "✅ ChatDome restarted and healthy."
@@ -243,14 +253,67 @@ disable_service_with_result() {
   echo "✅ ChatDome service stopped and disabled. Config and data were retained."
 }
 
-show_full_removal_commands() {
-  cat <<COMMANDS
-No files were removed. Back up config and data, then run:
-  sudo systemctl disable --now $SERVICE_NAME
-  sudo rm -f $SERVICE_PATH /usr/local/bin/chatdome
-  sudo systemctl daemon-reload
-  sudo rm -rf $ROOT_DIR $CONFIG_DIR $DATA_DIR $LOG_DIR
-COMMANDS
+safe_removal_directory() {
+  local path="$1" resolved relative
+  resolved="$(readlink -m -- "$path")" || return 1
+  [[ "$resolved" == /* ]] || return 1
+  [[ "$resolved" != "${HOME:-}" ]] || return 1
+  case "$resolved" in
+    /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/opt|/root|/run|/sbin|/srv|/tmp|/usr|/usr/local|/var|/var/lib|/var/log) return 1 ;;
+  esac
+  relative="${resolved#/}"
+  [[ "$relative" == */* ]]
+}
+
+permanently_remove_chatdome() {
+  local confirmation path
+  echo "This permanently deletes ChatDome:"
+  echo "- service unit: $SERVICE_PATH"
+  echo "- command: $COMMAND_PATH"
+  echo "- program: $ROOT_DIR"
+  echo "- config: $CONFIG_DIR"
+  echo "- data: $DATA_DIR"
+  echo "- logs: $LOG_DIR"
+  echo
+  read -r -p "Type DELETE to continue: " confirmation
+  if [[ "$confirmation" != "DELETE" ]]; then
+    echo "Cancelled."
+    return 0
+  fi
+
+  for path in "$ROOT_DIR" "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"; do
+    if ! safe_removal_directory "$path"; then
+      echo "Removal stopped: unsafe path: $path"
+      return 1
+    fi
+  done
+  if [[ "$(basename -- "$SERVICE_PATH")" != "chatdome.service" ]]; then
+    echo "Removal stopped: unsafe service path: $SERVICE_PATH"
+    return 1
+  fi
+  if [[ "$(basename -- "$COMMAND_PATH")" != "chatdome" ]]; then
+    echo "Removal stopped: unsafe command path: $COMMAND_PATH"
+    return 1
+  fi
+
+  if systemctl_available; then
+    if service_is_active || systemctl is-enabled --quiet "$SERVICE_NAME"; then
+      if ! run_as_root systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1; then
+        echo "Removal stopped: could not stop and disable ChatDome."
+        return 1
+      fi
+    fi
+    run_as_root rm -f "$SERVICE_PATH" || return 1
+    run_as_root systemctl daemon-reload || return 1
+  else
+    stop_service_with_result || return 1
+  fi
+
+  run_as_root rm -f "$COMMAND_PATH" || return 1
+  run_as_root rm -rf "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" || return 1
+  run_as_root rm -rf "$ROOT_DIR" || return 1
+  echo "ChatDome was permanently removed."
+  exit 0
 }
 
 show_header() {
@@ -261,19 +324,24 @@ show_header() {
 }
 
 start_service() {
+  local answer
   show_header
   run_cli ensure-config
   run_cli status || true
   echo
-  read -r -p "Start or restart ChatDome service now? [y/N] " answer
-  case "${answer,,}" in
-    y|yes)
-      restart_service_with_result
-      ;;
-    *)
-      echo "Skipped."
-      ;;
-  esac
+  if service_is_active; then
+    read -r -p "Restart ChatDome service now? [y/N] " answer
+    case "${answer,,}" in
+      y|yes) restart_service_with_result ;;
+      *) echo "Skipped." ;;
+    esac
+  else
+    read -r -p "Start ChatDome service now? [y/N] " answer
+    case "${answer,,}" in
+      y|yes) start_service_with_result ;;
+      *) echo "Skipped." ;;
+    esac
+  fi
   pause
 }
 
@@ -802,13 +870,13 @@ maintenance_menu() {
         pause
         ;;
       2)
-        echo "1) Stop and disable service"
-        echo "2) Show full removal commands"
+        echo "1) Stop and disable service (keep config and data)"
+        echo "2) Permanently remove ChatDome (delete config and data)"
         echo "0) Back"
         read -r -p "Select: " uninstall_choice
         case "$uninstall_choice" in
           1) disable_service_with_result ;;
-          2) show_full_removal_commands ;;
+          2) permanently_remove_chatdome ;;
           0) continue ;;
         esac
         pause

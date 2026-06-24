@@ -114,7 +114,7 @@ sudo bash install.sh
 ```
 
 The installer uses `/etc/chatdome/config.yaml`, `/var/lib/chatdome`, and `/var/log/chatdome/chatdome.log` for configuration, runtime data, and logs.
-It registers the systemd service and enables it at boot, but does not start it immediately. After configuration, run `chatdome` and select `Start service`, or run `sudo systemctl start chatdome`.
+It registers the systemd service and enables it at boot, but does not start it immediately. After configuration, run `chatdome` and select `Start service`, or run `sudo systemctl start chatdome`. The maintenance menu can either disable the service while retaining configuration and data, or permanently remove all ChatDome files after typed confirmation.
 
 #### Method B: Development Install (Editable Mode)
 ```bash
