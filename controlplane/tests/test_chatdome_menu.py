@@ -171,6 +171,9 @@ if [[ "${2:-}" == "validate-config" ]]; then
     exit 1
   fi
 fi
+if [[ "${1:-}" == "-m" && "${2:-}" == "chatdome.main" && "${FAIL_ACTIVATED_RUNTIME:-0}" == "1" ]]; then
+  exit 1
+fi
 if [[ "${2:-}" == "health-check" && "${FAIL_HEALTH:-0}" == "1" ]]; then
   exit 1
 fi
@@ -247,7 +250,11 @@ def test_update_replaces_checkout_migrates_runtime_and_checks_health(tmp_path):
     assert "-m pip install --no-cache-dir --upgrade pip setuptools wheel" in python_calls
     assert "-m pip install -e" in python_calls
     assert python_calls.index("-m ensurepip --upgrade") < python_calls.index("-m pip install -e")
+    assert "-m chatdome.main --help" in python_calls
     assert "health-check" in python_calls
+    service_unit = Path(fixture["env"]["CHATDOME_SERVICE_PATH"]).read_text(encoding="utf-8")
+    assert "venv/bin/python -m chatdome.main --config" in service_unit
+    assert "venv/bin/chatdome-server" not in service_unit
     service_calls = fixture["service_log"].read_text(encoding="utf-8")
     assert "stop chatdome" in service_calls
     assert "restart chatdome" in service_calls
@@ -449,6 +456,28 @@ def test_update_rolls_back_commit_when_dependency_installation_fails(tmp_path):
     assert not (deploy / ".venv-rollback").exists()
     assert (deploy / "venv" / "CANDIDATE").exists()
     assert not (deploy / "venv" / "ORIGINAL").exists()
+
+
+def test_update_rolls_back_when_activated_runtime_cannot_start(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    deploy = fixture["deploy"]
+    before = _git(deploy, "rev-parse", "HEAD")
+    failing_env = fixture["env"].copy()
+    failing_env["FAIL_ACTIVATED_RUNTIME"] = "1"
+
+    result = _run(
+        ["bash", deploy / "chatdome", "--update"],
+        env=failing_env,
+        input_text="y\n",
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "activated Python environment cannot start ChatDome" in result.stdout
+    assert "Restored ChatDome" in result.stdout
+    assert _git(deploy, "rev-parse", "HEAD") == before
+    assert (deploy / "venv" / "ORIGINAL").exists()
+    assert not (deploy / "venv" / "CANDIDATE").exists()
 
 
 def test_update_rolls_back_code_and_venv_when_health_check_fails(tmp_path):

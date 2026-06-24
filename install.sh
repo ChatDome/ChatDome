@@ -62,7 +62,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$DATA_DIR
-ExecStart=$ROOT_DIR/venv/bin/chatdome-server --config $CONFIG_FILE
+ExecStart=$ROOT_DIR/venv/bin/python -m chatdome.main --config $CONFIG_FILE
 Restart=on-failure
 RestartSec=5
 User=root

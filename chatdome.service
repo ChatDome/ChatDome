@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/var/lib/chatdome
-ExecStart=/opt/chatdome/venv/bin/chatdome-server --config /etc/chatdome/config.yaml
+ExecStart=/opt/chatdome/venv/bin/python -m chatdome.main --config /etc/chatdome/config.yaml
 Restart=on-failure
 RestartSec=5
 User=root

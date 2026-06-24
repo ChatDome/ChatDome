@@ -518,7 +518,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$DATA_DIR
-ExecStart=$ROOT_DIR/venv/bin/chatdome-server --config $CONFIG_FILE
+ExecStart=$ROOT_DIR/venv/bin/python -m chatdome.main --config $CONFIG_FILE
 Restart=on-failure
 RestartSec=5
 User=root
@@ -750,6 +750,10 @@ update_chatdome() (
   if ! mv "$candidate_venv" "$ROOT_DIR/venv"; then
     mv "$rollback_venv" "$ROOT_DIR/venv" || true
     rollback_update "$old_commit" "cannot activate the candidate Python environment." "$config_was_valid"
+    return 1
+  fi
+  if ! "$ROOT_DIR/venv/bin/python" -m chatdome.main --help >/dev/null 2>&1; then
+    rollback_update "$old_commit" "activated Python environment cannot start ChatDome." "$config_was_valid"
     return 1
   fi
   if ! install_systemd_unit; then

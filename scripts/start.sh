@@ -14,12 +14,12 @@ export CHATDOME_DATA_DIR="$DATA_DIR"
 export CHATDOME_LOG_DIR="$LOG_DIR"
 export CHATDOME_LOG_FILE="$LOG_FILE"
 
-if [[ -x "$ROOT_DIR/venv/bin/chatdome-server" ]]; then
-  SERVER_BIN="$ROOT_DIR/venv/bin/chatdome-server"
+if [[ -x "$ROOT_DIR/venv/bin/python" ]]; then
+  SERVER_CMD=("$ROOT_DIR/venv/bin/python" -m chatdome.main)
 elif command -v chatdome-server >/dev/null 2>&1; then
-  SERVER_BIN="$(command -v chatdome-server)"
+  SERVER_CMD=("$(command -v chatdome-server)")
 else
-  SERVER_BIN="python3 -m chatdome.main"
+  SERVER_CMD=(python3 -m chatdome.main)
 fi
 
 is_running() {
@@ -37,7 +37,7 @@ start_service() {
     return
   fi
   cd "$DATA_DIR"
-  nohup $SERVER_BIN --config "$CONFIG_FILE" >/dev/null 2>>"$LOG_FILE" &
+  nohup "${SERVER_CMD[@]}" --config "$CONFIG_FILE" >/dev/null 2>>"$LOG_FILE" &
   local pid=$!
   echo "$pid" >"$PID_FILE"
   sleep 1
