@@ -89,7 +89,7 @@ configure_openai_profile() {
     read -r -p "Overwrite this profile? [y/N] " overwrite
     case "${overwrite,,}" in
       y|yes) ;;
-      *) echo "Cancelled."; pause; return 0 ;;
+      *) echo "Cancelled."; return 0 ;;
     esac
   fi
 
@@ -110,7 +110,7 @@ configure_openai_profile() {
   fi
   case "${confirm,,}" in
     y|yes) ;;
-    *) echo "Cancelled."; pause; return 0 ;;
+    *) echo "Cancelled."; return 0 ;;
   esac
 
   args=(set-openai --profile "$profile" --model "$model" --base-url "$base_url" --api-key-stdin)
@@ -141,13 +141,13 @@ configure_codex_profile() {
     read -r -p "Overwrite this profile? [y/N] " overwrite
     case "${overwrite,,}" in
       y|yes) ;;
-      *) echo "Cancelled."; pause; return 0 ;;
+      *) echo "Cancelled."; return 0 ;;
     esac
   else
     read -r -p "Add Codex profile '$profile'? [y/N] " confirm
     case "${confirm,,}" in
       y|yes) ;;
-      *) echo "Cancelled."; pause; return 0 ;;
+      *) echo "Cancelled."; return 0 ;;
     esac
   fi
 
