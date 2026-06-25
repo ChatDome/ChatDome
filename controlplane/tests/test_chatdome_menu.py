@@ -750,3 +750,23 @@ def test_disable_reports_success_and_repeated_state(tmp_path):
     assert "Config and data were retained" in first.stdout
     assert second.returncode == 0
     assert "already stopped and disabled" in second.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX terminal signals")
+def test_ctrl_c_exits_from_llm_menu(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    process, master_fd = _spawn_interactive_menu(fixture["deploy"], fixture["env"])
+
+    try:
+        _read_pty_until(master_fd, "Select: ")
+        os.write(master_fd, b"3\n")
+        output = _read_pty_until(master_fd, "Select: ")
+        assert "LLM Management" in output
+
+        os.killpg(process.pid, signal.SIGINT)
+        assert process.wait(timeout=5) == 130
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        os.close(master_fd)

@@ -378,7 +378,6 @@ service_menu() {
 
 llm_menu() {
   while true; do
-    trap 'printf "\n"; return 130' INT
     show_header
     echo "LLM Management"
     echo "1) List profiles"

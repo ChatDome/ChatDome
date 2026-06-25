@@ -99,3 +99,9 @@ def test_installer_requires_full_source_tree_markers():
     assert '[[ -f "$dir/config.example.yaml" ]] || return 1' in content
     assert '[[ -d "$dir/controlplane/src/chatdome" ]] || return 1' in content
     assert 'if [[ -n "$script_root" ]] && source_tree_complete "$script_root"; then' in content
+
+def test_menu_level_ctrl_c_exits_process():
+    content = (REPO_ROOT / "chatdome").read_text(encoding="utf-8")
+    assert 'trap \'printf "\\n"; return 130\' INT' not in content
+    assert 'trap \'printf "\\n"; exit 130\' INT' in content
+    assert 'echo "Cancelled."; return 130' in content
