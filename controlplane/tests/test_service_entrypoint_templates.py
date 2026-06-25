@@ -5,14 +5,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_service_templates_use_python_module_entrypoint():
-    service_template = (REPO_ROOT / "chatdome.service").read_text(encoding="utf-8")
-    assert "venv/bin/python -m chatdome.main --config" in service_template
-    assert "venv/bin/chatdome-server" not in service_template
+    assert not (REPO_ROOT / "chatdome.service").exists()
 
     installer = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
     assert "ExecStart=$VENV_PATH/bin/python -m chatdome.main --config" in installer
     assert 'VENV_PATH="$VENV_ROOT/$VERSION_ID"' in installer
-    assert 'ln -s "$VENV_PATH" "$ROOT_DIR/venv"' in installer
+    assert 'ln -s "$VENV_PATH" "$root_dir/venv"' in installer
 
     updater = (REPO_ROOT / "chatdome").read_text(encoding="utf-8")
     assert "ExecStart=$runtime_python -m chatdome.main --config" in updater
@@ -81,3 +79,23 @@ def test_update_uses_fixed_versioned_venv_paths():
 def test_gitignore_preserves_active_venv_symlink():
     patterns = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert "venv" in patterns
+
+
+def test_installer_prompts_before_dependency_install():
+    content = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
+    assert "Missing dependencies:" in content
+    assert "Install command:" in content
+    assert "Install now? [y/N]:" in content
+    assert "apt-get update && apt-get install -y" in content
+    assert "dnf install -y" in content
+    assert "yum install -y" in content
+    assert "pacman -Sy --needed --noconfirm" in content
+    assert "zypper --non-interactive install" in content
+
+def test_installer_requires_full_source_tree_markers():
+    content = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
+    assert '[[ -f "$dir/install.sh" ]] || return 1' in content
+    assert '[[ -x "$dir/chatdome" || -f "$dir/chatdome" ]] || return 1' in content
+    assert '[[ -f "$dir/config.example.yaml" ]] || return 1' in content
+    assert '[[ -d "$dir/controlplane/src/chatdome" ]] || return 1' in content
+    assert 'if [[ -n "$script_root" ]] && source_tree_complete "$script_root"; then' in content

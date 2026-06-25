@@ -23,6 +23,8 @@ jobs:
           python -m pip install -e ./controlplane pytest
       - name: Check Bash syntax
         run: bash -n chatdome install.sh scripts/start.sh
+      - name: Dry-run install script
+        run: sudo bash install.sh --dry-run
       - name: Run tests
         run: python -m pytest -q
         working-directory: controlplane

@@ -100,30 +100,51 @@ Because we use the **Dual-Confirmation Mechanism**, granting the AI this "Infini
 
 ### Install
 
-First, clone the repository:
+Choose one of the following installation methods:
+
+#### Method A: One-Line Install (Recommended)
+```bash
+curl -fsSL https://raw.githubusercontent.com/ChatDome/ChatDome/main/install.sh \
+  -o /tmp/chatdome-install.sh && sudo bash /tmp/chatdome-install.sh
+```
+
+Or with wget:
+```bash
+wget -qO /tmp/chatdome-install.sh \
+  https://raw.githubusercontent.com/ChatDome/ChatDome/main/install.sh && \
+  sudo bash /tmp/chatdome-install.sh
+```
+
+Preview before running:
+```bash
+curl -fsSL https://raw.githubusercontent.com/ChatDome/ChatDome/main/install.sh \
+  -o /tmp/chatdome-install.sh && bash /tmp/chatdome-install.sh --dry-run
+```
+
+Customize installation paths:
+```bash
+sudo env CHATDOME_INSTALL_DIR=/srv/chatdome \
+  bash /tmp/chatdome-install.sh
+```
+
+The installer downloads ChatDome to `/opt/chatdome` by default. It uses `/etc/chatdome/config.yaml`, `/var/lib/chatdome`, and `/var/log/chatdome/chatdome.log` for configuration, runtime data, and logs.
+It prompts before installing missing dependencies with the detected package manager (`apt-get`, `dnf`, `yum`, `pacman`, or `zypper`). It registers the systemd service and enables it at boot, but does not start it unless `--start` is passed. After configuration, run `chatdome` and select `Start service`, or run `sudo systemctl start chatdome`.
+
+#### Method B: Local Repository Install
 ```bash
 git clone https://github.com/ChatDome/ChatDome.git
 cd ChatDome
-```
-
-Choose one of the following installation methods:
-
-#### Method A: Standard Install (Recommended for Servers)
-```bash
 sudo bash install.sh
 ```
 
-The installer uses `/etc/chatdome/config.yaml`, `/var/lib/chatdome`, and `/var/log/chatdome/chatdome.log` for configuration, runtime data, and logs.
-It registers the systemd service and enables it at boot, but does not start it immediately. After configuration, run `chatdome` and select `Start service`, or run `sudo systemctl start chatdome`. The maintenance menu can either disable the service while retaining configuration and data, or permanently remove all ChatDome files after typed confirmation.
-
-#### Method B: Development Install (Editable Mode)
+#### Method C: Development Install (Editable Mode)
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ./controlplane
 ```
 
-Development mode installs the source tree into the active virtual environment in editable mode, so Python source changes do not require reinstallation. It does not register a systemd service, create `/etc/chatdome` or `/var/lib/chatdome`, or install the system-wide `chatdome` command. Use it for local development and testing; use the standard install for a persistent server deployment.
+Development mode installs the source tree into the active virtual environment in editable mode, so Python source changes do not require reinstallation. It does not register a systemd service, create `/etc/chatdome` or `/var/lib/chatdome`, or install the system-wide `chatdome` command. Use it for local development and testing; use Method A or B for a persistent server deployment.
 
 ### Configure
 
@@ -147,12 +168,12 @@ By default, no LLM profile is configured (`active_ai_profile` is empty). Use the
 
 Depending on your installation method, start ChatDome using one of the following commands:
 
-**If you used Method A (Standard Install):**
+**If you used Method A or B:**
 ```bash
 sudo systemctl start chatdome
 ```
 
-**If you used Method B (Development Install, with `.venv` activated):**
+**If you used Method C (Development Install, with `.venv` activated):**
 ```bash
 chatdome-server --config config.yaml
 ```
