@@ -774,7 +774,7 @@ update_chatdome() (
     return 1
   }
   if [[ "$old_commit" == "$target_commit" ]]; then
-    echo "ChatDome is already up to date: ${old_commit:0:12}"
+    echo "目前已经是最新版本：${old_commit:0:12}"
     return 0
   fi
   if [[ ! "$target_commit" =~ ^[0-9a-f]{40,64}$ ]]; then

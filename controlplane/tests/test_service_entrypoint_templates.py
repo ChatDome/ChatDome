@@ -66,7 +66,7 @@ def test_update_checks_origin_before_confirmation():
     compare_index = content.index('if [[ "$old_commit" == "$target_commit" ]]')
     prompt_index = content.index("Tracked local changes and untracked non-ignored files")
     assert check_index < compare_index < prompt_index
-    assert "ChatDome is already up to date:" in content
+    assert "目前已经是最新版本：" in content
 
 
 def test_update_uses_fixed_versioned_venv_paths():

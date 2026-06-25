@@ -249,7 +249,7 @@ def test_update_skips_when_origin_main_matches_head(tmp_path):
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "ChatDome is already up to date:" in result.stdout
+    assert "目前已经是最新版本：" in result.stdout
     assert not (deploy / ".venv-update").exists()
     service_calls = (
         fixture["service_log"].read_text(encoding="utf-8")
