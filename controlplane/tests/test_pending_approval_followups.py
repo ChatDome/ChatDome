@@ -31,6 +31,26 @@ class FakeLLM:
         return self.response
 
 
+class SequenceLLM:
+    model = "fake-model"
+
+    def __init__(self, *responses: LLMResponse):
+        self.responses = list(responses)
+        self.calls = []
+
+    async def chat_completion(self, messages, tools=None, response_format=None):
+        self.calls.append(
+            {
+                "messages": messages,
+                "tools": tools,
+                "response_format": response_format,
+            }
+        )
+        if self.responses:
+            return self.responses.pop(0)
+        return LLMResponse(content="done")
+
+
 class RepeatingToolLLM:
     model = "fake-model"
 
@@ -153,6 +173,36 @@ class PendingAfterSecondToolDispatcher:
                 risk_level="HIGH",
             )
         return f"result for {tool_call_id}"
+
+
+class ApprovalRequiredShellDispatcher:
+    def __init__(self):
+        self.calls = []
+        self.sandbox = FakeSandbox()
+
+    def _format_command_result(self, result) -> str:
+        return result.stdout
+
+    async def dispatch(self, tool_name, arguments_json, tool_call_id="", chat_id=0):
+        self.calls.append(
+            {
+                "tool_name": tool_name,
+                "arguments_json": arguments_json,
+                "tool_call_id": tool_call_id,
+                "chat_id": chat_id,
+            }
+        )
+        args = json.loads(arguments_json or "{}")
+        command = args.get("command", "")
+        reason = args.get("reason", "")
+        raise PendingApprovalError(
+            command=command,
+            safety_status="NEEDS_APPROVAL",
+            impact_analysis="May restart a service.",
+            tool_call_id=tool_call_id,
+            reason=reason,
+            risk_level="HIGH",
+        )
 
 
 class FakeApprovalDetailDispatcher:
@@ -462,6 +512,94 @@ class PendingApprovalFollowupTests(unittest.TestCase):
             if msg.get("role") == "tool"
         ]
         self.assertCountEqual(tool_result_ids, ["call-1", "call-2", "call-3"])
+
+    def test_deferred_tool_call_can_be_requested_after_approval(self):
+        session = AgentSession(chat_id=123)
+        session.add_user_message("restart ssh on a custom port and update fail2ban")
+        restart_sshd = json.dumps(
+            {
+                "command": "systemctl restart sshd",
+                "reason": "Apply SSH port change.",
+            }
+        )
+        restart_fail2ban = json.dumps(
+            {
+                "command": "systemctl restart fail2ban",
+                "reason": "Apply fail2ban SSH port change.",
+            }
+        )
+        llm = SequenceLLM(
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="restart-sshd",
+                        name="run_shell_command",
+                        arguments=restart_sshd,
+                    ),
+                    ToolCall(
+                        id="restart-fail2ban-deferred",
+                        name="run_shell_command",
+                        arguments=restart_fail2ban,
+                    ),
+                ],
+            ),
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="restart-fail2ban",
+                        name="run_shell_command",
+                        arguments=restart_fail2ban,
+                    ),
+                ],
+            ),
+        )
+        dispatcher = ApprovalRequiredShellDispatcher()
+        agent = object.__new__(Agent)
+        agent.llm = llm
+        agent.config = SimpleNamespace(model="fake-model", max_rounds_per_turn=10)
+        agent.tools = []
+        agent.session_manager = FakeSessionManager(session)
+        agent.tool_dispatcher = dispatcher
+        agent._persist_session = lambda saved_session: agent.session_manager.save_session(saved_session)
+
+        with patch("chatdome.agent.audit.CommandAuditTracker.record_event"), patch(
+            "chatdome.agent.tracker.TokenTracker.record_usage"
+        ):
+            first_response = asyncio.run(agent._run_loop(123, session))
+
+        self.assertEqual(first_response.kind, "pending_approval")
+        self.assertEqual(session.pending_command, "systemctl restart sshd")
+        self.assertEqual(
+            [call["tool_call_id"] for call in dispatcher.calls],
+            ["restart-sshd"],
+        )
+
+        with patch("chatdome.agent.audit.CommandAuditTracker.record_event"), patch(
+            "chatdome.agent.tracker.TokenTracker.record_usage"
+        ):
+            raw_result, final_response = asyncio.run(
+                agent.resume_session(
+                    123,
+                    "APPROVE",
+                    approval_id=session.pending_approval_id,
+                )
+            )
+
+        self.assertEqual(raw_result, "ok")
+        self.assertEqual(final_response.kind, "pending_approval")
+        self.assertEqual(session.pending_command, "systemctl restart fail2ban")
+        self.assertEqual(
+            [call["tool_call_id"] for call in dispatcher.calls],
+            ["restart-sshd", "restart-fail2ban"],
+        )
+        tool_result_text = "\n".join(
+            msg.get("content", "")
+            for msg in session.messages
+            if msg.get("role") == "tool"
+        )
+        self.assertNotIn("Duplicate tool call suppressed", tool_result_text)
 
     def test_command_audit_tool_returns_recent_executed_commands(self):
         from chatdome.agent.audit import CommandAuditTracker

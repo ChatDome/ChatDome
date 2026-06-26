@@ -176,7 +176,7 @@ class Agent:
 
     @classmethod
     def _tool_call_stats_since_last_user(cls, session: Any) -> tuple[dict[str, int], dict[str, str]]:
-        """Count trailing duplicate tool calls and cache latest results for this turn."""
+        """Count trailing completed tool calls and cache latest results for this turn."""
         messages = getattr(session, "messages", []) or []
         last_user_index = -1
         for idx, msg in enumerate(messages):
@@ -195,7 +195,6 @@ class Agent:
                         str(function.get("name", "")),
                         str(function.get("arguments", "") or ""),
                     )
-                    tool_signature_order.append(signature)
                     call_id = str(tc.get("call_id") or tc.get("id", "") or "")
                     if call_id:
                         call_id_to_signature[call_id] = signature
@@ -207,8 +206,14 @@ class Agent:
             if msg.get("role") == "tool":
                 signature = call_id_to_signature.get(str(msg.get("tool_call_id", "") or ""))
                 if signature:
-                    latest_results[signature] = str(msg.get("content", "") or "")
-
+                    content = str(msg.get("content", "") or "")
+                    if not cls._tool_result_counts_for_duplicate_guard(content):
+                        continue
+                    tool_signature_order.append(signature)
+                    if cls._is_duplicate_tool_result(content):
+                        latest_results.setdefault(signature, content)
+                    else:
+                        latest_results[signature] = content
         consecutive_counts: dict[str, int] = {}
         if tool_signature_order:
             last_signature = tool_signature_order[-1]
@@ -220,6 +225,21 @@ class Agent:
             consecutive_counts[last_signature] = count
 
         return consecutive_counts, latest_results
+
+    @staticmethod
+    def _is_duplicate_tool_result(content: str | None) -> bool:
+        return str(content or "").lstrip().startswith("[Duplicate tool call suppressed]")
+
+    @staticmethod
+    def _tool_result_counts_for_duplicate_guard(content: str | None) -> bool:
+        text = str(content or "").strip()
+        if not text:
+            return False
+        ignored_prefixes = (
+            "Tool call was not executed because an earlier command is waiting for user approval.",
+            "Legacy tool output was missing from the persisted session.",
+        )
+        return not any(text.startswith(prefix) for prefix in ignored_prefixes)
 
     @classmethod
     def _duplicate_tool_result(cls, signature: str, repeat_count: int, cached_result: str | None) -> str:

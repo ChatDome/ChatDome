@@ -1391,6 +1391,12 @@ class TelegramBot:
 
         await query.message.reply_text("LLM 操作已失效，请重新开始。")
 
+    async def _clear_callback_message_markup(self, query, context_label: str = "callback message") -> None:
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            logger.exception("Failed to edit %s markup", context_label)
+
     async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline keyboard button clicks."""
         query = update.callback_query
@@ -1446,13 +1452,13 @@ class TelegramBot:
                 return
 
             if callback_data == "show_cmd_details" or approval_action == "details":
+                await self._clear_callback_message_markup(query, "approval detail callback message")
                 await self._start_approval_detail_analysis(
                     query.message,
                     chat_id,
                     approval_id or None,
                 )
                 return
-
             if approval_action == "approve_task":
                 action = "APPROVE_TASK"
             elif approval_action == "approve":
@@ -1469,11 +1475,7 @@ class TelegramBot:
                 await self._send_long_message(query.message, "Unknown action button. Please retry.")
                 return
 
-            # Remove buttons from the message for terminal decision actions.
-            try:
-                await query.edit_message_reply_markup(reply_markup=None)
-            except Exception:
-                logger.exception("Failed to edit callback message markup")
+            await self._clear_callback_message_markup(query, "approval decision callback message")
 
             thinking_msg = await query.message.reply_text("Processing...")
             try:

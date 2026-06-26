@@ -94,6 +94,26 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bot._send_long_message.await_args.args[1], "暂无详细状态信息。")
 
+    async def test_approval_detail_callback_removes_original_buttons(self):
+        bot = _bot()
+        bot._check_auth = lambda update: True
+        bot._start_approval_detail_analysis = AsyncMock()
+        query = SimpleNamespace(
+            answer=AsyncMock(),
+            data="approval:details:AP-1",
+            message=object(),
+            edit_message_reply_markup=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_chat=SimpleNamespace(id=123),
+        )
+
+        await bot._handle_callback_query(update, None)
+
+        query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
+        bot._start_approval_detail_analysis.assert_awaited_once_with(query.message, 123, "AP-1")
+
     async def test_callback_router_dispatches_sentinel_detail(self):
         bot = _bot()
         bot._check_auth = lambda update: True
