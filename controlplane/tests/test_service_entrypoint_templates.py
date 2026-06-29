@@ -11,10 +11,14 @@ def test_service_templates_use_python_module_entrypoint():
     assert "ExecStart=$VENV_PATH/bin/python -m chatdome.main --config" in installer
     assert 'VENV_PATH="$VENV_ROOT/$VERSION_ID"' in installer
     assert 'ln -s "$VENV_PATH" "$root_dir/venv"' in installer
+    assert "Environment=CHATDOME_RUN_DIR=$RUN_DIR" in installer
+    assert "RuntimeDirectory=chatdome" in installer
 
     updater = (REPO_ROOT / "chatdome").read_text(encoding="utf-8")
     assert "ExecStart=$runtime_python -m chatdome.main --config" in updater
     assert 'install_systemd_unit "$candidate_python"' in updater
+    assert "Environment=CHATDOME_RUN_DIR=$RUN_DIR" in updater
+    assert "RuntimeDirectory=chatdome" in updater
 
     fallback = (REPO_ROOT / "scripts/start.sh").read_text(encoding="utf-8")
     assert 'SERVER_CMD=("$ROOT_DIR/venv/bin/python" -m chatdome.main)' in fallback

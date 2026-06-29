@@ -43,7 +43,7 @@ from chatdome.sentinel.alert_controls import (
 )
 from chatdome.telegram.auth import Authenticator
 from chatdome.telegram.formatting import MessageMarkup, TelegramMessageFormatter
-from chatdome.runtime_paths import data_path
+from chatdome.runtime_paths import environment_profile_path
 from chatdome.llm.profile_admin import (
     CreateCodexProfileRequest,
     CreateOpenAIProfileRequest,
@@ -117,7 +117,7 @@ class TelegramBot:
         self.auth = Authenticator(config.telegram.allowed_chat_ids)
         self.max_message_length = config.telegram.max_message_length
         self._app: Application | None = None
-        self._environment_profile_path = data_path("environment_profile.md")
+        self._environment_profile_path = environment_profile_path()
         self._sentinel: Any = None   # SentinelScheduler, injected via set_sentinel()
         self._pack_loader: Any = None
         self._alert_analysis_cache: dict[str, dict[str, Any]] = {}

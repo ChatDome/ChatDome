@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from chatdome.runtime_paths import data_dir
+from chatdome.runtime_paths import run_dir
 
 
 SUPPORTED_RELOAD_DOMAINS = {"llm", "sentinel", "agent", "all"}
@@ -51,7 +51,7 @@ class ReloadControl:
         request_file: str = "reload_request.json",
         status_file: str = "reload_status.json",
     ) -> None:
-        self.base_dir = Path(base_dir) if base_dir is not None else data_dir()
+        self.base_dir = Path(base_dir) if base_dir is not None else run_dir()
         self.request_path = self.base_dir / request_file
         self.status_path = self.base_dir / status_file
 

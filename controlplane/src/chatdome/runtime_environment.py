@@ -15,9 +15,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from chatdome.runtime_paths import data_path
+from chatdome.runtime_paths import environment_profile_path
 
-DEFAULT_REPORT_PATH = data_path("environment_profile.md")
+DEFAULT_REPORT_PATH = environment_profile_path()
 
 
 _COMMAND_CANDIDATES = [

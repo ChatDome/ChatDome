@@ -36,12 +36,12 @@ from chatdome.sentinel.user_context import UserContextLedger
 from chatdome.agent.engram import EngramStore
 from chatdome.telegram.bot import TelegramBot
 from chatdome.logger import setup_logging
-from chatdome.runtime_paths import data_path
+from chatdome.runtime_paths import environment_profile_path, llm_profile_lock_path, run_path
 
 
-PID_PATH = data_path("chatdome.pid")
-LOCK_PATH = data_path("chatdome.lock")
-READY_PATH = data_path("ready.json")
+PID_PATH = run_path("chatdome.pid")
+LOCK_PATH = run_path("chatdome.lock")
+READY_PATH = run_path("ready.json")
 
 
 class _InstanceLock:
@@ -219,7 +219,7 @@ def main() -> None:
     )
 
     # Runtime environment profile (OS/shell/command availability)
-    env_report_path = data_path("environment_profile.md")
+    env_report_path = environment_profile_path()
     env_snapshot, runtime_environment_context = collect_and_persist_runtime_environment(
         env_report_path,
     )
@@ -275,7 +275,7 @@ def main() -> None:
         )
 
     profile_admin = LLMProfileAdminService(
-        ProfileConfigStore(args.config, data_path("llm-profile.lock")),
+        ProfileConfigStore(args.config, llm_profile_lock_path()),
         runtime_apply=_apply_llm_profile_config,
         audit_recorder=_record_profile_audit,
     )

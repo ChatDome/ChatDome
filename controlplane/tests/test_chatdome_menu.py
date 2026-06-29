@@ -215,6 +215,7 @@ esac
         "CHATDOME_DATA_DIR": str(data_dir),
         "CHATDOME_LOG_DIR": str(log_dir),
         "CHATDOME_LOG_FILE": str(log_dir / "chatdome.log"),
+        "CHATDOME_RUN_DIR": str(tmp_path / "run"),
         "CHATDOME_UPDATE_LOCK_FILE": str(lock_file),
         "CHATDOME_SERVICE_PATH": str(tmp_path / "chatdome.service"),
         "CHATDOME_COMMAND_PATH": str(command_path),
@@ -281,7 +282,7 @@ def test_update_replaces_checkout_migrates_runtime_and_checks_health(tmp_path):
     assert not (deploy / "venv" / "ORIGINAL").exists()
     assert (fixture["config_dir"] / "config.yaml").read_text(encoding="utf-8") == "legacy config\n"
     assert (fixture["data_dir"] / "runtime.json").read_text(encoding="utf-8") == "keep me\n"
-    assert (fixture["data_dir"] / "previous_commit").read_text(encoding="utf-8").strip() == fixture["old_commit"]
+    assert (fixture["data_dir"] / "update" / "previous_commit").read_text(encoding="utf-8").strip() == fixture["old_commit"]
 
     python_calls = fixture["command_log"].read_text(encoding="utf-8")
     assert "validate-config" in python_calls
@@ -566,7 +567,7 @@ def test_update_rolls_back_when_activated_runtime_cannot_start(tmp_path):
     assert result.returncode != 0
     assert "candidate Python environment cannot start ChatDome" in result.stdout
     assert "fixture activated runtime failure" in result.stdout
-    runtime_log = fixture["data_dir"] / "update-runtime-check.log"
+    runtime_log = fixture["log_dir"] / "update-runtime-check.log"
     assert runtime_log.read_text(encoding="utf-8").strip() == "fixture activated runtime failure"
     assert "Restored ChatDome" in result.stdout
     assert _git(deploy, "rev-parse", "HEAD") == before

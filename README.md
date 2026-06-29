@@ -58,7 +58,7 @@ ChatDome is positioned as a **host-security sub-agent**, not a generic main-agen
 ## Features
 
 - **LLM-First Risk Review** — Before execution, generated commands are classified with structured fields (`safety_status`, `risk_level`, `mutation_detected`, `deletion_detected`) and then escalated conservatively by static guardrails.
-- **Runtime Environment Profiling** — At startup, ChatDome automatically collects OS/shell/command availability into `/var/lib/chatdome/environment_profile.md` for system installations, injects compatibility context into prompts, and exposes a quick `/env` summary in Telegram.
+- **Runtime Environment Profiling** — At startup, ChatDome automatically collects OS/shell/command availability into `/var/lib/chatdome/environment/profile.md` for system installations, injects compatibility context into prompts, and exposes a quick `/env` summary in Telegram.
 - **Tamper-Evident Command Audit** — Command review/approval/execution events are written to append-only hash-chained JSONL logs with automatic 30-day retention and Telegram-side inspection via `/audit [N]`.
 
 - **Dynamic Command Generation & Dual-Confirmation** — When unlocked, the AI can dynamically generate commands to answer arbitrary questions. These commands are processed by an AI Reviewer for impact analysis and require explicit interactive confirmation (or a mandatory `/confirm` for high-risk actions) before execution.
@@ -127,7 +127,7 @@ sudo env CHATDOME_INSTALL_DIR=/srv/chatdome \
   bash /tmp/chatdome-install.sh
 ```
 
-The installer downloads ChatDome to `/opt/chatdome` by default. It uses `/etc/chatdome/config.yaml`, `/var/lib/chatdome`, and `/var/log/chatdome/chatdome.log` for configuration, runtime data, and logs.
+The installer downloads ChatDome to `/opt/chatdome` by default. It uses `/etc/chatdome/config.yaml` for configuration, `/var/log/chatdome` for logs, `/var/lib/chatdome` for runtime data, and `/run/chatdome` for runtime state. See [`docs/runtime-files.md`](docs/runtime-files.md).
 It prompts before installing missing dependencies with the detected package manager (`apt-get`, `dnf`, `yum`, `pacman`, or `zypper`). It registers the systemd service and enables it at boot, but does not start it unless `--start` is passed. After configuration, run `chatdome` and select `Start service`, or run `sudo systemctl start chatdome`.
 
 #### Method B: Local Repository Install
@@ -332,7 +332,7 @@ The AI uses **function calling** (tool use) to interact with the host. It can:
 | `/confirm` | Force-approve and execute the current pending high-risk command |
 | `/reject` | Reject the current pending command |
 | `/clear` | Clear conversation context, start fresh |
-| `/env` | Show runtime environment summary from `/var/lib/chatdome/environment_profile.md` |
+| `/env` | Show runtime environment summary from `/var/lib/chatdome/environment/profile.md` |
 | `/token` | Show token usage statistics for current chat |
 | `/cmd_echo` | Toggle command echo mode in replies |
 | `/audit [N]` | Show latest command audit events for current chat (default 10, max 30) |

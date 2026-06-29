@@ -27,10 +27,11 @@ class ChatDomeCLITests(unittest.TestCase):
         self.root = Path(self.tmp_dir.name)
         self.config_path = self.root / "config.yaml"
         self.example_path = self.root / "config.example.yaml"
-        self.reload_request_path = self.root / "chat_data" / "reload_request.json"
-        self.reload_status_path = self.root / "chat_data" / "reload_status.json"
-        self.ready_path = self.root / "chat_data" / "ready.json"
-        self.pid_path = self.root / "chat_data" / "chatdome.pid"
+        self.run_dir = self.root / "chat_data" / "run"
+        self.reload_request_path = self.run_dir / "reload_request.json"
+        self.reload_status_path = self.run_dir / "reload_status.json"
+        self.ready_path = self.run_dir / "ready.json"
+        self.pid_path = self.run_dir / "chatdome.pid"
         self.config_path.write_text(
             yaml.safe_dump(
                 {
@@ -59,6 +60,10 @@ class ChatDomeCLITests(unittest.TestCase):
         self.cli.READY_PATH = self.ready_path
         self.cli.PID_PATH = self.pid_path
         self.cli.DATA_DIR = self.root / "chat_data"
+        self.cli.RUN_DIR = self.run_dir
+        self.cli.ENV_PROFILE_PATH = self.cli.DATA_DIR / "environment" / "profile.md"
+        self.cli.LEGACY_ENV_PROFILE_PATH = self.cli.DATA_DIR / "environment_profile.md"
+        self.cli.LLM_PROFILE_LOCK_PATH = self.run_dir / "llm-profile.lock"
         self.cli.PROFILE_AUDIT_RECORDER = lambda *args, **kwargs: None
 
     def tearDown(self):

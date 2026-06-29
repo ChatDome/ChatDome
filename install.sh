@@ -15,6 +15,7 @@ fi
 DATA_DIR="${CHATDOME_DATA_DIR:-/var/lib/chatdome}"
 LOG_DIR="${CHATDOME_LOG_DIR:-/var/log/chatdome}"
 LOG_FILE="${CHATDOME_LOG_FILE:-$LOG_DIR/chatdome.log}"
+RUN_DIR="${CHATDOME_RUN_DIR:-/run/chatdome}"
 VENV_ROOT="${CHATDOME_VENV_ROOT:-$DATA_DIR/venvs}"
 
 DRY_RUN=0
@@ -61,6 +62,7 @@ Environment:
   CHATDOME_DATA_DIR      Data directory. Default: /var/lib/chatdome
   CHATDOME_LOG_DIR       Log directory. Default: /var/log/chatdome
   CHATDOME_LOG_FILE      Log file. Default: /var/log/chatdome/chatdome.log
+  CHATDOME_RUN_DIR       Runtime state directory. Default: /run/chatdome
   CHATDOME_VENV_ROOT     Python environment directory. Default: /var/lib/chatdome/venvs
 USAGE
 }
@@ -132,6 +134,7 @@ validate_paths() {
   require_absolute_path "CHATDOME_DATA_DIR" "$DATA_DIR"
   require_absolute_path "CHATDOME_LOG_DIR" "$LOG_DIR"
   require_absolute_path "CHATDOME_LOG_FILE" "$LOG_FILE"
+  require_absolute_path "CHATDOME_RUN_DIR" "$RUN_DIR"
   require_absolute_path "CHATDOME_VENV_ROOT" "$VENV_ROOT"
   require_absolute_path "CHATDOME_SERVICE_PATH" "$SERVICE_PATH"
   require_absolute_path "CHATDOME_COMMAND_PATH" "$MENU_LINK"
@@ -405,6 +408,9 @@ Environment=CHATDOME_CONFIG=$CONFIG_FILE
 Environment=CHATDOME_DATA_DIR=$DATA_DIR
 Environment=CHATDOME_LOG_DIR=$LOG_DIR
 Environment=CHATDOME_LOG_FILE=$LOG_FILE
+Environment=CHATDOME_RUN_DIR=$RUN_DIR
+RuntimeDirectory=chatdome
+RuntimeDirectoryMode=0755
 
 [Install]
 WantedBy=multi-user.target

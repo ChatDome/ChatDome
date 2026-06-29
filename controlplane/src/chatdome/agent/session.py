@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from chatdome.runtime_paths import data_dir, data_path
+from chatdome.runtime_paths import compression_log_path, data_dir, memory_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +257,9 @@ class AgentSession:
     def append_raw_log(self, text: str) -> None:
         """Append raw interaction text to persistent log file."""
         try:
-            with data_path(f"{self.chat_id}_raw.log").open("a", encoding="utf-8") as f:
+            path = compression_log_path(self.chat_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
                 f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
         except Exception as e:
             logger.error("Failed to write raw log: %s", e)
@@ -323,7 +325,7 @@ class AgentSession:
             self.messages = [self.messages[0], summarized_msg] + self.messages[cut_idx:]
             
             # Dump to memory vault
-            memory_file = data_path(f"{self.chat_id}_memory.json")
+            memory_file = memory_file_path(self.chat_id)
             # Merge if exists
             existing_summary = ""
             if memory_file.exists():
@@ -336,6 +338,7 @@ class AgentSession:
             
             new_summary = existing_summary + "\n\n[UPDATE]\n" + summary if existing_summary else summary
                 
+            memory_file.parent.mkdir(parents=True, exist_ok=True)
             with open(memory_file, "w", encoding="utf-8") as f:
                 json.dump({"summary": new_summary, "last_updated": time.time()}, f, ensure_ascii=False, indent=2)
                 
@@ -465,7 +468,7 @@ class SessionManager:
             engram_str = self.engram_store.build_engram_prompt()
             if engram_str:
                 memory_prompt += "\n\n" + engram_str
-        memory_file = self._chat_data_dir / f"{chat_id}_memory.json"
+        memory_file = memory_file_path(chat_id)
         if memory_file.exists():
             try:
                 with open(memory_file, "r", encoding="utf-8") as f:

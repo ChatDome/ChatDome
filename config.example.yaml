@@ -69,7 +69,7 @@ chatdome:
     max_output_chars: 4000
     # Debug/forensics only. When false, command stdout/stderr are not archived;
     # audit logs keep command metadata, byte counts, and output hashes only.
-    # When true, outputs are written under chat_data/command_outputs/ with
+    # When true, outputs are written under $CHATDOME_DATA_DIR/command_outputs/ with
     # retention/max-size limits. Obvious secret-reading commands are skipped.
     persist_command_outputs: false
     command_output_retention_days: 7
@@ -83,9 +83,9 @@ chatdome:
 
     # 告警推送目标（空 = 使用 telegram.allowed_chat_ids；如果两者都为空，则 Sentinel 只巡检/记录，不会主动推送到手机）
     # 运行时可在 Telegram 中用自然语言或 /sentinel_mute、/sentinel_resume 暂停/恢复推送；
-    # 静默状态保存在 chat_data/sentinel_alert_push_state.json，不影响巡检和历史记录。
+    # 静默状态保存在 $CHATDOME_DATA_DIR/sentinel/push_state.json，不影响巡检和历史记录。
     alert_chat_ids: []
-    alert_retention_days: 30             # sentinel_alerts.jsonl 按天保留窗口
+    alert_retention_days: 30             # sentinel/alerts.jsonl 按天保留窗口
 
     # 推/拉分离 — 推送策略
     push_min_severity: 7                   # 数值 ≥ 7 (high) 才主动推送 Telegram

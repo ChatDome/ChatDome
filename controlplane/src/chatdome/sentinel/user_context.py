@@ -13,7 +13,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from chatdome.runtime_paths import data_path
+from chatdome.runtime_paths import sentinel_user_context_path
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class UserContextRecord:
 
 class UserContextLedger:
     """
-    Manages the `user_context.json` flat file database.
+    Manages the Sentinel user context flat file database.
 
     Provides high-speed `O(N)` exception checks for the Sentinel Scheduler.
     """
@@ -53,7 +53,7 @@ class UserContextLedger:
         self.storage_path = (
             Path(storage_path)
             if storage_path is not None
-            else data_path("user_context.json")
+            else sentinel_user_context_path()
         )
         self.records: list[UserContextRecord] = []
         self._load_from_disk()

@@ -32,8 +32,6 @@ Thumbs.db
 chat_data/
 controlplane/src/chat_data/
 
-# Internal docs (kept in separate private repo)
-docs/
 
 __pycache__/
 *.py[cod]

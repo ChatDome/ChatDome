@@ -16,16 +16,19 @@ CONFIG_FILE="${CHATDOME_CONFIG:-/etc/chatdome/config.yaml}"
 CONFIG_DIR="$(dirname "$CONFIG_FILE")"
 DATA_DIR="${CHATDOME_DATA_DIR:-/var/lib/chatdome}"
 VENV_ROOT="${CHATDOME_VENV_ROOT:-$DATA_DIR/venvs}"
+UPDATE_STATE_DIR="$DATA_DIR/update"
 LOG_DIR="${CHATDOME_LOG_DIR:-/var/log/chatdome}"
 LOG_FILE="${CHATDOME_LOG_FILE:-$LOG_DIR/chatdome.log}"
+RUN_DIR="${CHATDOME_RUN_DIR:-/run/chatdome}"
 UPDATE_LOCK_FILE="${CHATDOME_UPDATE_LOCK_FILE:-/run/lock/chatdome-update.lock}"
-UPDATE_RUNTIME_LOG="${CHATDOME_UPDATE_RUNTIME_LOG:-$DATA_DIR/update-runtime-check.log}"
+UPDATE_RUNTIME_LOG="${CHATDOME_UPDATE_RUNTIME_LOG:-$LOG_DIR/update-runtime-check.log}"
 EXPECTED_ORIGIN_URL="${CHATDOME_ORIGIN_URL:-https://github.com/ChatDome/ChatDome.git}"
 
 export CHATDOME_CONFIG="$CONFIG_FILE"
 export CHATDOME_DATA_DIR="$DATA_DIR"
 export CHATDOME_LOG_DIR="$LOG_DIR"
 export CHATDOME_LOG_FILE="$LOG_FILE"
+export CHATDOME_RUN_DIR="$RUN_DIR"
 
 if command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="python3"
@@ -534,7 +537,7 @@ run_as_root() {
 }
 
 prepare_runtime_layout() {
-  run_as_root install -d -m 0750 "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" || return 1
+  run_as_root install -d -m 0750 "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "$UPDATE_STATE_DIR" || return 1
 
   if [[ ! -f "$CONFIG_FILE" ]]; then
     if [[ -f "$ROOT_DIR/config.yaml" ]]; then
@@ -569,16 +572,16 @@ cleanup_legacy_runtime_layout() {
 backup_systemd_unit() {
   systemctl_available || return 0
   if [[ -f "$SERVICE_PATH" ]]; then
-    run_as_root cp -p "$SERVICE_PATH" "$DATA_DIR/chatdome.service.rollback" || return 1
+    run_as_root cp -p "$SERVICE_PATH" "$UPDATE_STATE_DIR/chatdome.service.rollback" || return 1
   else
-    run_as_root rm -f "$DATA_DIR/chatdome.service.rollback" || return 1
+    run_as_root rm -f "$UPDATE_STATE_DIR/chatdome.service.rollback" || return 1
   fi
 }
 
 install_systemd_unit() {
   systemctl_available || return 0
   local runtime_python="${1:-$ROOT_DIR/venv/bin/python}"
-  local candidate="$DATA_DIR/chatdome.service.update"
+  local candidate="$UPDATE_STATE_DIR/chatdome.service.update"
   cat >"$candidate" <<UNIT
 [Unit]
 Description=ChatDome AI Host Security Assistant
@@ -598,6 +601,9 @@ Environment=CHATDOME_CONFIG=$CONFIG_FILE
 Environment=CHATDOME_DATA_DIR=$DATA_DIR
 Environment=CHATDOME_LOG_DIR=$LOG_DIR
 Environment=CHATDOME_LOG_FILE=$LOG_FILE
+Environment=CHATDOME_RUN_DIR=$RUN_DIR
+RuntimeDirectory=chatdome
+RuntimeDirectoryMode=0755
 
 [Install]
 WantedBy=multi-user.target
@@ -609,7 +615,7 @@ UNIT
 
 restore_systemd_unit() {
   systemctl_available || return 0
-  local backup="$DATA_DIR/chatdome.service.rollback"
+  local backup="$UPDATE_STATE_DIR/chatdome.service.rollback"
   if [[ -f "$backup" ]]; then
     run_as_root install -m 0644 "$backup" "$SERVICE_PATH" || return 1
   else
@@ -624,7 +630,7 @@ wait_for_rollback_health() {
     if systemctl_available; then
       systemctl is-active --quiet "$SERVICE_NAME" && return 0
     else
-      local pid_file="$ROOT_DIR/chat_data/chatdome.pid"
+      local pid_file="$RUN_DIR/chatdome.pid"
       local pid=""
       [[ -f "$pid_file" ]] && pid="$(cat "$pid_file" 2>/dev/null || true)"
       [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1 && return 0
@@ -805,7 +811,7 @@ update_chatdome() (
     return 1
   fi
 
-  printf '%s\n' "$old_commit" >"$DATA_DIR/previous_commit"
+  printf '%s\n' "$old_commit" >"$UPDATE_STATE_DIR/previous_commit"
   if ! backup_systemd_unit; then
     echo "❌ Update failed: cannot back up the systemd unit."
     return 1
@@ -920,7 +926,7 @@ update_chatdome() (
   if ! cleanup_legacy_runtime_layout; then
     echo "⚠️ Update completed. Remove $ROOT_DIR/config.yaml and $ROOT_DIR/chat_data after verifying backups."
   fi
-  run_as_root rm -f "$DATA_DIR/chatdome.service.rollback" || true
+  run_as_root rm -f "$UPDATE_STATE_DIR/chatdome.service.rollback" || true
   if [[ -d "$legacy_rollback" && ! -L "$legacy_rollback" ]]; then
     run_as_root rm -rf "$legacy_rollback" || true
   fi

@@ -6,13 +6,15 @@ CONFIG_FILE="${CHATDOME_CONFIG:-/etc/chatdome/config.yaml}"
 DATA_DIR="${CHATDOME_DATA_DIR:-/var/lib/chatdome}"
 LOG_DIR="${CHATDOME_LOG_DIR:-/var/log/chatdome}"
 LOG_FILE="${CHATDOME_LOG_FILE:-$LOG_DIR/chatdome.log}"
-PID_FILE="$DATA_DIR/chatdome.pid"
+RUN_DIR="${CHATDOME_RUN_DIR:-$DATA_DIR/run}"
+PID_FILE="$RUN_DIR/chatdome.pid"
 ACTION="${1:-start}"
 
 export CHATDOME_CONFIG="$CONFIG_FILE"
 export CHATDOME_DATA_DIR="$DATA_DIR"
 export CHATDOME_LOG_DIR="$LOG_DIR"
 export CHATDOME_LOG_FILE="$LOG_FILE"
+export CHATDOME_RUN_DIR="$RUN_DIR"
 
 if [[ -x "$ROOT_DIR/venv/bin/python" ]]; then
   SERVER_CMD=("$ROOT_DIR/venv/bin/python" -m chatdome.main)
@@ -31,7 +33,7 @@ is_running() {
 }
 
 start_service() {
-  mkdir -p "$DATA_DIR" "$LOG_DIR"
+  mkdir -p "$DATA_DIR" "$LOG_DIR" "$RUN_DIR"
   if is_running; then
     echo "ChatDome already running (pid=$(cat "$PID_FILE"))."
     return

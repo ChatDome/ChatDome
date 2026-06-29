@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Union
 
-from chatdome.runtime_paths import data_path
+from chatdome.runtime_paths import engram_store_path
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class EngramStore:
 
     def __init__(self, storage_path: Union[str, Path, None] = None):
         self.storage_path = (
-            Path(storage_path) if storage_path is not None else data_path("engram.json")
+            Path(storage_path) if storage_path is not None else engram_store_path()
         )
         self._engrams: Dict[str, Engram] = {}
         self._load()

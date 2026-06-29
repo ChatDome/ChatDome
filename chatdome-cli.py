@@ -22,10 +22,14 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.environ.get("CHATDOME_CONFIG", str(ROOT / "config.yaml"))).expanduser()
 EXAMPLE_CONFIG_PATH = ROOT / "config.example.yaml"
 DATA_DIR = Path(os.environ.get("CHATDOME_DATA_DIR", str(ROOT / "chat_data"))).expanduser()
-PID_PATH = DATA_DIR / "chatdome.pid"
-READY_PATH = DATA_DIR / "ready.json"
-RELOAD_REQUEST_PATH = DATA_DIR / "reload_request.json"
-RELOAD_STATUS_PATH = DATA_DIR / "reload_status.json"
+RUN_DIR = Path(os.environ.get("CHATDOME_RUN_DIR", str(DATA_DIR / "run"))).expanduser()
+PID_PATH = RUN_DIR / "chatdome.pid"
+READY_PATH = RUN_DIR / "ready.json"
+RELOAD_REQUEST_PATH = RUN_DIR / "reload_request.json"
+RELOAD_STATUS_PATH = RUN_DIR / "reload_status.json"
+ENV_PROFILE_PATH = DATA_DIR / "environment" / "profile.md"
+LEGACY_ENV_PROFILE_PATH = DATA_DIR / "environment_profile.md"
+LLM_PROFILE_LOCK_PATH = RUN_DIR / "llm-profile.lock"
 SUPPORTED_RELOAD_DOMAINS = {"llm", "sentinel", "agent", "all"}
 CONTROLPLANE_SRC = ROOT / "controlplane" / "src"
 TOKEN_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -236,6 +240,7 @@ def show_status(args: argparse.Namespace) -> None:
     print(f"- root: {ROOT}")
     print(f"- config: {CONFIG_PATH}")
     print(f"- data: {DATA_DIR}")
+    print(f"- run: {RUN_DIR}")
     print(f"- running: {'yes' if running else 'no'}")
     print(f"- pid: {pid or '(none)'}")
     print(f"- active LLM: {active_profile}")
@@ -248,7 +253,7 @@ def show_status(args: argparse.Namespace) -> None:
 
 def show_env_summary(args: argparse.Namespace) -> None:
     del args
-    path = DATA_DIR / "environment_profile.md"
+    path = ENV_PROFILE_PATH if ENV_PROFILE_PATH.exists() or not LEGACY_ENV_PROFILE_PATH.exists() else LEGACY_ENV_PROFILE_PATH
     if not path.exists():
         print(f"environment profile not found: {path}")
         return
@@ -279,7 +284,7 @@ def _profile_admin_service(source: str) -> LLMProfileAdminService:
         _request_reload(["llm"], f"{source}:{action}")
 
     return LLMProfileAdminService(
-        ProfileConfigStore(CONFIG_PATH, DATA_DIR / "llm-profile.lock"),
+        ProfileConfigStore(CONFIG_PATH, LLM_PROFILE_LOCK_PATH),
         runtime_apply=apply_runtime,
         audit_recorder=_record_profile_audit,
     )
