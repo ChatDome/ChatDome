@@ -104,20 +104,20 @@ Choose one of the following installation methods:
 
 #### Method A: One-Line Install (Recommended)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ChatDome/ChatDome/main/install.sh \
+cd / && curl -fsSL https://raw.githubusercontent.com/ChatDome/ChatDome/main/install.sh \
   -o /tmp/chatdome-install.sh && sudo bash /tmp/chatdome-install.sh
 ```
 
 Or with wget:
 ```bash
-wget -qO /tmp/chatdome-install.sh \
+cd / && wget -qO /tmp/chatdome-install.sh \
   https://raw.githubusercontent.com/ChatDome/ChatDome/main/install.sh && \
   sudo bash /tmp/chatdome-install.sh
 ```
 
 Preview before running:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ChatDome/ChatDome/main/install.sh \
+cd / && curl -fsSL https://raw.githubusercontent.com/ChatDome/ChatDome/main/install.sh \
   -o /tmp/chatdome-install.sh && bash /tmp/chatdome-install.sh --dry-run
 ```
 

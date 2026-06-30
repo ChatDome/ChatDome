@@ -48,7 +48,7 @@ Usage:
   bash install.sh --help
 
 Remote install:
-  curl -fsSL https://raw.githubusercontent.com/ChatDome/ChatDome/main/install.sh -o /tmp/chatdome-install.sh && sudo bash /tmp/chatdome-install.sh
+  cd / && curl -fsSL https://raw.githubusercontent.com/ChatDome/ChatDome/main/install.sh -o /tmp/chatdome-install.sh && sudo bash /tmp/chatdome-install.sh
 
 Options:
   --dry-run    Print planned actions.
@@ -91,20 +91,34 @@ parse_args() {
 }
 
 script_dir() {
-  local source="${BASH_SOURCE[0]:-$0}"
-  if [[ -f "$source" ]]; then
-    cd -P "$(dirname "$source")" >/dev/null 2>&1
-    pwd
-    return
+  local source="${BASH_SOURCE[0]:-$0}" dir base
+
+  if [[ "$source" == */* ]]; then
+    dir="${source%/*}"
+    base="${source##*/}"
+    [[ -n "$dir" ]] || dir="/"
+  else
+    dir="."
+    base="$source"
   fi
 
-  if [[ "$source" == */* && -f "$source" ]]; then
-    cd -P "$(dirname "$source")" >/dev/null 2>&1
-    pwd
+  if [[ -f "$dir/$base" ]]; then
+    (cd -P "$dir" >/dev/null 2>&1 && pwd) || printf '\n'
     return
   fi
 
   printf '\n'
+}
+
+enter_install_workdir() {
+  local mode="$1" root_dir="$2"
+
+  if [[ "$mode" == "local" ]]; then
+    cd "$root_dir" || fail "Cannot access install dir: $root_dir"
+    return
+  fi
+
+  cd / || fail "Cannot access /"
 }
 
 source_tree_complete() {
@@ -490,6 +504,7 @@ main() {
     mode="remote"
     root_dir="$REMOTE_INSTALL_DIR"
   fi
+  enter_install_workdir "$mode" "$root_dir"
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     dry_run_summary "$mode" "$root_dir"

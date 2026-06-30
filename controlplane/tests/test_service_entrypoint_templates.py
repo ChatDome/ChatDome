@@ -107,6 +107,13 @@ def test_installer_requires_full_source_tree_markers():
     assert '[[ -d "$dir/controlplane/src/chatdome" ]] || return 1' in content
     assert 'if [[ -n "$script_root" ]] && source_tree_complete "$script_root"; then' in content
 
+def test_installer_enters_valid_workdir_before_install_actions():
+    content = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
+    assert '(cd -P "$dir" >/dev/null 2>&1 && pwd)' in content
+    assert 'enter_install_workdir "$mode" "$root_dir"' in content
+    assert 'cd / || fail "Cannot access /"' in content
+    assert 'cd / && curl -fsSL https://raw.githubusercontent.com/ChatDome/ChatDome/main/install.sh' in content
+
 def test_menu_level_ctrl_c_exits_process():
     content = (REPO_ROOT / "chatdome").read_text(encoding="utf-8")
     assert 'trap \'printf "\\n"; return 130\' INT' not in content
