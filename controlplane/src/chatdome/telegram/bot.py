@@ -226,9 +226,9 @@ class TelegramBot:
         return text.replace("\\", "\\\\").replace('"', '\\"')
 
     def _log_telegram_command(self, update: Update, command_name: str) -> None:
-        chat = update.effective_chat
-        user = update.effective_user
-        message = update.effective_message
+        chat = getattr(update, "effective_chat", None)
+        user = getattr(update, "effective_user", None)
+        message = getattr(update, "effective_message", None)
         command_text = getattr(message, "text", None) or f"/{command_name}"
         chat_id = getattr(chat, "id", "-") if chat is not None else "-"
         user_id = getattr(user, "id", "-") if user is not None else "-"
@@ -237,6 +237,18 @@ class TelegramBot:
             chat_id,
             user_id,
             self._log_value(command_text),
+        )
+
+    def _log_telegram_callback(self, update: Update, callback_data: str) -> None:
+        chat = getattr(update, "effective_chat", None)
+        user = getattr(update, "effective_user", None)
+        chat_id = getattr(chat, "id", "-") if chat is not None else "-"
+        user_id = getattr(user, "id", "-") if user is not None else "-"
+        logger.info(
+            '[Telegram callback received] chat_id=%s user_id=%s callback_data="%s"',
+            chat_id,
+            user_id,
+            self._log_value(callback_data),
         )
 
     def _command_handler(self, command_name: str, callback: Any) -> CommandHandler:
@@ -1460,6 +1472,7 @@ class TelegramBot:
 
             chat_id = chat.id
             callback_data = query.data or ""
+            self._log_telegram_callback(update, callback_data)
 
             if callback_data.startswith("llm_admin:"):
                 await self._handle_llm_admin_callback(update, context, callback_data)

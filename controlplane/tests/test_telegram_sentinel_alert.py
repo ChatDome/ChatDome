@@ -126,10 +126,17 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         update = SimpleNamespace(
             callback_query=query,
             effective_chat=SimpleNamespace(id=123),
+            effective_user=SimpleNamespace(id=456),
         )
 
-        await bot._handle_callback_query(update, None)
+        with self.assertLogs("chatdome.telegram.bot", level="INFO") as captured:
+            await bot._handle_callback_query(update, None)
 
+        log_line = captured.output[0]
+        self.assertIn("[Telegram callback received]", log_line)
+        self.assertIn("chat_id=123", log_line)
+        self.assertIn("user_id=456", log_line)
+        self.assertIn('callback_data="sentinel_alert_detail:token"', log_line)
         bot._handle_sentinel_alert_detail.assert_awaited_once_with(query, 123, "token")
 
 
