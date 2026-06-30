@@ -198,16 +198,20 @@ ChatDome uses one runtime configuration file. Server installations use `/etc/cha
 
 The default installation comes with no API keys or pre-configured profiles. The easiest way to get started is `./chatdome` → `AI model management` → `Add Codex OAuth LLM`. ChatDome starts the OAuth Device Code login and writes the profile only after the token is saved.
 
-| Path | Required | Description |
-|------|----------|-------------|
-| `chatdome.telegram.bot_token` | ✅ | Telegram Bot token |
-| `chatdome.telegram.allowed_chat_ids` | ❌ | Allowed Chat IDs; empty list means no chat restriction |
-| `chatdome.telegram.admin_chat_ids` | ❌ | Private-chat LLM administrators; empty list uses `allowed_chat_ids` |
-| `chatdome.telegram.proxy_url` | ❌ | Telegram Bot API proxy URL |
-| `chatdome.ai_profiles.<name>.api_key` | Profile-dependent | OpenAI-compatible profile API key, stored directly in local `config.yaml` |
-| `chatdome.sentinel.enabled` | ❌ | Enable 7x24 Sentinel proactive monitoring |
-| `chatdome.agent.allow_generated_commands` | ❌ | Allow AI-generated commands |
-| `chatdome.agent.allow_unrestricted_commands` | ❌ | Enable unrestricted command mode |
+Defaults below come from `config.example.yaml`; if copied unchanged, those values become the runtime configuration.
+
+| Path | Requirement | Default (template) | Description |
+|------|-------------|--------------------|-------------|
+| `chatdome.telegram.bot_token` | Required | `""`; set before startup | Telegram Bot token |
+| `chatdome.telegram.allowed_chat_ids` | Optional | `[]`; no general chat restriction | Allowed Chat IDs |
+| `chatdome.telegram.admin_chat_ids` | Optional | `[]`; uses `allowed_chat_ids` | Private-chat LLM administrators; remote LLM management is disabled when both lists are empty |
+| `chatdome.telegram.proxy_url` | Optional | `""`; no proxy | Telegram Bot API proxy URL |
+| `chatdome.active_ai_profile` | Required after LLM setup | `""`; no profile selected | Active LLM profile name |
+| `chatdome.ai_profiles` | Required after LLM setup | `{}`; no profiles configured | LLM profile map, usually written by the local menu |
+| `chatdome.ai_profiles.<name>.api_key` | Profile-dependent | `""`; OpenAI-compatible profile is not authenticated | OpenAI-compatible profile API key, stored directly in local `config.yaml` |
+| `chatdome.sentinel.enabled` | Optional | `true` | Enable 7x24 Sentinel proactive monitoring |
+| `chatdome.agent.allow_generated_commands` | Optional | `true` | Allow AI-generated commands |
+| `chatdome.agent.allow_unrestricted_commands` | Optional | `true` | Enable unrestricted command mode |
 
 > ⚠️ **Security**: Never commit `config.yaml` to version control. It contains secrets. Remote LLM management is available only in private chats listed in `admin_chat_ids`, or in `allowed_chat_ids` when `admin_chat_ids` is empty. API key messages are deleted before the profile is saved.
 

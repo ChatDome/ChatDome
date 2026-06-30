@@ -339,12 +339,26 @@ class TelegramBot:
 
         from chatdome.agent.audit import CommandAuditTracker
 
-        events = CommandAuditTracker.get_recent_events(chat_id=chat_id, limit=limit)
+        raw_events = CommandAuditTracker.get_recent_events(
+            chat_id=chat_id,
+            limit=max(100, limit * 10),
+            audit_source="user",
+        )
+        direct_command_events = {"security_check_executed", "security_check_invalid"}
+        events = []
+        for event in raw_events:
+            event_type = str(event.get("event_type", ""))
+            if not event_type.startswith("command_") and event_type not in direct_command_events:
+                continue
+            events.append(event)
+            if len(events) >= limit:
+                break
+
         if not events:
-            await update.message.reply_text("No command audit events yet.")
+            await update.message.reply_text("No user command audit events yet.")
             return
 
-        lines = [f"Command audit events (latest {len(events)}):"]
+        lines = [f"User command audit events (latest {len(events)}):"]
         for event in events:
             ts = str(event.get("timestamp_iso", "unknown"))
             event_type = str(event.get("event_type", "unknown"))

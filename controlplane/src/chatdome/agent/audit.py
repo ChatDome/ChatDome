@@ -21,7 +21,10 @@ logger = logging.getLogger(__name__)
 
 
 AUDIT_DIR = data_path("audit")
+USER_AUDIT_SOURCE = "user"
+SENTINEL_AUDIT_SOURCE = "sentinel"
 AUDIT_FILE_PREFIX = "audit-"
+SENTINEL_COMMAND_AUDIT_FILE_PREFIX = "sentinel-commands-"
 AUDIT_FILE_SUFFIX = ".jsonl"
 GENESIS_HASH = "0" * 64
 DEFAULT_RETENTION_DAYS = 30
@@ -49,11 +52,13 @@ class CommandAuditTracker:
     ) -> None:
         """Append one audit event."""
         now = datetime.now(timezone.utc)
+        audit_source = cls._normalize_audit_source(fields.pop("audit_source", None))
         payload: dict[str, Any] = {
             "timestamp": int(now.timestamp()),
             "timestamp_iso": now.isoformat().replace("+00:00", "Z"),
             "event_type": str(event_type),
             "chat_id": int(chat_id),
+            "audit_source": audit_source,
         }
         payload.update(cls._sanitize(fields))
 
@@ -64,7 +69,12 @@ class CommandAuditTracker:
             logger.error("Failed to write command audit event: %s", e)
 
     @classmethod
-    def get_recent_events(cls, chat_id: int | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    def get_recent_events(
+        cls,
+        chat_id: int | None = None,
+        limit: int = 20,
+        audit_source: str | None = USER_AUDIT_SOURCE,
+    ) -> list[dict[str, Any]]:
         """Read recent audit events, newest first."""
         if limit <= 0:
             return []
@@ -73,12 +83,7 @@ class CommandAuditTracker:
             return []
 
         events: list[dict[str, Any]] = []
-        paths = sorted(
-            AUDIT_DIR.glob(f"{AUDIT_FILE_PREFIX}*{AUDIT_FILE_SUFFIX}"),
-            reverse=True,
-        )
-
-        for path in paths:
+        for path in cls._iter_audit_paths(audit_source):
             try:
                 lines = path.read_text(encoding="utf-8").splitlines()
             except OSError:
@@ -97,10 +102,9 @@ class CommandAuditTracker:
                     continue
 
                 events.append(record)
-                if len(events) >= limit:
-                    return events
 
-        return events
+        events.sort(key=cls._event_timestamp, reverse=True)
+        return events[:limit]
 
     @classmethod
     def verify_file(cls, path: Path) -> tuple[bool, str]:
@@ -153,16 +157,17 @@ class CommandAuditTracker:
         if not AUDIT_DIR.exists():
             return 0
 
-        for path in AUDIT_DIR.glob(f"{AUDIT_FILE_PREFIX}*{AUDIT_FILE_SUFFIX}"):
-            file_date = cls._extract_file_date(path.name)
-            if file_date is None:
-                continue
-            if file_date < oldest_keep_date:
-                try:
-                    path.unlink()
-                    deleted += 1
-                except OSError as e:
-                    logger.warning("Failed to delete old audit file %s: %s", path, e)
+        for prefix in cls._audit_file_prefixes():
+            for path in AUDIT_DIR.glob(f"{prefix}*{AUDIT_FILE_SUFFIX}"):
+                file_date = cls._extract_file_date(path.name)
+                if file_date is None:
+                    continue
+                if file_date < oldest_keep_date:
+                    try:
+                        path.unlink()
+                        deleted += 1
+                    except OSError as e:
+                        logger.warning("Failed to delete old audit file %s: %s", path, e)
 
         return deleted
 
@@ -174,7 +179,8 @@ class CommandAuditTracker:
     @classmethod
     def _append_record(cls, payload: dict[str, Any], now: datetime) -> None:
         AUDIT_DIR.mkdir(parents=True, exist_ok=True)
-        file_path = AUDIT_DIR / f"{AUDIT_FILE_PREFIX}{now.strftime('%Y-%m-%d')}{AUDIT_FILE_SUFFIX}"
+        file_prefix = cls._file_prefix_for_source(str(payload.get("audit_source", "")))
+        file_path = AUDIT_DIR / f"{file_prefix}{now.strftime('%Y-%m-%d')}{AUDIT_FILE_SUFFIX}"
 
         with cls._lock:
             prev_hash = cls._load_last_hash(file_path)
@@ -235,16 +241,55 @@ class CommandAuditTracker:
             if deleted:
                 logger.info("Command audit cleanup removed %d old file(s)", deleted)
 
+    @classmethod
+    def _iter_audit_paths(cls, audit_source: str | None) -> list[Path]:
+        prefixes = (
+            cls._audit_file_prefixes()
+            if audit_source is None
+            else [cls._file_prefix_for_source(audit_source)]
+        )
+        paths: list[Path] = []
+        for prefix in prefixes:
+            paths.extend(AUDIT_DIR.glob(f"{prefix}*{AUDIT_FILE_SUFFIX}"))
+        return sorted(paths, reverse=True)
+
     @staticmethod
-    def _extract_file_date(filename: str):
-        if not (filename.startswith(AUDIT_FILE_PREFIX) and filename.endswith(AUDIT_FILE_SUFFIX)):
+    def _audit_file_prefixes() -> list[str]:
+        return [AUDIT_FILE_PREFIX, SENTINEL_COMMAND_AUDIT_FILE_PREFIX]
+
+    @staticmethod
+    def _normalize_audit_source(value: Any) -> str:
+        source = str(value or USER_AUDIT_SOURCE).strip().lower()
+        if source == SENTINEL_AUDIT_SOURCE:
+            return SENTINEL_AUDIT_SOURCE
+        return USER_AUDIT_SOURCE
+
+    @classmethod
+    def _file_prefix_for_source(cls, audit_source: str | None) -> str:
+        if cls._normalize_audit_source(audit_source) == SENTINEL_AUDIT_SOURCE:
+            return SENTINEL_COMMAND_AUDIT_FILE_PREFIX
+        return AUDIT_FILE_PREFIX
+
+    @classmethod
+    def _extract_file_date(cls, filename: str):
+        if not filename.endswith(AUDIT_FILE_SUFFIX):
             return None
 
-        date_str = filename[len(AUDIT_FILE_PREFIX): -len(AUDIT_FILE_SUFFIX)]
+        for prefix in cls._audit_file_prefixes():
+            if filename.startswith(prefix):
+                date_str = filename[len(prefix): -len(AUDIT_FILE_SUFFIX)]
+                try:
+                    return datetime.strptime(date_str, "%Y-%m-%d").date()
+                except ValueError:
+                    return None
+        return None
+
+    @staticmethod
+    def _event_timestamp(event: dict[str, Any]) -> int:
         try:
-            return datetime.strptime(date_str, "%Y-%m-%d").date()
-        except ValueError:
-            return None
+            return int(event.get("timestamp", 0))
+        except (TypeError, ValueError):
+            return 0
 
     @classmethod
     def _sanitize(cls, value: Any) -> Any:

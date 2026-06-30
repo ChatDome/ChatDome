@@ -628,6 +628,13 @@ class PendingApprovalFollowupTests(unittest.TestCase):
                     command="whoami",
                     reason="other chat",
                 )
+                CommandAuditTracker.record_event(
+                    "security_check_executed",
+                    chat_id=123,
+                    audit_source="sentinel",
+                    command="uptime",
+                    reason="security_check:sentinel_uptime",
+                )
 
                 dispatcher = ToolDispatcher(SimpleNamespace())
                 result = asyncio.run(
@@ -644,6 +651,7 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         self.assertIn("last -n 5", result)
         self.assertNotIn("history | tail -5", result)
         self.assertNotIn("whoami", result)
+        self.assertNotIn("uptime", result)
 
     def test_manual_index_and_tools_separate_chatdome_and_ssh_sources(self):
         prompt = build_system_prompt()

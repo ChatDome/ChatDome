@@ -33,6 +33,11 @@ class log_origin:
             self._token = None
 
 
+def current_log_origin() -> str:
+    """Return the current execution origin tag."""
+    return _log_origin.get()
+
+
 def _is_sentinel_record(record: logging.LogRecord) -> bool:
     return (
         getattr(record, "chatdome_origin", "") == "sentinel"

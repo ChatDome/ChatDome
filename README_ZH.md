@@ -202,16 +202,20 @@ ChatDome 采用单文件运行配置。服务器安装使用 `/etc/chatdome/conf
 
 默认初始安装时不包含任何 API Key 或预设档案。最简单的起步方式是运行 `./chatdome` → `AI model management` → `Add Codex OAuth LLM`；ChatDome 会触发 OAuth Device Code 登录，并在 token 保存成功后写入 profile。
 
-| 配置路径 | 必需 | 说明 |
-|----------|------|------|
-| `chatdome.telegram.bot_token` | ✅ | Telegram Bot Token |
-| `chatdome.telegram.allowed_chat_ids` | ❌ | 允许访问的 Chat ID 列表；空列表表示不限制 |
-| `chatdome.telegram.admin_chat_ids` | ❌ | 允许管理 LLM profile 的私聊管理员；空列表使用 `allowed_chat_ids` |
-| `chatdome.telegram.proxy_url` | ❌ | Telegram Bot API 代理地址 |
-| `chatdome.ai_profiles.<name>.api_key` | 取决于 profile | OpenAI-compatible profile 的 API Key，直接写入本地 `config.yaml` |
-| `chatdome.sentinel.enabled` | ❌ | 开启 7×24 Sentinel 哨兵主动监控模式 |
-| `chatdome.agent.allow_generated_commands` | ❌ | 允许 AI 自主生成命令 |
-| `chatdome.agent.allow_unrestricted_commands` | ❌ | 开启 unrestricted 模式 |
+默认值按 `config.example.yaml` 列出；复制模板后不修改时，对应值会直接作为运行配置生效。
+
+| 配置路径 | 配置要求 | 默认值（模板） | 说明 |
+|----------|----------|----------------|------|
+| `chatdome.telegram.bot_token` | 必填 | `""`；启动前填写 | Telegram Bot Token |
+| `chatdome.telegram.allowed_chat_ids` | 可选 | `[]`；不限制普通访问 | 允许访问的 Chat ID 列表 |
+| `chatdome.telegram.admin_chat_ids` | 可选 | `[]`；使用 `allowed_chat_ids` | 允许管理 LLM profile 的私聊管理员；两者均为空时禁用远程 LLM 管理 |
+| `chatdome.telegram.proxy_url` | 可选 | `""`；不使用代理 | Telegram Bot API 代理地址 |
+| `chatdome.active_ai_profile` | 配置 LLM 后必填 | `""`；未选择 profile | 当前启用的 LLM profile 名称 |
+| `chatdome.ai_profiles` | 配置 LLM 后必填 | `{}`；未配置 profile | LLM profile 集合，可通过本地菜单写入 |
+| `chatdome.ai_profiles.<name>.api_key` | 取决于 profile | `""`；OpenAI-compatible profile 未认证 | OpenAI-compatible profile 的 API Key，直接写入本地 `config.yaml` |
+| `chatdome.sentinel.enabled` | 可选 | `true` | 开启 7×24 Sentinel 哨兵主动监控模式 |
+| `chatdome.agent.allow_generated_commands` | 可选 | `true` | 允许 AI 自主生成命令 |
+| `chatdome.agent.allow_unrestricted_commands` | 可选 | `true` | 开启 unrestricted 模式 |
 
 > ⚠️ **安全提醒**：切勿将 `config.yaml` 提交到版本控制。远程 LLM 管理仅允许 `admin_chat_ids` 中的私聊管理员使用；`admin_chat_ids` 为空时使用 `allowed_chat_ids`。API Key 消息会在保存配置前删除。
 

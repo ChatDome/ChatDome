@@ -26,6 +26,7 @@ from typing import Any
 from uuid import uuid4
 
 from chatdome.agent.audit import CommandAuditTracker
+from chatdome.logger import current_log_origin
 from chatdome.sentinel.pack_loader import PackLoader
 from chatdome.executor.validator import validate_command
 
@@ -231,7 +232,9 @@ class CommandSandbox:
         block_reason: str = "",
         extra_fields: dict[str, Any] | None = None,
     ) -> None:
+        audit_source = "sentinel" if current_log_origin() == "sentinel" else "user"
         fields: dict[str, Any] = {
+            "audit_source": audit_source,
             "tool_call_id": tool_call_id,
             "command": command,
             "reason": reason,

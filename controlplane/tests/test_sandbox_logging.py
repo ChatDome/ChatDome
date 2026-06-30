@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from chatdome.agent.audit import CommandAuditTracker
 from chatdome.executor.sandbox import CommandResult, CommandSandbox
+from chatdome.logger import log_origin
 
 
 class SandboxLoggingTests(unittest.TestCase):
@@ -106,6 +108,57 @@ class SandboxLoggingTests(unittest.TestCase):
                     for record in audit_records
                 )
             )
+
+    def test_sentinel_command_audit_uses_dedicated_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audit_dir = Path(tmp) / "audit"
+            sandbox = CommandSandbox(allow_unrestricted_commands=True)
+
+            with patch("chatdome.agent.audit.AUDIT_DIR", audit_dir):
+                sandbox._record_execution_audit(
+                    event_type="command_executed",
+                    chat_id=123,
+                    tool_call_id="user-call",
+                    command="whoami",
+                    reason="user command",
+                    result=CommandResult(
+                        stdout="root\n",
+                        stderr="",
+                        return_code=0,
+                        command="whoami",
+                    ),
+                    execution_mode="unrestricted",
+                    duration_ms=10,
+                )
+                with log_origin("sentinel"):
+                    sandbox._record_execution_audit(
+                        event_type="security_check_executed",
+                        chat_id=0,
+                        tool_call_id="",
+                        command="uptime",
+                        reason="security_check:uptime",
+                        result=CommandResult(
+                            stdout="up\n",
+                            stderr="",
+                            return_code=0,
+                            command="uptime",
+                        ),
+                        execution_mode="pack",
+                        duration_ms=12,
+                    )
+
+                user_events = CommandAuditTracker.get_recent_events(limit=10)
+                sentinel_events = CommandAuditTracker.get_recent_events(
+                    limit=10,
+                    audit_source="sentinel",
+                )
+
+            self.assertEqual([event.get("command") for event in user_events], ["whoami"])
+            self.assertEqual([event.get("audit_source") for event in user_events], ["user"])
+            self.assertEqual([event.get("command") for event in sentinel_events], ["uptime"])
+            self.assertEqual([event.get("audit_source") for event in sentinel_events], ["sentinel"])
+            self.assertEqual(len(list(audit_dir.glob("audit-*.jsonl"))), 1)
+            self.assertEqual(len(list(audit_dir.glob("sentinel-commands-*.jsonl"))), 1)
 
 
 if __name__ == "__main__":

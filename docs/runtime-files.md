@@ -15,6 +15,7 @@ ChatDome 的运行文件分三类：日志、运行数据、运行状态。
 /var/lib/chatdome/memory/engram.json
 /var/lib/chatdome/compression/<chat_id>.log
 /var/lib/chatdome/audit/audit-YYYY-MM-DD.jsonl
+/var/lib/chatdome/audit/sentinel-commands-YYYY-MM-DD.jsonl
 /var/lib/chatdome/sentinel/alerts.jsonl
 /var/lib/chatdome/sentinel/push_state.json
 /var/lib/chatdome/sentinel/user_context.json
@@ -58,7 +59,7 @@ ChatDome 的运行文件分三类：日志、运行数据、运行状态。
 | `/var/lib/chatdome/sessions/` | 当前可恢复的 Telegram 会话上下文和待审批状态 |
 | `/var/lib/chatdome/memory/` | 上下文压缩摘要和 Engram 长期记忆 |
 | `/var/lib/chatdome/compression/` | 上下文压缩事件记录 |
-| `/var/lib/chatdome/audit/` | 命令审批、执行、拒绝、配置变更等审计事件 |
+| `/var/lib/chatdome/audit/` | 用户命令审批和敏感操作审计；Sentinel 巡检命令写入独立 `sentinel-commands-*` 文件 |
 | `/var/lib/chatdome/sentinel/` | Sentinel 告警历史、推送状态和用户确认的例外上下文 |
 | `/var/lib/chatdome/usage/` | LLM token 用量统计 |
 | `/var/lib/chatdome/command_outputs/` | 可选命令 stdout/stderr 归档 |
