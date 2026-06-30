@@ -202,14 +202,14 @@ The default installation comes with no API keys or pre-configured profiles. The 
 |------|----------|-------------|
 | `chatdome.telegram.bot_token` | ✅ | Telegram Bot token |
 | `chatdome.telegram.allowed_chat_ids` | ❌ | Allowed Chat IDs; empty list means no chat restriction |
-| `chatdome.telegram.admin_chat_ids` | Required for remote LLM management | Private-chat administrators allowed to add, delete, and switch LLM profiles; IDs must also be allowed |
+| `chatdome.telegram.admin_chat_ids` | ❌ | Private-chat LLM administrators; empty list uses `allowed_chat_ids` |
 | `chatdome.telegram.proxy_url` | ❌ | Telegram Bot API proxy URL |
 | `chatdome.ai_profiles.<name>.api_key` | Profile-dependent | OpenAI-compatible profile API key, stored directly in local `config.yaml` |
 | `chatdome.sentinel.enabled` | ❌ | Enable 7x24 Sentinel proactive monitoring |
 | `chatdome.agent.allow_generated_commands` | ❌ | Allow AI-generated commands |
 | `chatdome.agent.allow_unrestricted_commands` | ❌ | Enable unrestricted command mode |
 
-> ⚠️ **Security**: Never commit `config.yaml` to version control. It contains secrets. Remote LLM management is available only in private chats listed in `admin_chat_ids`. API key messages are deleted before the profile is saved.
+> ⚠️ **Security**: Never commit `config.yaml` to version control. It contains secrets. Remote LLM management is available only in private chats listed in `admin_chat_ids`, or in `allowed_chat_ids` when `admin_chat_ids` is empty. API key messages are deleted before the profile is saved.
 
 ### 🎛️ Core Capability Switches (Advanced)
 
@@ -234,6 +234,7 @@ chatdome:
   telegram:
     bot_token: "123456:ABC..."
     allowed_chat_ids: [123456789]
+    admin_chat_ids: []
     proxy_url: ""
     max_message_length: 4000
 

@@ -207,6 +207,26 @@ class ChatDomeCLITests(unittest.TestCase):
 
         self.assertEqual(token_file, "~/.chatdome/codex-auth/codex-old.json")
 
+    def test_set_admin_chat_ids_writes_telegram_config(self):
+        with patch("builtins.print") as output:
+            self.cli.set_admin_chat_ids(SimpleNamespace(chat_ids="1, 2"))
+            output.assert_called_once_with(
+                "admin_chat_ids updated. Restart ChatDome for this change to take effect."
+            )
+
+        data = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["chatdome"]["telegram"]["admin_chat_ids"], [1, 2])
+
+    def test_telegram_status_shows_effective_llm_admin_chat_ids(self):
+        with patch("builtins.print"):
+            self.cli.set_chat_ids(SimpleNamespace(chat_ids="123"))
+
+        with patch("builtins.print") as output:
+            self.cli.telegram_status(SimpleNamespace())
+
+        output.assert_any_call("- allowed chat ids: [123]")
+        output.assert_any_call("- LLM admin chat ids: [123]")
+
     def test_health_check_requires_matching_ready_process(self):
         self.pid_path.parent.mkdir(parents=True, exist_ok=True)
         self.pid_path.write_text("1234\n", encoding="utf-8")

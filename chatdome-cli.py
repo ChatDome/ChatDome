@@ -127,6 +127,14 @@ def _parse_chat_ids(raw: str) -> list[int]:
     return values
 
 
+def _llm_admin_chat_ids_display(telegram: dict[str, Any]) -> list[int] | str:
+    admin_chat_ids = telegram.get("admin_chat_ids") or []
+    if admin_chat_ids:
+        return admin_chat_ids
+    allowed_chat_ids = telegram.get("allowed_chat_ids") or []
+    return allowed_chat_ids or "(none)"
+
+
 def _validate_profile_name(profile: str) -> str:
     try:
         return validate_profile_name(profile)
@@ -249,6 +257,7 @@ def show_status(args: argparse.Namespace) -> None:
     print(f"- unrestricted commands: {agent.get('allow_unrestricted_commands', True)}")
     print(f"- Telegram token: {_mask_secret(telegram.get('bot_token', ''))}")
     print(f"- allowed chats: {telegram.get('allowed_chat_ids') or '(all)'}")
+    print(f"- LLM admin chats: {_llm_admin_chat_ids_display(telegram)}")
 
 
 def show_env_summary(args: argparse.Namespace) -> None:
@@ -469,6 +478,7 @@ def telegram_status(args: argparse.Namespace) -> None:
     print("Telegram")
     print(f"- bot token: {_mask_secret(telegram.get('bot_token', ''))}")
     print(f"- allowed chat ids: {telegram.get('allowed_chat_ids') or '(all)'}")
+    print(f"- LLM admin chat ids: {_llm_admin_chat_ids_display(telegram)}")
     print(f"- proxy_url: {telegram.get('proxy_url') or '(none)'}")
 
 
@@ -486,6 +496,14 @@ def set_chat_ids(args: argparse.Namespace) -> None:
     telegram["allowed_chat_ids"] = _parse_chat_ids(args.chat_ids)
     _write_yaml(data)
     print("allowed_chat_ids updated. Restart ChatDome for this change to take effect.")
+
+
+def set_admin_chat_ids(args: argparse.Namespace) -> None:
+    data = _load_yaml()
+    telegram = _section(_chatdome_root(data), "telegram")
+    telegram["admin_chat_ids"] = _parse_chat_ids(args.chat_ids)
+    _write_yaml(data)
+    print("admin_chat_ids updated. Restart ChatDome for this change to take effect.")
 
 
 def set_telegram_proxy(args: argparse.Namespace) -> None:
@@ -753,6 +771,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("set-chat-ids")
     p.add_argument("chat_ids")
     p.set_defaults(func=set_chat_ids)
+    p = sub.add_parser("set-admin-chat-ids")
+    p.add_argument("chat_ids")
+    p.set_defaults(func=set_admin_chat_ids)
     p = sub.add_parser("set-telegram-proxy")
     p.add_argument("proxy_url")
     p.set_defaults(func=set_telegram_proxy)

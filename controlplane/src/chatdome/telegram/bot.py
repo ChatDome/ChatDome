@@ -1833,14 +1833,17 @@ class TelegramBot:
         chat = update.effective_chat
         if chat is None or not self._check_auth(update):
             return False
-        admin_ids = set(self.config.telegram.admin_chat_ids or [])
+        admin_ids = set(
+            self.config.telegram.admin_chat_ids
+            or self.config.telegram.allowed_chat_ids
+            or []
+        )
         if getattr(chat, "type", "") == "private" and chat.id in admin_ids:
             return True
         message = update.effective_message
         if message is not None:
             await message.reply_text(
-                "当前会话没有 LLM 管理权限。请在 config.yaml 的 "
-                "telegram.admin_chat_ids 中配置管理员 Chat ID。"
+                "当前会话没有 LLM 管理权限。请配置 telegram.admin_chat_ids 或 telegram.allowed_chat_ids。"
             )
         return False
 

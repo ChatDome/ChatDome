@@ -206,14 +206,14 @@ ChatDome 采用单文件运行配置。服务器安装使用 `/etc/chatdome/conf
 |----------|------|------|
 | `chatdome.telegram.bot_token` | ✅ | Telegram Bot Token |
 | `chatdome.telegram.allowed_chat_ids` | ❌ | 允许访问的 Chat ID 列表；空列表表示不限制 |
-| `chatdome.telegram.admin_chat_ids` | 远程管理 LLM 时必需 | 允许新增、删除和切换 LLM profile 的私聊管理员 Chat ID；同时必须在允许访问范围内 |
+| `chatdome.telegram.admin_chat_ids` | ❌ | 允许管理 LLM profile 的私聊管理员；空列表使用 `allowed_chat_ids` |
 | `chatdome.telegram.proxy_url` | ❌ | Telegram Bot API 代理地址 |
 | `chatdome.ai_profiles.<name>.api_key` | 取决于 profile | OpenAI-compatible profile 的 API Key，直接写入本地 `config.yaml` |
 | `chatdome.sentinel.enabled` | ❌ | 开启 7×24 Sentinel 哨兵主动监控模式 |
 | `chatdome.agent.allow_generated_commands` | ❌ | 允许 AI 自主生成命令 |
 | `chatdome.agent.allow_unrestricted_commands` | ❌ | 开启 unrestricted 模式 |
 
-> ⚠️ **安全提醒**：切勿将 `config.yaml` 提交到版本控制。远程 LLM 管理仅允许 `admin_chat_ids` 中的管理员私聊使用；API Key 消息会在保存配置前删除。
+> ⚠️ **安全提醒**：切勿将 `config.yaml` 提交到版本控制。远程 LLM 管理仅允许 `admin_chat_ids` 中的私聊管理员使用；`admin_chat_ids` 为空时使用 `allowed_chat_ids`。API Key 消息会在保存配置前删除。
 
 ### 🎛️ 核心能力控制开关（进阶）
 
@@ -238,6 +238,7 @@ chatdome:
   telegram:
     bot_token: "123456:ABC..."
     allowed_chat_ids: [123456789]
+    admin_chat_ids: []
     proxy_url: ""
     max_message_length: 4000
 

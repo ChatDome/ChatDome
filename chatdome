@@ -432,9 +432,10 @@ telegram_menu() {
     echo "1) Show Telegram config"
     echo "2) Set Bot Token"
     echo "3) Set allowed Chat IDs"
-    echo "4) Check Telegram API"
-    echo "5) Send test message"
-    echo "6) Set proxy URL"
+    echo "4) Set LLM admin Chat IDs"
+    echo "5) Check Telegram API"
+    echo "6) Send test message"
+    echo "7) Set proxy URL"
     echo "0) Back"
     echo
     read -r -p "Select: " choice
@@ -451,9 +452,14 @@ telegram_menu() {
         run_cli set-chat-ids "$chat_ids"
         pause
         ;;
-      4) run_cli check-telegram; pause ;;
-      5) run_cli send-test-message; pause ;;
-      6)
+      4)
+        read -r -p "Admin Chat IDs (comma-separated): " chat_ids
+        run_cli set-admin-chat-ids "$chat_ids"
+        pause
+        ;;
+      5) run_cli check-telegram; pause ;;
+      6) run_cli send-test-message; pause ;;
+      7)
         read -r -p "Proxy URL (blank to clear): " proxy_url
         run_cli set-telegram-proxy "$proxy_url"
         pause
