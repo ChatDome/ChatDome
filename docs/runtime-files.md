@@ -6,6 +6,7 @@ ChatDome 的运行文件分三类：日志、运行数据、运行状态。
 
 ```text
 /var/log/chatdome/chatdome.log
+/var/log/chatdome/sentinel.log
 /var/log/chatdome/install.log
 /var/log/chatdome/update-runtime-check.log
 
@@ -41,6 +42,15 @@ ChatDome 的运行文件分三类：日志、运行数据、运行状态。
 | 运行数据 | `/var/lib/chatdome/` | 服务重启后仍需要保留的数据 |
 | 运行状态 | `/run/chatdome/` | 只对当前进程有效，重启后可丢弃的状态文件 |
 
+## 日志文件
+
+| 文件 | 内容 |
+|---|---|
+| `/var/log/chatdome/chatdome.log` | 主运行日志：启动停止、配置加载、Telegram、Agent、LLM、审批、用户主动工具调用 |
+| `/var/log/chatdome/sentinel.log` | Sentinel 运行日志：Sentinel 调度、周期巡检、巡检命令执行、规则评估、告警推送异常 |
+| `/var/log/chatdome/install.log` | 安装脚本运行日志 |
+| `/var/log/chatdome/update-runtime-check.log` | 更新候选版本检查失败日志 |
+
 ## 运行数据子目录
 
 | 目录 | 内容 |
@@ -62,23 +72,15 @@ ChatDome 的运行文件分三类：日志、运行数据、运行状态。
 |---|---|---|
 | `CHATDOME_LOG_DIR` | `/var/log/chatdome` | 日志目录 |
 | `CHATDOME_LOG_FILE` | `/var/log/chatdome/chatdome.log` | 主运行日志 |
+| `CHATDOME_SENTINEL_LOG_FILE` | `/var/log/chatdome/sentinel.log` | Sentinel 运行日志 |
 | `CHATDOME_DATA_DIR` | `/var/lib/chatdome` | 运行数据目录 |
 | `CHATDOME_RUN_DIR` | `/run/chatdome` | 运行状态目录 |
 | `CHATDOME_UPDATE_RUNTIME_LOG` | `/var/log/chatdome/update-runtime-check.log` | 更新候选版本检查失败日志 |
 
 源码开发时未设置 `CHATDOME_RUN_DIR`，Python 代码默认使用当前工作目录下的运行状态目录；以仓库根目录为 `/path/to/ChatDome` 时，该目录为 `/path/to/ChatDome/chat_data/run/`。
 
-## 旧路径兼容
+## 路径策略
 
-启动后，ChatDome 会在新位置不存在时迁移以下旧文件：
+ChatDome 只使用本文定义的运行文件路径。启动流程不得迁移、读取或写入旧路径；代码和测试不得为旧路径保留自动兼容逻辑。
 
-| 旧位置 | 新位置 |
-|---|---|
-| `/var/lib/chatdome/<chat_id>_memory.json` | `/var/lib/chatdome/memory/<chat_id>.json` |
-| `/var/lib/chatdome/<chat_id>_raw.log` | `/var/lib/chatdome/compression/<chat_id>.log` |
-| `/var/lib/chatdome/engram.json` | `/var/lib/chatdome/memory/engram.json` |
-| `/var/lib/chatdome/sentinel_alerts.jsonl` | `/var/lib/chatdome/sentinel/alerts.jsonl` |
-| `/var/lib/chatdome/sentinel_alert_push_state.json` | `/var/lib/chatdome/sentinel/push_state.json` |
-| `/var/lib/chatdome/user_context.json` | `/var/lib/chatdome/sentinel/user_context.json` |
-| `/var/lib/chatdome/token_usage.jsonl` | `/var/lib/chatdome/usage/token_usage.jsonl` |
-| `/var/lib/chatdome/environment_profile.md` | `/var/lib/chatdome/environment/profile.md` |
+旧路径中的历史文件由部署方按需手动归档或删除。

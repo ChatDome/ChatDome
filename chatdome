@@ -19,6 +19,7 @@ VENV_ROOT="${CHATDOME_VENV_ROOT:-$DATA_DIR/venvs}"
 UPDATE_STATE_DIR="$DATA_DIR/update"
 LOG_DIR="${CHATDOME_LOG_DIR:-/var/log/chatdome}"
 LOG_FILE="${CHATDOME_LOG_FILE:-$LOG_DIR/chatdome.log}"
+SENTINEL_LOG_FILE="${CHATDOME_SENTINEL_LOG_FILE:-$LOG_DIR/sentinel.log}"
 RUN_DIR="${CHATDOME_RUN_DIR:-/run/chatdome}"
 UPDATE_LOCK_FILE="${CHATDOME_UPDATE_LOCK_FILE:-/run/lock/chatdome-update.lock}"
 UPDATE_RUNTIME_LOG="${CHATDOME_UPDATE_RUNTIME_LOG:-$LOG_DIR/update-runtime-check.log}"
@@ -28,6 +29,7 @@ export CHATDOME_CONFIG="$CONFIG_FILE"
 export CHATDOME_DATA_DIR="$DATA_DIR"
 export CHATDOME_LOG_DIR="$LOG_DIR"
 export CHATDOME_LOG_FILE="$LOG_FILE"
+export CHATDOME_SENTINEL_LOG_FILE="$SENTINEL_LOG_FILE"
 export CHATDOME_RUN_DIR="$RUN_DIR"
 
 if command -v python3 >/dev/null 2>&1; then
@@ -558,8 +560,8 @@ prepare_runtime_layout() {
       run_as_root rm -f "$DATA_DIR/chatdome.log" || return 1
     fi
   fi
-  run_as_root touch "$LOG_FILE" || return 1
-  run_as_root chmod 0640 "$LOG_FILE" || return 1
+  run_as_root touch "$LOG_FILE" "$SENTINEL_LOG_FILE" || return 1
+  run_as_root chmod 0640 "$LOG_FILE" "$SENTINEL_LOG_FILE" || return 1
 }
 
 cleanup_legacy_runtime_layout() {
@@ -601,6 +603,7 @@ Environment=CHATDOME_CONFIG=$CONFIG_FILE
 Environment=CHATDOME_DATA_DIR=$DATA_DIR
 Environment=CHATDOME_LOG_DIR=$LOG_DIR
 Environment=CHATDOME_LOG_FILE=$LOG_FILE
+Environment=CHATDOME_SENTINEL_LOG_FILE=$SENTINEL_LOG_FILE
 Environment=CHATDOME_RUN_DIR=$RUN_DIR
 RuntimeDirectory=chatdome
 RuntimeDirectoryMode=0755

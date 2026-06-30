@@ -5,12 +5,55 @@ Color is enabled only for interactive terminals by default, so redirected logs
 such as chatdome.log stay plain and readable in less, grep, and log collectors.
 """
 
+import contextvars
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import sys
 from typing import Optional
+
+_log_origin = contextvars.ContextVar("chatdome_log_origin", default="")
+
+
+class log_origin:
+    """Temporarily tag log records emitted in the current execution context."""
+
+    def __init__(self, origin: str):
+        self.origin = origin
+        self._token: Optional[contextvars.Token] = None
+
+    def __enter__(self) -> "log_origin":
+        self._token = _log_origin.set(self.origin)
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._token is not None:
+            _log_origin.reset(self._token)
+            self._token = None
+
+
+def _is_sentinel_record(record: logging.LogRecord) -> bool:
+    return (
+        getattr(record, "chatdome_origin", "") == "sentinel"
+        or record.name.startswith("chatdome.sentinel")
+    )
+
+
+class OriginFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.chatdome_origin = _log_origin.get()
+        return True
+
+
+class ExcludeSentinelFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _is_sentinel_record(record)
+
+
+class SentinelOnlyFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return _is_sentinel_record(record)
 
 
 class ChatDomeFormatter(logging.Formatter):
@@ -93,6 +136,18 @@ class ChatDomeFormatter(logging.Formatter):
         return formatted
 
 
+def _build_file_handler(log_file: str, formatter: logging.Formatter) -> RotatingFileHandler:
+    log_path = Path(log_file).expanduser()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    return file_handler
+
 def _stream_supports_color(stream: object) -> bool:
     color_mode = os.environ.get("CHATDOME_LOG_COLOR", "auto").strip().lower()
     if color_mode in {"always", "1", "true", "yes", "on"}:
@@ -124,26 +179,28 @@ def setup_logging(level: int = logging.INFO, use_colors: Optional[bool] = None) 
     # Remove existing handlers to avoid duplicates
     for h in root_logger.handlers[:]:
         root_logger.removeHandler(h)
+        h.close()
 
     root_logger.addHandler(handler)
 
+    file_formatter = ChatDomeFormatter(
+        datefmt="%Y-%m-%d %H:%M:%S",
+        use_colors=False,
+    )
+
     log_file = os.environ.get("CHATDOME_LOG_FILE", "").strip()
     if log_file:
-        log_path = Path(log_file).expanduser()
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(
-            log_path,
-            maxBytes=10 * 1024 * 1024,
-            backupCount=5,
-            encoding="utf-8",
-        )
-        file_handler.setFormatter(
-            ChatDomeFormatter(
-                datefmt="%Y-%m-%d %H:%M:%S",
-                use_colors=False,
-            )
-        )
+        file_handler = _build_file_handler(log_file, file_formatter)
+        file_handler.addFilter(OriginFilter())
+        file_handler.addFilter(ExcludeSentinelFilter())
         root_logger.addHandler(file_handler)
+
+    sentinel_log_file = os.environ.get("CHATDOME_SENTINEL_LOG_FILE", "").strip()
+    if sentinel_log_file:
+        sentinel_handler = _build_file_handler(sentinel_log_file, file_formatter)
+        sentinel_handler.addFilter(OriginFilter())
+        sentinel_handler.addFilter(SentinelOnlyFilter())
+        root_logger.addHandler(sentinel_handler)
 
     # Suppress noise from dependencies
     logging.getLogger("httpx").setLevel(logging.WARNING)
