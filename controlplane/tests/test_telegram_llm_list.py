@@ -73,6 +73,23 @@ class TelegramLLMListTests(unittest.TestCase):
         self.assertIn("Key: configured fp=12345678", text)
         self.assertNotIn("deepseek | openai/openai_api", text)
 
+    def test_telegram_command_log_is_structured(self):
+        bot = TelegramBot(ChatDomeConfig(), FakeAgent())
+        update = SimpleNamespace(
+            effective_chat=SimpleNamespace(id=123456),
+            effective_user=SimpleNamespace(id=789),
+            effective_message=SimpleNamespace(text='/llm deepseek\nnext "quoted"'),
+        )
+
+        with self.assertLogs("chatdome.telegram.bot", level="INFO") as captured:
+            bot._log_telegram_command(update, "llm")
+
+        line = captured.output[0]
+        self.assertIn("[Telegram command received]", line)
+        self.assertIn("chat_id=123456", line)
+        self.assertIn("user_id=789", line)
+        self.assertIn('command="/llm deepseek next \\"quoted\\""', line)
+
     def test_codex_login_default_profile_is_transient_until_success(self):
         config = ChatDomeConfig(
             active_ai_profile="openai",

@@ -185,28 +185,28 @@ class TelegramBot:
         self._app = builder.post_init(self.post_init).post_stop(self.post_stop).build()
 
         # Register handlers
-        self._app.add_handler(CommandHandler("help", self._handle_help))
-        self._app.add_handler(CommandHandler("start", self._handle_help))
-        self._app.add_handler(CommandHandler("clear", self._handle_clear))
-        self._app.add_handler(CommandHandler("confirm", self._handle_confirm))
-        self._app.add_handler(CommandHandler("reject", self._handle_reject))
-        self._app.add_handler(CommandHandler("cmd_echo", self._handle_cmd_echo))
-        self._app.add_handler(CommandHandler("env", self._handle_env))
-        self._app.add_handler(CommandHandler("token", self._handle_token))
-        self._app.add_handler(CommandHandler("audit", self._handle_audit))
-        self._app.add_handler(CommandHandler("sentinel_status", self._handle_sentinel_status))
-        self._app.add_handler(CommandHandler("sentinel_trigger", self._handle_sentinel_trigger))
-        self._app.add_handler(CommandHandler("sentinel_history", self._handle_sentinel_history))
-        self._app.add_handler(CommandHandler("sentinel_packs", self._handle_sentinel_packs))
-        self._app.add_handler(CommandHandler("sentinel_mute", self._handle_sentinel_mute))
-        self._app.add_handler(CommandHandler("sentinel_resume", self._handle_sentinel_resume))
-        self._app.add_handler(CommandHandler("engram", self._handle_engram))
-        self._app.add_handler(CommandHandler("llm", self._handle_llm))
-        self._app.add_handler(CommandHandler("llm_list", self._handle_llm_list))
-        self._app.add_handler(CommandHandler("llm_add", self._handle_llm_add))
-        self._app.add_handler(CommandHandler("llm_delete", self._handle_llm_delete))
-        self._app.add_handler(CommandHandler("llm_cancel", self._handle_llm_cancel))
-        self._app.add_handler(CommandHandler("codex_login", self._handle_codex_login))
+        self._app.add_handler(self._command_handler("help", self._handle_help))
+        self._app.add_handler(self._command_handler("start", self._handle_help))
+        self._app.add_handler(self._command_handler("clear", self._handle_clear))
+        self._app.add_handler(self._command_handler("confirm", self._handle_confirm))
+        self._app.add_handler(self._command_handler("reject", self._handle_reject))
+        self._app.add_handler(self._command_handler("cmd_echo", self._handle_cmd_echo))
+        self._app.add_handler(self._command_handler("env", self._handle_env))
+        self._app.add_handler(self._command_handler("token", self._handle_token))
+        self._app.add_handler(self._command_handler("audit", self._handle_audit))
+        self._app.add_handler(self._command_handler("sentinel_status", self._handle_sentinel_status))
+        self._app.add_handler(self._command_handler("sentinel_trigger", self._handle_sentinel_trigger))
+        self._app.add_handler(self._command_handler("sentinel_history", self._handle_sentinel_history))
+        self._app.add_handler(self._command_handler("sentinel_packs", self._handle_sentinel_packs))
+        self._app.add_handler(self._command_handler("sentinel_mute", self._handle_sentinel_mute))
+        self._app.add_handler(self._command_handler("sentinel_resume", self._handle_sentinel_resume))
+        self._app.add_handler(self._command_handler("engram", self._handle_engram))
+        self._app.add_handler(self._command_handler("llm", self._handle_llm))
+        self._app.add_handler(self._command_handler("llm_list", self._handle_llm_list))
+        self._app.add_handler(self._command_handler("llm_add", self._handle_llm_add))
+        self._app.add_handler(self._command_handler("llm_delete", self._handle_llm_delete))
+        self._app.add_handler(self._command_handler("llm_cancel", self._handle_llm_cancel))
+        self._app.add_handler(self._command_handler("codex_login", self._handle_codex_login))
         self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
@@ -217,6 +217,34 @@ class TelegramBot:
 
         logger.info("Telegram bot built successfully")
         return self._app
+
+    @staticmethod
+    def _log_value(value: Any, *, max_len: int = 200) -> str:
+        text = " ".join(str(value).replace("\r", " ").replace("\n", " ").replace("\t", " ").split())
+        if len(text) > max_len:
+            text = text[: max_len - 3] + "..."
+        return text.replace("\\", "\\\\").replace('"', '\\"')
+
+    def _log_telegram_command(self, update: Update, command_name: str) -> None:
+        chat = update.effective_chat
+        user = update.effective_user
+        message = update.effective_message
+        command_text = getattr(message, "text", None) or f"/{command_name}"
+        chat_id = getattr(chat, "id", "-") if chat is not None else "-"
+        user_id = getattr(user, "id", "-") if user is not None else "-"
+        logger.info(
+            '[Telegram command received] chat_id=%s user_id=%s command="%s"',
+            chat_id,
+            user_id,
+            self._log_value(command_text),
+        )
+
+    def _command_handler(self, command_name: str, callback: Any) -> CommandHandler:
+        async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            self._log_telegram_command(update, command_name)
+            await callback(update, context)
+
+        return CommandHandler(command_name, wrapped)
 
     # ----- Command handlers -----
 
