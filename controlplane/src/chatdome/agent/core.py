@@ -72,6 +72,8 @@ class Agent:
             ),
             engram_store=engram_store,
         )
+        if hasattr(self.tool_dispatcher, "set_session_manager"):
+            self.tool_dispatcher.set_session_manager(self.session_manager)
 
     async def get_active_llm_snapshot(self) -> LLMSnapshot:
         """Return the LLM snapshot for a new user-facing run."""

@@ -31,6 +31,7 @@ _SENSITIVE_KEY_VALUE_RE = re.compile(
 _AUTH_BEARER_RE = re.compile(r"(?i)\b(authorization\s*[:=]\s*bearer\s+)([A-Za-z0-9._~+/=-]{10,})")
 _TELEGRAM_BOT_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
 _OPENAI_STYLE_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b")
+_SESSION_SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9_.:/@-]{2,}|[\u4e00-\u9fff]{2,}")
 
 
 def redact_sensitive_text(text: str) -> str:
@@ -43,6 +44,98 @@ def redact_sensitive_text(text: str) -> str:
     redacted = _OPENAI_STYLE_KEY_RE.sub(_REDACTED, redacted)
     return redacted
 
+def _truncate_context_text(text: Any, max_chars: int) -> str:
+    value = redact_sensitive_text(str(text or "")).strip()
+    if max_chars <= 0 or len(value) <= max_chars:
+        return value
+    return value[: max_chars - 12].rstrip() + "\n...(已截断)"
+
+
+def _compact_context_value(value: Any, max_chars: int = 240) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def _extract_search_terms(query: str) -> list[str]:
+    text = str(query or "").lower()
+    terms = []
+    for term in _SESSION_SEARCH_TERM_RE.findall(text):
+        term = term.strip().lower()
+        if term and term not in terms:
+            terms.append(term)
+    return terms[:16]
+
+
+def _message_search_content(message: dict[str, Any]) -> str:
+    role = str(message.get("role") or "")
+    if role == "system" or message.get("tool_calls"):
+        return ""
+    content = message.get("content")
+    if content is None:
+        return ""
+    return str(content).strip()
+
+
+def search_message_history(
+    messages: list[dict[str, Any]],
+    query: str,
+    *,
+    limit: int = 5,
+    max_chars_per_item: int = 900,
+) -> list[dict[str, Any]]:
+    """Search persisted chat messages without invoking an index service."""
+    bounded_limit = min(max(int(limit or 5), 1), 10)
+    terms = _extract_search_terms(query)
+    query_text = str(query or "").strip().lower()[:240]
+    eligible: list[tuple[int, dict[str, Any], str]] = []
+
+    for index, message in enumerate(messages or []):
+        content = _message_search_content(message)
+        if not content:
+            continue
+        eligible.append((index, message, content))
+
+    scored: list[tuple[float, int, dict[str, Any], str]] = []
+    total = max(len(messages or []), 1)
+    for index, message, content in eligible:
+        lower_content = content.lower()
+        score = 0.0
+        if query_text and query_text in lower_content:
+            score += 8.0
+        for term in terms:
+            if term in lower_content:
+                score += 2.0 + min(lower_content.count(term), 3)
+        if not terms and not query_text:
+            score += 1.0
+        if score <= 0:
+            continue
+        score += index / total
+        scored.append((score, index, message, content))
+
+    if scored:
+        selected = sorted(scored, key=lambda item: (item[0], item[1]), reverse=True)[:bounded_limit]
+        match_type = "keyword"
+    else:
+        selected = [
+            (0.0, index, message, content)
+            for index, message, content in eligible[-bounded_limit:]
+        ]
+        match_type = "recent_fallback"
+
+    results: list[dict[str, Any]] = []
+    for score, index, message, content in selected:
+        results.append(
+            {
+                "index": index,
+                "role": str(message.get("role") or "unknown"),
+                "score": round(score, 3),
+                "match_type": match_type,
+                "content": _truncate_context_text(content, max_chars_per_item),
+            }
+        )
+    return results
 
 # ---------------------------------------------------------------------------
 # Single session
@@ -183,6 +276,56 @@ class AgentSession:
             "content": content,
         })
         self.last_active = time.time()
+
+    def add_visible_context(
+        self,
+        *,
+        event_type: str,
+        user_action: str,
+        assistant_summary: str,
+        refs: dict[str, Any] | None = None,
+        max_summary_chars: int = 3500,
+    ) -> bool:
+        """Persist a Telegram-visible interaction as conversation context."""
+        event_label = _compact_context_value(event_type, 80) or "visible_event"
+        action = _compact_context_value(user_action, 300) or "用户查看了 Telegram 可见结果"
+        user_content = (
+            "[Telegram 用户可见事件]\n"
+            f"事件: {event_label}\n"
+            f"用户操作: {action}"
+        )
+
+        lines = [
+            "[Telegram 用户可见结果]",
+            f"事件: {event_label}",
+        ]
+        cleaned_refs: list[str] = []
+        for key, value in (refs or {}).items():
+            key_text = _compact_context_value(key, 60)
+            value_text = _compact_context_value(value, 500)
+            if key_text and value_text:
+                cleaned_refs.append(f"- {key_text}: {redact_sensitive_text(value_text)}")
+        if cleaned_refs:
+            lines.append("引用信息:")
+            lines.extend(cleaned_refs[:16])
+
+        summary = _truncate_context_text(assistant_summary, max_summary_chars)
+        if summary:
+            lines.extend(["结果摘要:", summary])
+        assistant_content = "\n".join(lines)
+
+        if self.pending_approval:
+            self.add_pending_followup("user", user_content)
+            self.add_pending_followup("assistant", assistant_content)
+            return True
+        if self.pending_round_limit:
+            self.last_active = time.time()
+            return False
+
+        self.messages.append({"role": "user", "content": user_content})
+        self.messages.append({"role": "assistant", "content": assistant_content})
+        self.last_active = time.time()
+        return True
 
     def repair_missing_tool_outputs(self) -> int:
         """Add fail-safe outputs for legacy assistant tool calls missing results."""
@@ -558,6 +701,27 @@ class SessionManager:
             logger.error("Failed to load persisted session for chat_id=%d: %s", chat_id, e)
             self.delete_persisted_session(chat_id)
             return None
+
+    def search_history(
+        self,
+        chat_id: int,
+        query: str,
+        *,
+        limit: int = 5,
+        max_chars_per_item: int = 900,
+    ) -> list[dict[str, Any]]:
+        """Search one chat's existing session messages."""
+        session = self._sessions.get(chat_id)
+        if session is None:
+            session = self.load_persisted_session(chat_id)
+        if session is None:
+            return []
+        return search_message_history(
+            session.messages,
+            query,
+            limit=limit,
+            max_chars_per_item=max_chars_per_item,
+        )
 
     def delete_persisted_session(self, chat_id: int) -> None:
         """Delete persisted snapshot for a chat."""

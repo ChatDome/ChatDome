@@ -86,6 +86,16 @@ UNRESTRICTED_COMMAND_POLICY = """\
 - 【重要】意图验证与质疑：当用户提出的需求过于模糊、存在明显逻辑错误或潜在风险时，绝对禁止盲目服从！你必须“据理力争”，通过多轮提问、指出错误等方式，强制确认用户的真实意图。只有在完全明确真实目的后，才可执行相应操作。
 """
 
+
+CONTEXT_MANAGEMENT_POLICY = """\
+上下文管理规则：
+- 当前 messages 中的明确事实优先于历史检索结果、Memory Vault 和 Engram。
+- 当前告警、当前工具输出和用户本轮给出的事实优先级最高；历史记忆只能作为参考，不能覆盖当前证据。
+- Memory Vault 是被压缩的历史摘要，Engram 是长期环境事实或偏好；使用时必须结合当前证据判断。
+- 当用户的问题依赖历史上下文，且当前 messages 无法唯一确定“刚才、之前、那个、这个、继续”等引用对象时，先调用 search_session_history 检索当前 Telegram 会话历史。
+- 不要只因为出现指代词就调用 search_session_history；如果当前 messages 已经足够，直接回答。
+- search_session_history 可用于安全和非安全话题的上下文连贯；如果检索结果仍不足以确定对象，要求用户补充更具体的对象、时间范围或描述。
+"""
 SYSTEM_PROMPT_TEMPLATE = """\
 你是 ChatDome，一个 AI 驱动的主机安全助手。你通过 Telegram 与用户对话，\
 帮助用户诊断和分析 Linux 服务器的安全状况。
@@ -93,6 +103,8 @@ SYSTEM_PROMPT_TEMPLATE = """\
 {command_policy}
 
 {manual_index}
+
+{context_management_policy}
 
 {runtime_environment_block}
 
@@ -134,6 +146,7 @@ def build_system_prompt(
     return SYSTEM_PROMPT_TEMPLATE.format(
         command_policy=command_policy.strip(),
         manual_index=build_manual_index_prompt().strip(),
+        context_management_policy=CONTEXT_MANAGEMENT_POLICY.strip(),
         runtime_environment_block=runtime_environment_block.strip(),
         available_checks=available_checks.strip(),
     )
@@ -236,6 +249,31 @@ def build_tools(
                         },
                     },
                     "required": ["section_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_session_history",
+                "description": (
+                    "Search the current Telegram chat session history stored in sessions/<chat_id>.json. "
+                    "Use when the user relies on earlier context and the current messages do not uniquely identify the referenced object. "
+                    "This is read-only and returns snippets from the same chat only."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Natural-language search query describing the missing historical context.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum snippets to return. Default 5, maximum 10.",
+                        },
+                    },
+                    "required": ["query"],
                 },
             },
         },

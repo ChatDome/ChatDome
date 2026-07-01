@@ -56,7 +56,7 @@ ChatDome 的运行文件分三类：日志、运行数据、运行状态。
 
 | 目录 | 内容 |
 |---|---|
-| `/var/lib/chatdome/sessions/` | 当前可恢复的 Telegram 会话上下文和待审批状态 |
+| `/var/lib/chatdome/sessions/` | 当前可恢复的 Telegram 会话上下文、用户可见结果摘要和待审批状态 |
 | `/var/lib/chatdome/memory/` | 脱敏后的上下文压缩摘要和 Engram 长期记忆 |
 | `/var/lib/chatdome/compression/` | 脱敏后的上下文压缩事件记录 |
 | `/var/lib/chatdome/audit/` | 用户命令审批和敏感操作审计；Sentinel 巡检命令写入独立 `sentinel-commands-*` 文件 |
@@ -66,6 +66,14 @@ ChatDome 的运行文件分三类：日志、运行数据、运行状态。
 | `/var/lib/chatdome/environment/` | OS、shell、命令可用性画像 |
 | `/var/lib/chatdome/update/` | 菜单更新和回滚需要的状态文件 |
 | `/var/lib/chatdome/venvs/` | 版本化 Python 虚拟环境 |
+
+## 会话上下文
+
+`/var/lib/chatdome/sessions/<chat_id>.json` 是 Telegram 会话主快照，包含 `session.messages`、待审批状态和轮次限制状态。
+
+用户在 Telegram 中看到的业务结果摘要会写入 `session.messages`，包括 Sentinel 告警推送、告警详情、告警分析、审批详情和手动巡检结果。临时状态消息、按钮清除、内部重试和 debug 日志不写入会话上下文。
+
+`search_session_history` 只检索当前 chat 的 `sessions/<chat_id>.json`，用于用户依赖历史上下文但当前 `messages` 无法唯一确定对象时补充上下文。
 
 ## 环境变量
 
@@ -82,6 +90,6 @@ ChatDome 的运行文件分三类：日志、运行数据、运行状态。
 
 ## 路径策略
 
-ChatDome 只使用本文定义的运行文件路径。启动流程不得迁移、读取或写入旧路径；代码和测试不得为旧路径保留自动兼容逻辑。
+ChatDome 的标准运行文件路径以本文定义的新布局为准。部分旧版路径会在首次访问时自动迁移到新布局；新代码不得新增旧路径写入点。
 
-旧路径中的历史文件由部署方按需手动归档或删除。
+无法自动迁移的旧路径历史文件由部署方按需手动归档或删除。

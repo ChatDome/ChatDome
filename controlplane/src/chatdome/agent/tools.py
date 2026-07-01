@@ -10,6 +10,7 @@ Handles:
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -62,17 +63,23 @@ class ToolDispatcher:
         user_context_ledger: Any = None,
         engram_store: Any = None,
         sentinel: Any = None,
+        session_manager: Any = None,
     ):
         self.sandbox = sandbox
         self.llm = llm
         self.user_context_ledger = user_context_ledger
         self.engram_store = engram_store
         self.sentinel = sentinel
+        self.session_manager = session_manager
         self._http_client: httpx.AsyncClient | None = None
 
     def set_sentinel(self, sentinel: Any) -> None:
         """Inject the Sentinel scheduler after runtime wiring."""
         self.sentinel = sentinel
+
+    def set_session_manager(self, session_manager: Any) -> None:
+        """Inject the session manager after Agent construction."""
+        self.session_manager = session_manager
 
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Lazy-init the HTTP client."""
@@ -121,6 +128,8 @@ class ToolDispatcher:
         try:
             if tool_name == "read_chatdome_manual":
                 return self._handle_read_chatdome_manual(args)
+            elif tool_name == "search_session_history":
+                return self._handle_search_session_history(args, chat_id)
             elif tool_name == "run_security_check":
                 return await self._handle_security_check(args, tool_call_id, chat_id)
             elif tool_name == "run_shell_command":
@@ -150,6 +159,41 @@ class ToolDispatcher:
     def _handle_read_chatdome_manual(self, args: dict[str, Any]) -> str:
         """Return one curated operating manual section."""
         return read_manual_section(str(args.get("section_id", "")))
+
+    def _handle_search_session_history(self, args: dict[str, Any], chat_id: int = 0) -> str:
+        """Return relevant snippets from the current chat session."""
+        if not chat_id:
+            return json.dumps(
+                {"ok": False, "error": "missing_chat_id", "matches": []},
+                ensure_ascii=False,
+            )
+        if not self.session_manager:
+            return json.dumps(
+                {"ok": False, "error": "session_manager_unavailable", "matches": []},
+                ensure_ascii=False,
+            )
+
+        query = str(args.get("query") or "").strip()
+        try:
+            limit = int(args.get("limit", 5))
+        except (TypeError, ValueError):
+            limit = 5
+        limit = min(max(limit, 1), 10)
+
+        matches = self.session_manager.search_history(
+            chat_id,
+            query,
+            limit=limit,
+            max_chars_per_item=900,
+        )
+        payload = {
+            "ok": True,
+            "query": query,
+            "source": f"sessions/{chat_id}.json",
+            "matches": matches,
+            "priority_note": "Historical session snippets are reference context. Current user input, current alerts, and current tool results take priority.",
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
 
     @staticmethod
     def _parse_until_iso(value: Any) -> datetime | None:

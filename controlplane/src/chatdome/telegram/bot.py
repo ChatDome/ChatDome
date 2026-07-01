@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import replace
@@ -280,7 +281,7 @@ class TelegramBot:
         cleared = self.agent.clear_session(chat_id)
 
         if cleared:
-            await update.message.reply_text("✅ 对话上下文已清除，可以开始新的对话。")
+            await update.message.reply_text("✅ 对话已重置。")
         else:
             await update.message.reply_text("ℹ️ 当前没有活跃的对话。")
 
@@ -405,7 +406,7 @@ class TelegramBot:
         )
 
         # Send "thinking" indicator
-        thinking_msg = await update.message.reply_text("🤔 正在思考...")
+        thinking_msg = await update.message.reply_text("⏳")
 
         try:
             # Process through agent
@@ -491,8 +492,8 @@ class TelegramBot:
             return text
         return text[: max_chars - 1].rstrip() + "…"
 
-    async def _send_approval_actions(self, message, data: dict) -> None:
-        """Send compact action buttons after the detailed analysis message."""
+    @staticmethod
+    def _approval_action_markup(data: dict) -> InlineKeyboardMarkup:
         approval_id = str((data or {}).get("approval_id") or "").strip()
         if approval_id:
             approve_data = f"approval:approve:{approval_id}"
@@ -510,11 +511,15 @@ class TelegramBot:
             ],
             [InlineKeyboardButton("❌ 拒绝", callback_data=reject_data)],
         ]
+        return InlineKeyboardMarkup(keyboard)
+
+    async def _send_approval_actions(self, message, data: dict) -> None:
+        """Send compact action buttons after the detailed analysis message."""
         await self._reply_text(
             message,
-            "分析完成。",
+            "请选择操作。",
             markup=MessageMarkup.PLAIN,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=self._approval_action_markup(data),
         )
 
     @staticmethod
@@ -540,7 +545,7 @@ class TelegramBot:
 
         await self._send_long_message(
             message,
-            "正在分析命令详情…",
+            "⏳",
         )
 
         coroutine = self._run_approval_detail_analysis(
@@ -592,9 +597,9 @@ class TelegramBot:
             )
             return
 
-        await self._send_approval_detail_result(message, details)
+        await self._send_approval_detail_result(message, details, chat_id=chat_id)
 
-    async def _send_approval_detail_result(self, message, details: dict) -> None:
+    async def _send_approval_detail_result(self, message, details: dict, *, chat_id: int) -> None:
         analysis = details.get("analysis", {}) or {}
         command_hash = str(details.get("command_hash", ""))
         text = (
@@ -611,8 +616,24 @@ class TelegramBot:
             f"Reviewer mode: {analysis.get('reviewer_mode', 'static_only')}\n\n"
             f"Impact analysis:\n{analysis.get('impact_analysis', '')}"
         )
-        await self._send_long_message(message, text)
-        await self._send_approval_actions(message, details)
+        await self._send_long_message(
+            message,
+            text,
+            reply_markup=self._approval_action_markup(details),
+        )
+        self._record_visible_context(
+            chat_id,
+            event_type="approval_detail",
+            user_action="查看待审批命令详细分析",
+            assistant_summary=text,
+            refs={
+                "approval_id": details.get("approval_id", ""),
+                "run_id": details.get("run_id", ""),
+                "command_hash": command_hash[:12],
+                "safety_status": analysis.get("safety_status", "UNSAFE"),
+                "risk_level": analysis.get("risk_level", "HIGH"),
+            },
+        )
 
     async def _send_round_limit_prompt(self, message, data: dict[str, Any] | None = None) -> None:
         """Ask user whether to continue after reaching one execution window."""
@@ -1532,7 +1553,7 @@ class TelegramBot:
 
             await self._clear_callback_message_markup(query, "approval decision callback message")
 
-            thinking_msg = await query.message.reply_text("Processing...")
+            thinking_msg = await query.message.reply_text("⏳")
             try:
                 _, final_response = await asyncio.wait_for(
                     self.agent.resume_session(chat_id, action, approval_id=approval_id or None),
@@ -1567,7 +1588,7 @@ class TelegramBot:
             
         chat_id = update.effective_chat.id
         approval_id = context.args[0].strip() if context.args else None
-        thinking_msg = await update.message.reply_text("🤔 强制批准执行中...")
+        thinking_msg = await update.message.reply_text("⏳")
         try:
             _, final_response = await self.agent.resume_session(chat_id, "APPROVE", approval_id=approval_id)
             try:
@@ -1593,7 +1614,7 @@ class TelegramBot:
 
         chat_id = update.effective_chat.id
         approval_id = context.args[0].strip() if context.args else None
-        thinking_msg = await update.message.reply_text("🤹 正在拒绝待执行命令...")
+        thinking_msg = await update.message.reply_text("⏳")
         try:
             _, final_response = await self.agent.resume_session(chat_id, "REJECT", approval_id=approval_id)
             try:
@@ -1678,6 +1699,81 @@ class TelegramBot:
             kwargs["reply_markup"] = reply_markup
         await bot.send_message(chat_id=chat_id, text=rendered.text, **kwargs)
 
+
+    @staticmethod
+    def _compact_visible_value(value: Any, max_chars: int = 500) -> str:
+        text = " ".join(str(value or "").split()).strip()
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 1].rstrip() + "…"
+
+    @staticmethod
+    def _alert_event_reference_fields(event_data: Any) -> dict[str, Any]:
+        if not isinstance(event_data, dict):
+            return {}
+
+        refs: dict[str, Any] = {}
+        key_map = {
+            "check_id": "check_id",
+            "severity": "severity",
+            "severity_label": "severity_label",
+            "timestamp": "timestamp",
+            "fingerprint": "fingerprint",
+            "alert_state": "alert_state",
+        }
+        for source_key, label in key_map.items():
+            value = event_data.get(source_key)
+            if value not in (None, ""):
+                refs[label] = value
+
+        raw_output = str(event_data.get("raw_output") or "")
+        if raw_output.strip():
+            refs["raw_output摘要"] = TelegramBot._compact_visible_value(raw_output, 700)
+            ips = sorted(set(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", raw_output)))
+            if ips:
+                refs["IP"] = ", ".join(ips[:8])
+            ports = sorted(set(re.findall(r"(?::|\bport[ =])([0-9]{1,5})\b", raw_output, flags=re.IGNORECASE)))
+            if ports:
+                refs["端口"] = ", ".join(ports[:8])
+
+        context = event_data.get("context") if isinstance(event_data.get("context"), dict) else {}
+        for label, keys in {
+            "用户": ("user", "username", "login_user"),
+            "进程": ("process", "process_name", "pid"),
+            "命令": ("command", "commands"),
+        }.items():
+            for key in keys:
+                value = event_data.get(key) if key in event_data else context.get(key)
+                if value not in (None, "", []):
+                    refs[label] = TelegramBot._compact_visible_value(value, 500)
+                    break
+        return refs
+
+    def _record_visible_context(
+        self,
+        chat_id: int,
+        *,
+        event_type: str,
+        user_action: str,
+        assistant_summary: str,
+        refs: dict[str, Any] | None = None,
+    ) -> None:
+        manager = getattr(getattr(self, "agent", None), "session_manager", None)
+        if manager is None:
+            return
+        try:
+            session = manager.get_or_create(chat_id)
+            added = session.add_visible_context(
+                event_type=event_type,
+                user_action=user_action,
+                assistant_summary=assistant_summary,
+                refs=refs,
+            )
+            if added:
+                manager.save_session(session)
+        except Exception:
+            logger.exception("Failed to record Telegram visible context")
+
     def _cache_alert_analysis_context(
         self,
         *,
@@ -1739,7 +1835,7 @@ class TelegramBot:
             )
             return
 
-        thinking_msg = await query.message.reply_text("正在生成告警分析...")
+        thinking_msg = await query.message.reply_text("⏳")
         try:
             env_text = self._read_environment_profile_for_llm()
             alert_text = str(cached.get("alert_text") or "")
@@ -1810,6 +1906,13 @@ class TelegramBot:
                 pass
 
         await self._send_long_message(query.message, content)
+        self._record_visible_context(
+            chat_id,
+            event_type="sentinel_alert_analysis",
+            user_action="点击告警分析",
+            assistant_summary=content,
+            refs=self._alert_event_reference_fields(cached.get("event")),
+        )
 
     async def _handle_sentinel_alert_detail(self, query, chat_id: int, alert_token: str) -> None:
         cached = self._alert_analysis_cache.get(alert_token)
@@ -1829,6 +1932,13 @@ class TelegramBot:
             else "暂无详细状态信息。"
         )
         await self._send_long_message(query.message, detail_text)
+        self._record_visible_context(
+            chat_id,
+            event_type="sentinel_alert_detail",
+            user_action="查看告警详情",
+            assistant_summary=detail_text,
+            refs=self._alert_event_reference_fields(event_data),
+        )
 
     @staticmethod
     def _llm_admin_key(update: Update) -> tuple[int, int]:
@@ -1886,6 +1996,7 @@ class TelegramBot:
         text: str,
         *,
         markup: MessageMarkup = MessageMarkup.PLAIN,
+        reply_markup=None,
     ) -> None:
         """
         Send a message, automatically splitting if it exceeds Telegram's
@@ -1895,16 +2006,18 @@ class TelegramBot:
         text = rendered.text
         parse_mode = rendered.parse_mode
 
-        async def _send_chunk(chunk_text: str) -> None:
+        async def _send_chunk(chunk_text: str, chunk_reply_markup=None) -> None:
             kwargs: dict[str, Any] = {}
             if parse_mode:
                 kwargs["parse_mode"] = parse_mode
+            if chunk_reply_markup is not None:
+                kwargs["reply_markup"] = chunk_reply_markup
             await message.reply_text(chunk_text, **kwargs)
 
         max_len = min(self.max_message_length, 4096)
 
         if len(text) <= max_len:
-            await _send_chunk(text)
+            await _send_chunk(text, reply_markup)
             return
 
         # Split into chunks
@@ -1925,7 +2038,7 @@ class TelegramBot:
         for i, chunk in enumerate(chunks, 1):
             if len(chunks) > 1:
                 chunk = f"📄 ({i}/{len(chunks)})\n{chunk}"
-            await _send_chunk(chunk)
+            await _send_chunk(chunk, reply_markup if i == len(chunks) else None)
 
     @staticmethod
     def _truncate_csv_items(raw: str, max_items: int = 14) -> str:
@@ -2072,12 +2185,12 @@ class TelegramBot:
         if self._sentinel is None:
             await update.message.reply_text("ℹ️ 哨兵模式未启用。")
             return
-        await update.message.reply_text("⏳ 正在执行全量巡检...")
+        status_msg = await update.message.reply_text("⏳")
         try:
             result = await self._sentinel.trigger_all()
             if len(result) > self.max_message_length:
                 result = result[:self.max_message_length - 20] + "\n... (已截断)"
-            await update.message.reply_text(f"🛡️ 巡检完成:\n\n{result}")
+            final_text = f"🛡️ 巡检完成:\n\n{result}"
         except Exception as e:
             logger.exception("Sentinel trigger failed")
             await update.message.reply_text(
@@ -2087,6 +2200,19 @@ class TelegramBot:
                     fallback="巡检执行失败，请稍后重试。",
                 )
             )
+        else:
+            await update.message.reply_text(final_text)
+            self._record_visible_context(
+                update.effective_chat.id,
+                event_type="sentinel_trigger",
+                user_action="/sentinel_trigger",
+                assistant_summary=final_text,
+            )
+        finally:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
 
     async def _handle_sentinel_history(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2158,6 +2284,16 @@ class TelegramBot:
             if len(text) > self.max_message_length:
                 text = text[:self.max_message_length - 20] + "\n... (已截断)"
             await self._send_bot_text(self._app.bot, chat_id, text, reply_markup=reply_markup)
+            if alert_event is not None:
+                self._record_visible_context(
+                    chat_id,
+                    event_type="sentinel_alert_push",
+                    user_action="收到 Sentinel 告警推送",
+                    assistant_summary=original_text,
+                    refs=self._alert_event_reference_fields(
+                        alert_event.to_dict() if hasattr(alert_event, "to_dict") else alert_event
+                    ),
+                )
         except Exception:
             logger.exception("Failed to send alert to chat %s", chat_id)
 

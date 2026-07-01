@@ -1,12 +1,14 @@
 import asyncio
 import json
+import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from chatdome.agent.session import AgentSession, redact_sensitive_text
+from chatdome.agent.session import AgentSession, SessionManager, redact_sensitive_text
 from chatdome.agent.prompts import COMPRESSION_PROMPT
+from chatdome.agent.tools import ToolDispatcher
 
 
 class FakeCompressionLLM:
@@ -77,3 +79,65 @@ def test_compression_prompt_and_persisted_summary_are_redacted():
         assert raw_api_key not in text
         assert raw_summary_key not in text
         assert "[REDACTED]" in text
+
+def test_visible_context_uses_messages_and_pending_followups():
+    session = AgentSession(chat_id=123)
+    session.add_system_message("system")
+
+    added = session.add_visible_context(
+        event_type="sentinel_alert_analysis",
+        user_action="点击告警分析",
+        assistant_summary="结论: 8080 新增监听，需要核实进程。",
+        refs={"check_id": "open_ports", "端口": "8080"},
+    )
+
+    assert added is True
+    assert [msg["role"] for msg in session.messages] == ["system", "user", "assistant"]
+    assert "点击告警分析" in session.messages[-2]["content"]
+    assert "8080" in session.messages[-1]["content"]
+
+    pending = AgentSession(chat_id=123)
+    pending.add_system_message("system")
+    pending.pending_approval = True
+
+    added_pending = pending.add_visible_context(
+        event_type="approval_detail",
+        user_action="查看待审批命令详细分析",
+        assistant_summary="命令会修改系统配置。",
+        refs={"approval_id": "AP-1"},
+    )
+
+    assert added_pending is True
+    assert len(pending.messages) == 1
+    assert [item["role"] for item in pending.pending_followups] == ["user", "assistant"]
+    assert "AP-1" in pending.pending_followups[-1]["content"]
+
+
+def test_search_session_history_tool_reads_existing_messages():
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.dict(os.environ, {"CHATDOME_DATA_DIR": tmp}, clear=False):
+            manager = SessionManager(session_timeout=600, system_prompt="system")
+            session = manager.get_or_create(123)
+            session.add_visible_context(
+                event_type="sentinel_alert_detail",
+                user_action="查看告警详情",
+                assistant_summary="open_ports 告警显示 0.0.0.0:8080 新增监听。",
+                refs={"check_id": "open_ports", "severity": "9"},
+            )
+            manager.save_session(session)
+
+            dispatcher = ToolDispatcher(SimpleNamespace(), session_manager=manager)
+            result = asyncio.run(
+                dispatcher.dispatch(
+                    "search_session_history",
+                    '{"query": "8080 open_ports", "limit": 3}',
+                    chat_id=123,
+                )
+            )
+
+    payload = json.loads(result)
+    encoded = json.dumps(payload, ensure_ascii=False)
+    assert payload["ok"] is True
+    assert payload["matches"]
+    assert "8080" in encoded
+    assert "open_ports" in encoded
