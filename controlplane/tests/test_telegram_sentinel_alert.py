@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
 
 from chatdome.sentinel.alerter import AlertEvent
 from chatdome.telegram.bot import TelegramBot
@@ -72,16 +72,17 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("状态迁移: 未监控 → 新威胁首次出现", detail)
         self.assertNotIn("state_transition (", detail)
 
-    async def test_detail_handler_rejects_missing_or_cross_chat_token(self):
+    async def test_detail_handler_rejects_missing_or_cross_chat_token_and_removes_buttons(self):
         for cached, chat_id in ((None, 123), ({"chat_id": 456, "event": _event().to_dict()}, 123)):
             with self.subTest(cached=cached):
                 bot = _bot()
                 if cached is not None:
                     bot._alert_analysis_cache["token"] = cached
-                query = SimpleNamespace(message=object())
+                query = SimpleNamespace(message=object(), edit_message_reply_markup=AsyncMock())
 
                 await bot._handle_sentinel_alert_detail(query, chat_id, "token")
 
+                query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
                 text = bot._send_long_message.await_args.args[1]
                 self.assertEqual(text, "告警详情已过期。使用 /sentinel_history 查看告警记录。")
 
@@ -93,6 +94,58 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         await bot._handle_sentinel_alert_detail(query, 123, "token")
 
         self.assertEqual(bot._send_long_message.await_args.args[1], "暂无详细状态信息。")
+
+    async def test_analysis_handler_rejects_expired_context_and_removes_buttons(self):
+        bot = _bot()
+        query = SimpleNamespace(message=object(), edit_message_reply_markup=AsyncMock())
+
+        await bot._handle_sentinel_alert_analysis(query, 123, "missing")
+
+        query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
+        text = bot._send_long_message.await_args.args[1]
+        self.assertEqual(text, "这条告警上下文已过期，请查看 /sentinel_history 或等待下一次告警。")
+
+    async def test_analysis_handler_removes_only_analysis_button_for_matching_chat(self):
+        class FakeClient:
+            model = "fake-model"
+
+            async def chat_completion(self, messages, tools=None):
+                return SimpleNamespace(
+                    content="分析内容",
+                    prompt_tokens=1,
+                    completion_tokens=2,
+                    total_tokens=3,
+                )
+
+        bot = _bot()
+        bot._alert_analysis_cache["token"] = {
+            "chat_id": 123,
+            "alert_text": "alert card",
+            "event": _event().to_dict(),
+        }
+        bot._read_environment_profile_for_llm = Mock(return_value="env")
+        bot._record_visible_context = Mock()
+        bot.agent = SimpleNamespace(
+            get_active_llm_snapshot=AsyncMock(return_value=SimpleNamespace(client=FakeClient()))
+        )
+        thinking_msg = SimpleNamespace(delete=AsyncMock())
+        message = SimpleNamespace(reply_text=AsyncMock(return_value=thinking_msg))
+        query = SimpleNamespace(message=message, edit_message_reply_markup=AsyncMock())
+
+        with patch("chatdome.agent.tracker.TokenTracker.record_usage") as record_usage:
+            await bot._handle_sentinel_alert_analysis(query, 123, "token")
+
+        query.edit_message_reply_markup.assert_awaited_once()
+        reply_markup = query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
+        keyboard = reply_markup.inline_keyboard
+        self.assertEqual(len(keyboard), 1)
+        self.assertEqual([button.text for button in keyboard[0]], ["📋 查看详情"])
+        self.assertEqual(keyboard[0][0].callback_data, "sentinel_alert_detail:token")
+        message.reply_text.assert_awaited_once_with("⏳")
+        thinking_msg.delete.assert_awaited_once()
+        bot._send_long_message.assert_awaited_once_with(message, "分析内容")
+        record_usage.assert_called_once()
+        bot._record_visible_context.assert_called_once()
 
     async def test_approval_detail_callback_removes_original_buttons(self):
         bot = _bot()

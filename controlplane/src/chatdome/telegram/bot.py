@@ -1467,8 +1467,16 @@ class TelegramBot:
         await query.message.reply_text("LLM 操作已失效，请重新开始。")
 
     async def _clear_callback_message_markup(self, query, context_label: str = "callback message") -> None:
+        await self._set_callback_message_markup(query, None, context_label)
+
+    async def _set_callback_message_markup(
+        self,
+        query,
+        reply_markup: InlineKeyboardMarkup | None,
+        context_label: str = "callback message",
+    ) -> None:
         try:
-            await query.edit_message_reply_markup(reply_markup=None)
+            await query.edit_message_reply_markup(reply_markup=reply_markup)
         except Exception:
             logger.exception("Failed to edit %s markup", context_label)
 
@@ -1811,6 +1819,23 @@ class TelegramBot:
 
         return token
 
+    @staticmethod
+    def _sentinel_alert_reply_markup(alert_token: str, *, include_analysis: bool = True) -> InlineKeyboardMarkup:
+        row = [
+            InlineKeyboardButton(
+                "📋 查看详情",
+                callback_data=f"sentinel_alert_detail:{alert_token}",
+            )
+        ]
+        if include_analysis:
+            row.append(
+                InlineKeyboardButton(
+                    "🤖 告警分析",
+                    callback_data=f"sentinel_alert_analysis:{alert_token}",
+                )
+            )
+        return InlineKeyboardMarkup([row])
+
     def _read_environment_profile_for_llm(self, max_chars: int = 6000) -> str:
         path = self._environment_profile_path
         try:
@@ -1829,12 +1854,18 @@ class TelegramBot:
     async def _handle_sentinel_alert_analysis(self, query, chat_id: int, alert_token: str) -> None:
         cached = self._alert_analysis_cache.get(alert_token)
         if not cached or cached.get("chat_id") != chat_id:
+            await self._clear_callback_message_markup(query, "expired sentinel alert analysis")
             await self._send_long_message(
                 query.message,
                 "这条告警上下文已过期，请查看 /sentinel_history 或等待下一次告警。",
             )
             return
 
+        await self._set_callback_message_markup(
+            query,
+            self._sentinel_alert_reply_markup(alert_token, include_analysis=False),
+            "sentinel alert analysis",
+        )
         thinking_msg = await query.message.reply_text("⏳")
         try:
             env_text = self._read_environment_profile_for_llm()
@@ -1917,6 +1948,7 @@ class TelegramBot:
     async def _handle_sentinel_alert_detail(self, query, chat_id: int, alert_token: str) -> None:
         cached = self._alert_analysis_cache.get(alert_token)
         if not cached or cached.get("chat_id") != chat_id:
+            await self._clear_callback_message_markup(query, "expired sentinel alert detail")
             await self._send_long_message(
                 query.message,
                 "告警详情已过期。使用 /sentinel_history 查看告警记录。",
@@ -2268,18 +2300,7 @@ class TelegramBot:
                     alert_text=original_text,
                     alert_event=alert_event,
                 )
-                reply_markup = InlineKeyboardMarkup(
-                    [[
-                        InlineKeyboardButton(
-                            "📋 查看详情",
-                            callback_data=f"sentinel_alert_detail:{token}",
-                        ),
-                        InlineKeyboardButton(
-                            "🤖 告警分析",
-                            callback_data=f"sentinel_alert_analysis:{token}",
-                        ),
-                    ]]
-                )
+                reply_markup = self._sentinel_alert_reply_markup(token)
 
             if len(text) > self.max_message_length:
                 text = text[:self.max_message_length - 20] + "\n... (已截断)"
