@@ -61,6 +61,50 @@ class AlertEvent:
     def suppression_reason(self, value: str) -> None:
         self.action_reason = value
 
+@dataclass
+class AlertCard:
+    title: str
+    level: str
+    risk: str
+    action: str
+    timestamp: str
+    facts: list[tuple[str, str]] = field(default_factory=list)
+    status: str = ""
+    sections: list[tuple[str, list[str]]] = field(default_factory=list)
+
+    def render(self) -> str:
+        lines = [f"{self.level}｜{self.title}", "", f"风险判断：{self.risk}"]
+
+        clean_facts = [
+            (str(label).strip(), str(value).strip())
+            for label, value in self.facts
+            if str(label).strip() and str(value).strip()
+        ]
+        if clean_facts:
+            lines.extend(["", "关键对象："])
+            lines.extend(f"- {label}：{value}" for label, value in clean_facts)
+
+        if self.action:
+            lines.extend(["", f"建议动作：{self.action}"])
+
+        lines.extend(["", f"时间：{self.timestamp}"])
+        if self.status:
+            lines.append(f"状态：{self.status}")
+
+        for title, items in self.sections:
+            section_title = str(title).strip()
+            section_lines = [str(item).rstrip() for item in items if str(item).strip()]
+            if not section_title or not section_lines:
+                continue
+            lines.extend(["", f"{section_title}："])
+            for item in section_lines:
+                if item.startswith(("-", "  ", "...", "⚠️", "ℹ️")):
+                    lines.append(item)
+                else:
+                    lines.append(f"- {item}")
+
+        return "\n".join(lines)
+
 
 class AlertHistory:
     """In-memory alert history with JSONL persistence."""
@@ -301,6 +345,117 @@ def _append_alert_guidance(lines: list[str], event: AlertEvent) -> None:
         lines.append(f"💡 {hint}")
 
 
+_SEVERITY_TEXT = {
+    "emergency": "紧急",
+    "critical": "严重",
+    "high": "高危",
+    "medium": "中危",
+    "low": "低危",
+    "info": "提示",
+}
+
+
+def _alert_level(event: AlertEvent) -> str:
+    label = _SEVERITY_TEXT.get(event.severity_label, event.severity_label or "提示")
+    return f"{severity_emoji(event.severity)} {label}"
+
+
+def _alert_status(event: AlertEvent) -> str:
+    if not event.alert_state:
+        return ""
+    return _state_card(event.alert_state).get("label", "状态更新")
+
+
+def _state_risk_override(event: AlertEvent) -> str:
+    if event.alert_state == "RECOVERED":
+        return f"{event.check_name}已归档，当前无需处理。"
+    if event.alert_state == "RECOVERED_CANDIDATE":
+        return f"{event.check_name}已进入观察期，继续观察是否反复。"
+    return ""
+
+
+def _compact_items(items: list[str], max_items: int = 3, missing: str = "未提取到") -> str:
+    cleaned: list[str] = []
+    for item in items:
+        value = str(item).strip()
+        if value and value not in cleaned:
+            cleaned.append(value)
+    if not cleaned:
+        return missing
+    suffix = f" 等{len(cleaned)}项" if len(cleaned) > max_items else ""
+    return "，".join(cleaned[:max_items]) + suffix
+
+
+def _truncate_text(text: str, max_chars: int = 1200) -> str:
+    value = (text or "").strip()
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars] + "\n... (已截断)"
+
+
+def _first_signal_line(raw_output: str) -> str:
+    for line in _nonempty_lines(raw_output):
+        lowered = line.lower()
+        if lowered.startswith("delta:"):
+            continue
+        if line.startswith(("+", "-")):
+            line = line[1:].strip()
+        if line:
+            return line
+    return ""
+
+
+def _change_summary(event: AlertEvent, added: list[str] | None = None, removed: list[str] | None = None) -> str:
+    added = added or []
+    removed = removed or []
+    if event.mode == "differential":
+        if added or removed:
+            return f"新增 {len(added)} 项 / 消失 {len(removed)} 项"
+        return f"新增 {_display_number(event.current_value)} 项"
+    return _display_number(event.current_value)
+
+
+def _generic_risk(event: AlertEvent) -> str:
+    override = _state_risk_override(event)
+    if override:
+        return override
+    if event.check_id == "open_ports":
+        return "发现监听端口变化，请确认是否为预期服务。"
+    if event.mode == "differential":
+        return "检测到基线变化，请确认是否为预期变更。"
+    return "检测结果达到告警阈值，请确认当前状态。"
+
+
+def _generic_action(event: AlertEvent) -> str:
+    return _action_hint(event.check_id, event.alert_state) or "确认该告警是否为预期状态。"
+
+
+def _generic_facts(event: AlertEvent) -> list[tuple[str, str]]:
+    raw = event.raw_output or ""
+    added, removed = _extract_diff_items(raw)
+    facts: list[tuple[str, str]] = []
+
+    if event.mode == "differential":
+        facts.append(("变化", _change_summary(event, added, removed)))
+    else:
+        facts.append(("当前值", _display_number(event.current_value)))
+
+    if event.check_id == "open_ports":
+        if added:
+            facts.append(("新增端口", _compact_items(added, max_items=4)))
+        if removed:
+            facts.append(("消失端口", _compact_items(removed, max_items=4)))
+        if not added and not removed:
+            signal = _first_signal_line(raw)
+            if signal:
+                facts.append(("监听项", signal))
+        return facts
+
+    signal = _first_signal_line(raw)
+    if signal:
+        facts.append(("触发内容", signal))
+    return facts
+
 def format_alert_detail(event_data: dict[str, Any]) -> str:
     """Format state-machine details from a serialized alert event."""
     alert_state = str(event_data.get("alert_state") or "")
@@ -332,8 +487,12 @@ def format_alert_detail(event_data: dict[str, Any]) -> str:
             f"下一观察点: {card['next_watch']}",
         ]
     )
-    return "\n".join(lines)
 
+    raw_output = str(event_data.get("raw_output") or "").strip()
+    if raw_output:
+        lines.extend(["", "证据摘要:", _truncate_text(raw_output, 1200)])
+
+    return "\n".join(lines)
 
 def _nonempty_lines(raw_output: str) -> list[str]:
     return [line.strip() for line in (raw_output or "").splitlines() if line.strip()]
@@ -551,48 +710,70 @@ def _format_ssh_login_session_context(context: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _ssh_risk(event: AlertEvent, success: bool) -> str:
+    override = _state_risk_override(event)
+    if override:
+        return override
+    if success and event.check_id == "ssh_success_login_offhours":
+        return "检测到非工作时段 SSH 成功登录，请确认是否为授权操作。"
+    if success:
+        return "检测到 SSH 成功登录，请确认是否为本人或授权操作。"
+    if event.check_id == "ssh_bruteforce":
+        return "检测到新的 SSH 暴力破解来源，请确认是否需要封禁。"
+    return "短时间内出现多次 SSH 登录失败，疑似密码探测。"
+
+
 def _format_ssh_session_commands_alert(event: AlertEvent) -> str:
-    emoji = severity_emoji(event.severity)
-    label = event.severity_label.upper()
     updates = event.context.get("ssh_command_updates", []) if isinstance(event.context, dict) else []
-
-    lines = [
-        f"{emoji} [{label}] {event.check_name}",
-        "",
-        f"告警时间: {event.timestamp}",
-        f"新增命令: {_display_number(event.current_value)}",
-    ]
-
-    _append_alert_guidance(lines, event)
+    facts: list[tuple[str, str]] = [("新增命令", _display_number(event.current_value))]
+    sections: list[tuple[str, list[str]]] = []
 
     if isinstance(updates, list) and updates:
-        lines.extend(["", "命令增量:"])
+        command_lines: list[str] = []
         all_commands: list[str] = []
+        first_session_added = False
+
         for update in updates[:5]:
             if not isinstance(update, dict):
                 continue
-            commands = [str(x) for x in update.get("added_commands", []) if str(x).strip()]
+            commands = [str(x).strip() for x in update.get("added_commands", []) if str(x).strip()]
             all_commands.extend(commands)
-            lines.append(f"- 会话: {_format_session_identity(update)}")
+            if not first_session_added:
+                facts.append(("会话", _format_session_identity(update)))
+                first_session_added = True
+            command_lines.append(f"- 会话：{_format_session_identity(update)}")
             for command in commands[:10]:
-                lines.append(f"  - {command}")
+                command_lines.append(f"  - {command}")
             if len(commands) > 10:
-                lines.append(f"  ... (+{len(commands) - 10} more)")
+                command_lines.append(f"  ... (+{len(commands) - 10} more)")
 
-        for hint in _suspicious_command_hints(all_commands):
-            lines.append(f"⚠️ {hint}")
+        if all_commands:
+            facts.append(("重点命令", _compact_items(all_commands, max_items=2)))
+        if command_lines:
+            sections.append(("命令增量", command_lines))
+
+        hints = _suspicious_command_hints(all_commands)
+        if hints:
+            sections.append(("风险提示", [f"⚠️ {hint}" for hint in hints]))
     else:
         raw = (event.raw_output or "").strip()
         if raw:
-            output_label = "变更详情:" if event.mode == "differential" else "检测结果:"
-            lines.extend(["", output_label, raw[:800]])
+            output_label = "变更详情" if event.mode == "differential" else "检测结果"
+            sections.append((output_label, [_truncate_text(raw, 800)]))
 
-    return "\n".join(lines)
+    return AlertCard(
+        title=event.check_name,
+        level=_alert_level(event),
+        risk=_state_risk_override(event) or "已登录 SSH 会话出现新增命令，请确认是否为授权操作。",
+        action=_action_hint(event.check_id, event.alert_state),
+        timestamp=event.timestamp,
+        facts=facts,
+        status=_alert_status(event),
+        sections=sections,
+    ).render()
 
 
 def _format_ssh_alert_message(event: AlertEvent) -> str:
-    emoji = severity_emoji(event.severity)
-    label = event.severity_label.upper()
     success = event.check_id in SSH_SUCCESS_CHECK_IDS
     lines_raw = _nonempty_lines(event.raw_output)
     records = [_parse_ssh_line(line, success=success) for line in lines_raw]
@@ -614,39 +795,41 @@ def _format_ssh_alert_message(event: AlertEvent) -> str:
     method_values = [record["method"] for record in records]
     port_values = [record["port"] for record in records]
 
-    lines = [
-        f"{emoji} [{label}] {event.check_name}",
-        "",
-        f"告警时间: {event.timestamp}",
-        f"数量: {count_text}",
-    ]
-
-    _append_alert_guidance(lines, event)
-
+    facts: list[tuple[str, str]] = [("数量", count_text)]
     if records:
-        lines.extend(
+        facts.extend(
             [
-                "",
-                f"- {focus_label}: {_counter_summary(ip_counter)}",
-                f"- 相关用户: {_unique_summary(user_values)}",
-                f"- 登录方式: {_unique_summary(method_values)}",
-                f"- 目标端口: {_unique_summary(port_values)}",
+                (focus_label, _counter_summary(ip_counter)),
+                ("相关用户", _unique_summary(user_values)),
+                ("登录方式", _unique_summary(method_values)),
+                ("目标端口", _unique_summary(port_values)),
+                ("时间", _ssh_time_summary(records)),
             ]
         )
-        lines.append(f"- 时间: {_ssh_time_summary(records)}")
     else:
-        lines.extend(["", "- 本次是状态变化通知，没有新的 SSH 日志记录。"])
+        facts.append(("记录", "本次是状态变化通知，没有新的 SSH 日志记录。"))
 
+    sections: list[tuple[str, list[str]]] = []
     samples = _ssh_sample_lines(records)
     if samples:
-        record_title = "登录记录:" if success else "失败记录:"
-        lines.extend(["", record_title])
-        lines.extend(samples)
+        record_title = "登录记录" if success else "失败记录"
+        sections.append((record_title, samples))
 
     if success:
-        lines.extend(_format_ssh_login_session_context(event.context))
+        session_lines = [line for line in _format_ssh_login_session_context(event.context) if line]
+        if session_lines:
+            sections.append((session_lines[0].rstrip(":："), session_lines[1:]))
 
-    return "\n".join(lines)
+    return AlertCard(
+        title=event.check_name,
+        level=_alert_level(event),
+        risk=_ssh_risk(event, success),
+        action=_action_hint(event.check_id, event.alert_state),
+        timestamp=event.timestamp,
+        facts=facts,
+        status=_alert_status(event),
+        sections=sections,
+    ).render()
 
 
 def format_alert_message(event: AlertEvent) -> str:
@@ -657,29 +840,15 @@ def format_alert_message(event: AlertEvent) -> str:
     if event.check_id in SSH_CHECK_IDS:
         return _format_ssh_alert_message(event)
 
-    emoji = severity_emoji(event.severity)
-    label = event.severity_label.upper()
-    mode_label = "新增变化" if event.mode == "differential" else "当前快照"
-    value_text = _display_number(event.current_value)
-
-    lines = [
-        f"{emoji} [{label}] {event.check_name}",
-        "",
-        f"告警时间: {event.timestamp}",
-        f"{mode_label}: {value_text}",
-    ]
-
-    _append_alert_guidance(lines, event)
-
-    raw = (event.raw_output or "").strip()
-    if raw:
-        if len(raw) > 800:
-            raw = raw[:800] + "\n... (已截断)"
-        output_label = "变更详情:" if event.mode == "differential" else "检测结果:"
-        lines.extend(["", output_label, raw])
-
-    return "\n".join(lines)
-
+    return AlertCard(
+        title=event.check_name,
+        level=_alert_level(event),
+        risk=_generic_risk(event),
+        action=_generic_action(event),
+        timestamp=event.timestamp,
+        facts=_generic_facts(event),
+        status=_alert_status(event),
+    ).render()
 
 def _extract_ip_list(raw_output: str) -> list[str]:
     """Extract unique IPv4/IPv6 tokens from free-form output."""

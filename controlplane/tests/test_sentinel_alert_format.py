@@ -33,50 +33,60 @@ class AlertFormatTests(unittest.TestCase):
             fingerprint=fingerprint,
         )
 
-    def test_generic_card_uses_operator_facing_sections(self):
+    def test_generic_card_uses_productized_sections(self):
         msg = format_alert_message(
             self._event(
                 state="ESCALATED_L2",
                 previous="ESCALATED_L1",
                 fingerprint="1.2.3.4|22|unknown|failed",
+                raw_output="delta: +1 / -0\n+ 0.0.0.0:8080",
+                current_value=1,
             )
         )
-        self.assertIn("告警时间:", msg)
-        self.assertIn("📈 威胁加剧，已升级至二级", msg)
-        self.assertIn("💡 请确认监听端口变化是否符合预期，并排查未知服务。", msg)
+
+        self.assertIn("🟠 高危｜新增监听端口", msg)
+        self.assertIn("风险判断：发现监听端口变化，请确认是否为预期服务。", msg)
+        self.assertIn("关键对象：", msg)
+        self.assertIn("- 变化：新增 1 项 / 消失 0 项", msg)
+        self.assertIn("- 新增端口：0.0.0.0:8080", msg)
+        self.assertIn("建议动作：请确认监听端口变化是否符合预期，并排查未知服务。", msg)
+        self.assertIn("时间：2026-04-22 21:00:00", msg)
+        self.assertIn("状态：二级升级", msg)
+        self.assertNotIn("delta:", msg)
+        self.assertNotIn("变更详情", msg)
         self.assertNotIn("[DEBUG]", msg)
-        self.assertNotIn("当前值:", msg)
         self.assertNotIn("指纹:", msg)
         self.assertNotIn("原始数据:", msg)
-        self.assertNotIn("发生了什么", msg)
-        self.assertNotIn("需要关注", msg)
-        self.assertNotIn("建议处理", msg)
 
-    def test_new_state_omits_default_suggestion(self):
+    def test_new_state_keeps_state_as_status(self):
         msg = format_alert_message(self._event(state="NEW"))
-        self.assertIn("🆕 首次检测到该威胁", msg)
+        self.assertIn("状态：新威胁首次出现", msg)
         self.assertNotIn("先确认是否为已知变更或可信来源", msg)
         self.assertNotIn("[DEBUG]", msg)
 
-    def test_recovered_state_omits_archive_suggestion(self):
+    def test_recovered_state_uses_recovery_risk_and_action(self):
         msg = format_alert_message(self._event(state="RECOVERED", previous="RECOVERED_CANDIDATE"))
-        self.assertIn("✅ 威胁已归档", msg)
-        self.assertIn("💡 无需操作，持续观察。", msg)
+        self.assertIn("风险判断：新增监听端口已归档，当前无需处理。", msg)
+        self.assertIn("建议动作：无需操作，持续观察。", msg)
+        self.assertIn("状态：观察期通过，威胁归档", msg)
         self.assertNotIn("固化长期防护策略", msg)
         self.assertNotIn("[DEBUG]", msg)
 
-    def test_alert_detail_uses_readable_transition_without_internal_reason(self):
+    def test_alert_detail_uses_readable_transition_and_keeps_evidence(self):
         detail = format_alert_detail(
             self._event(
                 state="ESCALATED_L2",
                 previous="ESCALATED_L1",
                 rule="line count >= 12",
+                raw_output="delta: +1 / -0\n+ 0.0.0.0:8080",
             ).to_dict()
         )
 
         self.assertIn("威胁阶段: 二级升级", detail)
         self.assertIn("状态迁移: 一级升级 → 二级升级", detail)
         self.assertIn("触发规则: line count >= 12", detail)
+        self.assertIn("证据摘要:", detail)
+        self.assertIn("delta: +1 / -0", detail)
         self.assertNotIn("阶段风险", detail)
         self.assertNotIn("state_transition (", detail)
 
@@ -102,13 +112,14 @@ class AlertFormatTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("数量: 12", msg)
-        self.assertIn("失败来源 IP: 45.77.105.217 (2次), 114.246.239.136 (1次)", msg)
-        self.assertIn("相关用户: root, admin", msg)
-        self.assertIn("📈 威胁持续，已升级至一级", msg)
-        self.assertIn("💡 请检查来源 IP；确认持续攻击后封禁来源或启用 fail2ban。", msg)
-        self.assertIn("失败记录:", msg)
-        self.assertIn("时间: Apr 23 10:10:16, Apr 23 10:11:23, Apr 23 10:11:37", msg)
+        self.assertIn("风险判断：短时间内出现多次 SSH 登录失败，疑似密码探测。", msg)
+        self.assertIn("数量：12", msg)
+        self.assertIn("失败来源 IP：45.77.105.217 (2次), 114.246.239.136 (1次)", msg)
+        self.assertIn("相关用户：root, admin", msg)
+        self.assertIn("状态：一级升级", msg)
+        self.assertIn("建议动作：请检查来源 IP；确认持续攻击后封禁来源或启用 fail2ban。", msg)
+        self.assertIn("失败记录：", msg)
+        self.assertIn("时间：Apr 23 10:10:16, Apr 23 10:11:23, Apr 23 10:11:37", msg)
         self.assertNotIn("line count >= 10", msg)
         self.assertNotIn("[DEBUG]", msg)
         self.assertNotIn("原始数据", msg)
@@ -132,15 +143,18 @@ class AlertFormatTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("数量: 2", msg)
-        self.assertIn("登录来源 IP: 114.246.239.136 (2次)", msg)
-        self.assertIn("🆕 首次检测到该威胁", msg)
-        self.assertIn("💡 请确认登录是否为本人操作", msg)
-        self.assertIn("相关用户: root", msg)
-        self.assertIn("登录方式: publickey", msg)
+        self.assertIn("风险判断：检测到 SSH 成功登录，请确认是否为本人或授权操作。", msg)
+        self.assertIn("数量：2", msg)
+        self.assertIn("登录来源 IP：114.246.239.136 (2次)", msg)
+        self.assertIn("状态：新威胁首次出现", msg)
+        self.assertIn("建议动作：请确认登录是否为本人操作", msg)
+        self.assertIn("相关用户：root", msg)
+        self.assertIn("登录方式：publickey", msg)
         self.assertIn("root@114.246.239.136", msg)
-        self.assertIn("登录记录:", msg)
-        self.assertIn("时间: Apr 23 10:11:29, Apr 23 10:11:37", msg)
+        self.assertIn("登录记录：", msg)
+        self.assertIn("时间：Apr 23 10:11:29, Apr 23 10:11:37", msg)
+        self.assertLess(msg.index("风险判断："), msg.index("关键对象："))
+        self.assertLess(msg.index("关键对象："), msg.index("建议动作："))
         self.assertNotIn("当前值", msg)
         self.assertNotIn("原始数据", msg)
         self.assertNotIn("指纹:", msg)
@@ -148,7 +162,6 @@ class AlertFormatTests(unittest.TestCase):
         self.assertNotIn("需要关注", msg)
         self.assertNotIn("建议处理", msg)
         self.assertNotIn(" 至 ", msg)
-        self.assertLess(msg.index("💡"), msg.index("登录来源 IP:"))
 
     def test_ssh_success_login_appends_session_command_summary(self):
         event = self._event(
@@ -174,7 +187,7 @@ class AlertFormatTests(unittest.TestCase):
 
         msg = format_alert_message(event)
 
-        self.assertIn("会话命令追踪:", msg)
+        self.assertIn("会话命令追踪：", msg)
         self.assertIn("root@114.246.239.136:22 (ses=101, sshd PID=12345)", msg)
         self.assertIn("- cat /etc/passwd", msg)
 
@@ -201,11 +214,13 @@ class AlertFormatTests(unittest.TestCase):
 
         msg = format_alert_message(event)
 
-        self.assertIn("新增命令: 2", msg)
-        self.assertIn("💡 请确认新增命令是否为授权操作。", msg)
-        self.assertIn("命令增量:", msg)
+        self.assertIn("新增命令：2", msg)
+        self.assertIn("重点命令：iptables -F，chmod 777 /tmp/exploit", msg)
+        self.assertIn("建议动作：请确认新增命令是否为授权操作。", msg)
+        self.assertIn("命令增量：", msg)
         self.assertIn("root@203.0.113.10:22 (ses=101, sshd PID=12345)", msg)
         self.assertIn("iptables -F", msg)
+        self.assertIn("风险提示：", msg)
         self.assertIn("检测到防火墙规则清理行为", msg)
 
 

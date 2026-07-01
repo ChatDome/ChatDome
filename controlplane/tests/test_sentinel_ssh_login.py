@@ -304,7 +304,7 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
 
                 self.assertIn("pushed", result)
                 self.assertEqual(len(alerts), 1)
-                self.assertIn("会话命令追踪:", alerts[0][1])
+                self.assertIn("会话命令追踪：", alerts[0][1])
                 self.assertIn("ses=101", alerts[0][1])
                 self.assertIn("cat /etc/passwd", alerts[0][1])
 
