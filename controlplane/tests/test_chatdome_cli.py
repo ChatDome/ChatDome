@@ -1,5 +1,7 @@
 import asyncio
 import importlib.util
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -264,6 +266,24 @@ class ChatDomeCLITests(unittest.TestCase):
 
         self.cli.delete_profile(SimpleNamespace(profile="second"))
         self.assertNotIn("second", self._load_profiles())
+
+
+
+
+class ChatDomeCLIHelloTests(unittest.TestCase):
+    def test_hello_prints_logo_only(self):
+        result = subprocess.run(
+            [sys.executable, str(CLI_PATH), "hello"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("CHATDOME", result.stdout)
+        self.assertIn("____  _   _", result.stdout)
+        self.assertIn("|_____|", result.stdout)
+        self.assertLessEqual(max(len(line) for line in result.stdout.splitlines()), 72)
 
 
 if __name__ == "__main__":

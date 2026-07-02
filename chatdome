@@ -351,6 +351,10 @@ start_service() {
   fi
   pause
 }
+lets_chat() {
+  run_cli hello
+  pause
+}
 
 service_menu() {
   while true; do
@@ -992,30 +996,35 @@ main_menu() {
   while true; do
     trap 'printf "\n"; exit 130' INT
     show_header
-    echo "1) Start service"
-    echo "2) Service management"
-    echo "3) AI model management"
-    echo "4) Telegram configuration"
-    echo "5) Sentinel management"
-    echo "6) Agent security policy"
-    echo "7) System maintenance"
+    echo "1) Lets chat"
+    echo "2) Start service"
+    echo "3) Service management"
+    echo "4) AI model management"
+    echo "5) Telegram configuration"
+    echo "6) Sentinel management"
+    echo "7) Agent security policy"
+    echo "8) System maintenance"
     echo "0) Exit"
     echo
     read -r -p "Select: " choice
     case "$choice" in
-      1) start_service ;;
-      2) service_menu ;;
-      3) llm_menu ;;
-      4) telegram_menu ;;
-      5) sentinel_menu ;;
-      6) agent_menu ;;
-      7) maintenance_menu ;;
+      1) lets_chat ;;
+      2) start_service ;;
+      3) service_menu ;;
+      4) llm_menu ;;
+      5) telegram_menu ;;
+      6) sentinel_menu ;;
+      7) agent_menu ;;
+      8) maintenance_menu ;;
       0) exit 0 ;;
     esac
   done
 }
 
 case "${1:-}" in
+  hello) run_cli hello ;;
+  status) run_cli status ;;
+  doctor) run_cli doctor ;;
   --update) update_chatdome ;;
   --stop) stop_service_with_result ;;
   --disable-service) disable_service_with_result ;;

@@ -25,7 +25,7 @@ ChatDome 的运行文件分三类：日志、运行数据、运行状态。
 /var/lib/chatdome/update/previous_commit
 /var/lib/chatdome/update/chatdome.service.rollback
 /var/lib/chatdome/update/chatdome.service.update
-/var/lib/chatdome/venvs/<version>/
+/var/lib/chatdome/venvs/<commit>/
 
 /run/chatdome/chatdome.pid
 /run/chatdome/chatdome.lock
@@ -40,7 +40,7 @@ ChatDome 的运行文件分三类：日志、运行数据、运行状态。
 | 类别 | 目录 | 内容 |
 |---|---|---|
 | 日志 | `/var/log/chatdome/` | 人工排查和日志系统采集使用的运行记录 |
-| 运行数据 | `/var/lib/chatdome/` | 服务重启后仍需要保留的数据 |
+| 运行数据 | `/var/lib/chatdome/` | 服务重启、代码更新后仍需要保留的数据 |
 | 运行状态 | `/run/chatdome/` | 只对当前进程有效，重启后可丢弃的状态文件 |
 
 ## 日志文件
@@ -85,11 +85,12 @@ ChatDome 的运行文件分三类：日志、运行数据、运行状态。
 | `CHATDOME_DATA_DIR` | `/var/lib/chatdome` | 运行数据目录 |
 | `CHATDOME_RUN_DIR` | `/run/chatdome` | 运行状态目录 |
 | `CHATDOME_UPDATE_RUNTIME_LOG` | `/var/log/chatdome/update-runtime-check.log` | 更新候选版本检查失败日志 |
+| `CHATDOME_VENV_ROOT` | `/var/lib/chatdome/venvs` | 版本化 Python 虚拟环境目录 |
 
 源码开发时未设置 `CHATDOME_RUN_DIR`，Python 代码默认使用当前工作目录下的运行状态目录；以仓库根目录为 `/path/to/ChatDome` 时，该目录为 `/path/to/ChatDome/chat_data/run/`。
 
 ## 路径策略
 
-ChatDome 的标准运行文件路径以本文定义的新布局为准。部分旧版路径会在首次访问时自动迁移到新布局；新代码不得新增旧路径写入点。
+ChatDome 的标准运行文件路径以本文定义的新布局为准。新代码不得新增 `/var/lib/chatdome` 根级业务文件，也不得继续扩展旧文件名。
 
-无法自动迁移的旧路径历史文件由部署方按需手动归档或删除。
+当前代码 `runtime_paths.py` 仍对少量旧根级文件执行一次性迁移。该行为属于现有实现遗留；若执行“不保留旧版本兼容”策略，需要同步删除迁移逻辑。

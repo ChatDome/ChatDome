@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import re
+import stat
 import sys
 import time
 import urllib.parse
@@ -37,6 +38,7 @@ TOKEN_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
 if CONTROLPLANE_SRC.is_dir():
     sys.path.insert(0, str(CONTROLPLANE_SRC))
 
+from chatdome import __version__
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.config import validate_profile_name
 from chatdome.llm.profile_admin import (
@@ -48,7 +50,11 @@ from chatdome.llm.profile_admin import (
 )
 
 PROFILE_AUDIT_RECORDER = CommandAuditTracker.record_event
-
+CHATDOME_LOGO = r"""    ____  _   _   ___   _____  ____    ___   __  __  _____
+   / ___|| | | | / _ \ |_   _||  _ \  / _ \ |  \/  || ____|
+  / /    | |_| |/ /_\ \  | |  | | | |/ / \ \| |\/| ||  _|
+ / /___  |  _  ||  _  |  | |  | |_| |\ \_/ /| |  | || |___
+ \_____| |_| |_||_| |_|  |_|  |____/  \___/ |_|  |_||_____|"""
 
 def _chmod_owner_only(path: Path) -> None:
     try:
@@ -233,32 +239,134 @@ def health_check(args: argparse.Namespace) -> None:
     print(f"ChatDome healthy: pid={pid}")
 
 
+def _config_root_for_report() -> tuple[dict[str, Any], str]:
+    if not CONFIG_PATH.exists():
+        return {}, "missing"
+    try:
+        data = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        return {}, f"invalid: {exc}"
+    if not isinstance(data, dict):
+        return {}, "invalid: YAML root must be a mapping"
+    root = data.get("chatdome") or {}
+    if not isinstance(root, dict):
+        return {}, "invalid: chatdome root must be a mapping"
+    return root, "ready"
+
+
+def _profile_status(root: dict[str, Any]) -> tuple[str, str]:
+    active = str(root.get("active_ai_profile") or "").strip()
+    profiles = root.get("ai_profiles") if isinstance(root.get("ai_profiles"), dict) else {}
+    if not active:
+        return "missing", "active profile not set"
+    profile = profiles.get(active) if isinstance(profiles, dict) else None
+    if not isinstance(profile, dict):
+        return "missing", f"profile not found: {active}"
+    provider = str(profile.get("provider") or "openai").strip() or "openai"
+    api_mode = str(profile.get("api_mode") or "openai_api").strip() or "openai_api"
+    model = str(profile.get("model") or "(unset)").strip() or "(unset)"
+    if api_mode in {"codex", "codex_responses", "codex_oauth"} or provider == "codex":
+        token_file = str(profile.get("codex_token_file") or "~/.chatdome/auth.json")
+        status = "ready" if _codex_token_file_path(token_file).is_file() else "missing token"
+    else:
+        status = "ready" if str(profile.get("api_key") or "").strip() else "missing api_key"
+    return status, f"{provider} / {model} (profile={active})"
+
+
+def _sentinel_status(root: dict[str, Any]) -> str:
+    sentinel = root.get("sentinel") if isinstance(root.get("sentinel"), dict) else {}
+    if not sentinel.get("enabled", False):
+        return "disabled"
+    checks = sentinel.get("checks") if isinstance(sentinel.get("checks"), list) else []
+    return f"enabled, checks={len(checks)}"
+
+
+def _telegram_status(root: dict[str, Any]) -> str:
+    telegram = root.get("telegram") if isinstance(root.get("telegram"), dict) else {}
+    return "ready" if str(telegram.get("bot_token") or "").strip() else "missing bot_token"
+
+
 def show_status(args: argparse.Namespace) -> None:
     del args
-    data = _load_yaml()
-    root = _chatdome_root(data)
-    telegram = _section(root, "telegram")
-    sentinel = _section(root, "sentinel")
-    agent = _section(root, "agent")
-    active_profile = str(root.get("active_ai_profile") or "(unset)")
+    root, config_status = _config_root_for_report()
     pid = _read_pid()
     running = _process_running(pid)
+    llm_status, llm_detail = _profile_status(root)
 
     print("ChatDome status")
-    print(f"- root: {ROOT}")
-    print(f"- config: {CONFIG_PATH}")
-    print(f"- data: {DATA_DIR}")
-    print(f"- run: {RUN_DIR}")
-    print(f"- running: {'yes' if running else 'no'}")
-    print(f"- pid: {pid or '(none)'}")
-    print(f"- active LLM: {active_profile}")
-    print(f"- Sentinel: {'enabled' if sentinel.get('enabled') else 'disabled'}")
-    print(f"- generated commands: {agent.get('allow_generated_commands', True)}")
-    print(f"- unrestricted commands: {agent.get('allow_unrestricted_commands', True)}")
-    print(f"- Telegram token: {_mask_secret(telegram.get('bot_token', ''))}")
-    print(f"- allowed chats: {telegram.get('allowed_chat_ids') or '(all)'}")
-    print(f"- LLM admin chats: {_llm_admin_chat_ids_display(telegram)}")
+    print(f"- Version: {__version__}")
+    print(f"- Config: {config_status} ({CONFIG_PATH})")
+    print(f"- Service: {'running' if running else 'stopped'}")
+    print(f"- LLM: {llm_status} ({llm_detail})")
+    print(f"- Telegram: {_telegram_status(root)}")
+    print(f"- Sentinel: {_sentinel_status(root)}")
+    print(f"- Logs: {os.environ.get('CHATDOME_LOG_DIR', str(DATA_DIR))}")
 
+
+def hello(args: argparse.Namespace) -> None:
+    del args
+    print(CHATDOME_LOGO)
+
+
+def _doctor_line(level: str, name: str, message: str) -> bool:
+    print(f"[{level}] {name}: {message}")
+    return level == "fail"
+
+
+def doctor(args: argparse.Namespace) -> None:
+    del args
+    failures = 0
+    root, config_status = _config_root_for_report()
+
+    print("ChatDome doctor")
+    if config_status == "ready":
+        failures += _doctor_line("ok", "config", str(CONFIG_PATH))
+    else:
+        message = f"create config: {CONFIG_PATH}" if config_status == "missing" else config_status
+        failures += _doctor_line("fail", "config", message)
+
+    if CONFIG_PATH.exists() and os.name == "posix":
+        mode = stat.S_IMODE(CONFIG_PATH.stat().st_mode)
+        if mode & 0o077:
+            failures += _doctor_line("warn", "config-permission", f"chmod 600 {CONFIG_PATH}")
+        else:
+            failures += _doctor_line("ok", "config-permission", "0600")
+
+    llm_status, llm_detail = _profile_status(root)
+    llm_message = f"ready ({llm_detail})" if llm_status == "ready" else f"configure active LLM profile ({llm_detail})"
+    failures += _doctor_line("ok" if llm_status == "ready" else "fail", "llm", llm_message)
+
+    telegram = root.get("telegram") if isinstance(root.get("telegram"), dict) else {}
+    token_ready = bool(str(telegram.get("bot_token") or "").strip())
+    failures += _doctor_line("ok" if token_ready else "fail", "telegram", "ready" if token_ready else "set chatdome.telegram.bot_token")
+
+    sentinel = root.get("sentinel") if isinstance(root.get("sentinel"), dict) else {}
+    allowed_chat_ids = telegram.get("allowed_chat_ids") if isinstance(telegram.get("allowed_chat_ids"), list) else []
+    alert_chat_ids = sentinel.get("alert_chat_ids") if isinstance(sentinel.get("alert_chat_ids"), list) else []
+    if allowed_chat_ids or alert_chat_ids:
+        failures += _doctor_line("ok", "chat-ids", "configured")
+    else:
+        failures += _doctor_line("warn", "chat-ids", "set allowed_chat_ids or sentinel.alert_chat_ids")
+
+    pid = _read_pid()
+    running = _process_running(pid)
+    failures += _doctor_line("ok" if running else "warn", "service", f"pid={pid}" if running else "start ChatDome from menu")
+
+    sentinel_enabled = bool(sentinel.get("enabled", False))
+    checks = sentinel.get("checks") if isinstance(sentinel.get("checks"), list) else []
+    if sentinel_enabled and not checks:
+        failures += _doctor_line("warn", "sentinel", "set sentinel checks or disable sentinel")
+    else:
+        failures += _doctor_line("ok", "sentinel", "enabled" if sentinel_enabled else "disabled")
+
+    for label, path in (("logs", Path(os.environ.get("CHATDOME_LOG_DIR", str(DATA_DIR)))), ("run", RUN_DIR)):
+        if path.exists() and os.access(path, os.W_OK):
+            failures += _doctor_line("ok", label, str(path))
+        else:
+            failures += _doctor_line("warn", label, f"create writable directory: {path}")
+
+    if failures:
+        raise SystemExit(1)
 
 def show_env_summary(args: argparse.Namespace) -> None:
     del args
@@ -706,7 +814,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("ensure-config").set_defaults(func=ensure_config)
     sub.add_parser("validate-config").set_defaults(func=validate_config)
     sub.add_parser("health-check").set_defaults(func=health_check)
+    sub.add_parser("hello").set_defaults(func=hello)
     sub.add_parser("status").set_defaults(func=show_status)
+    sub.add_parser("doctor").set_defaults(func=doctor)
     sub.add_parser("env-summary").set_defaults(func=show_env_summary)
     sub.add_parser("llm-list").set_defaults(func=llm_list)
     p = sub.add_parser("llm-profile-state")

@@ -230,6 +230,32 @@ esac
     return locals()
 
 
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX pseudo terminals")
+def test_lets_chat_runs_hello_and_returns_to_menu(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    process, master_fd = _spawn_interactive_menu(fixture["deploy"], fixture["env"])
+
+    try:
+        output = _read_pty_until(master_fd, "Select: ")
+        assert "1) Lets chat" in output
+        assert "2) Start service" in output
+
+        os.write(master_fd, b"1\n")
+        _read_pty_until(master_fd, "Press Enter to continue...")
+        calls = fixture["command_log"].read_text(encoding="utf-8")
+        assert "hello" in calls
+
+        os.write(master_fd, b"\n")
+        output = _read_pty_until(master_fd, "Select: ")
+        assert "1) Lets chat" in output
+        assert "2) Start service" in output
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        os.close(master_fd)
+
 def test_update_skips_when_origin_main_matches_head(tmp_path):
     fixture = _create_fixture(tmp_path)
     deploy = fixture["deploy"]
@@ -313,7 +339,7 @@ def test_ctrl_c_cancels_openai_configuration_and_exits_main_menu(tmp_path):
 
     try:
         _read_pty_until(master_fd, "Select: ")
-        os.write(master_fd, b"3\n")
+        os.write(master_fd, b"4\n")
         output = _read_pty_until(master_fd, "Select: ")
         assert "LLM Management" in output
         os.write(master_fd, b"2\n")
@@ -332,7 +358,8 @@ def test_ctrl_c_cancels_openai_configuration_and_exits_main_menu(tmp_path):
 
         os.write(master_fd, b"0\n")
         output = _read_pty_until(master_fd, "Select: ")
-        assert "1) Start service" in output
+        assert "1) Lets chat" in output
+        assert "2) Start service" in output
         os.killpg(process.pid, signal.SIGINT)
 
         assert process.wait(timeout=5) == 130
@@ -352,7 +379,7 @@ def test_existing_openai_profile_requires_explicit_overwrite(tmp_path):
 
     try:
         _read_pty_until(master_fd, "Select: ")
-        os.write(master_fd, b"3\n")
+        os.write(master_fd, b"4\n")
         _read_pty_until(master_fd, "Select: ")
         os.write(master_fd, b"2\n")
         _read_pty_until(master_fd, "Profile name [my-openai-profile]: ")
@@ -381,7 +408,7 @@ def test_confirmed_openai_overwrite_passes_fingerprint(tmp_path):
 
     try:
         _read_pty_until(master_fd, "Select: ")
-        os.write(master_fd, b"3\n")
+        os.write(master_fd, b"4\n")
         _read_pty_until(master_fd, "Select: ")
         os.write(master_fd, b"2\n")
         _read_pty_until(master_fd, "Profile name [my-openai-profile]: ")
@@ -639,7 +666,7 @@ def test_start_menu_starts_stopped_service(tmp_path):
 
     try:
         _read_pty_until(master_fd, "Select: ")
-        os.write(master_fd, b"1\n")
+        os.write(master_fd, b"2\n")
         output = _read_pty_until(master_fd, "Start ChatDome service now? [y/N] ")
         assert "Restart ChatDome service now?" not in output
         os.write(master_fd, b"y\n")
@@ -661,7 +688,7 @@ def test_start_menu_restarts_running_service(tmp_path):
 
     try:
         _read_pty_until(master_fd, "Select: ")
-        os.write(master_fd, b"1\n")
+        os.write(master_fd, b"2\n")
         output = _read_pty_until(master_fd, "Restart ChatDome service now? [y/N] ")
         assert "Start ChatDome service now?" not in output
         os.write(master_fd, b"y\n")
@@ -695,7 +722,7 @@ def test_permanent_removal_requires_exact_confirmation(tmp_path):
     result = _run(
         ["bash", deploy / "chatdome"],
         env=fixture["env"],
-        input_text="7\n2\n2\nNO\n\n0\n0\n",
+        input_text="8\n2\n2\nNO\n\n0\n0\n",
         check=False,
     )
 
@@ -715,7 +742,7 @@ def test_permanent_removal_deletes_program_config_data_and_service(tmp_path):
     result = _run(
         ["bash", deploy / "chatdome"],
         env=fixture["env"],
-        input_text="7\n2\n2\nDELETE\n",
+        input_text="8\n2\n2\nDELETE\n",
         check=False,
     )
 
@@ -760,7 +787,7 @@ def test_ctrl_c_exits_from_llm_menu(tmp_path):
 
     try:
         _read_pty_until(master_fd, "Select: ")
-        os.write(master_fd, b"3\n")
+        os.write(master_fd, b"4\n")
         output = _read_pty_until(master_fd, "Select: ")
         assert "LLM Management" in output
 
