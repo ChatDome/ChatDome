@@ -289,7 +289,7 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertTrue(fake_agent.stopped)
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
         self.assertIn("/audit [N]", printed)
-        self.assertIn("chatdome> Session cleared.", printed)
+        self.assertIn("chatdome> ✅ Session cleared.", printed)
 
     def test_terminal_audit_filters_command_events(self):
         events = [
@@ -326,6 +326,223 @@ class ChatDomeCLITests(unittest.TestCase):
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
         self.assertIn("command_executed", printed)
         self.assertIn("whoami", printed)
+
+    def test_terminal_details_outputs_pending_approval(self):
+        class FakeAgent:
+            async def get_pending_approval_details(self, chat_id, approval_id=None, include_llm=True):
+                self.request = (chat_id, approval_id, include_llm)
+                return {
+                    "ok": True,
+                    "approval_id": "AP-1",
+                    "command": "systemctl restart sshd",
+                    "command_hash": "abcdef1234567890",
+                    "reason": "restart ssh service",
+                    "analysis": {
+                        "risk_level": "HIGH",
+                        "safety_status": "UNSAFE",
+                        "mutation_detected": True,
+                        "deletion_detected": False,
+                        "impact_analysis": "Restarts SSH service.",
+                    },
+                }
+
+            async def stop(self):
+                pass
+
+        fake_agent = FakeAgent()
+        runtime = self.cli._TerminalChatRuntime(fake_agent, -5)
+        with patch.object(self.cli, "_create_terminal_chat_runtime", return_value=runtime):
+            with patch("builtins.input", side_effect=["/details AP-1", "/exit"]):
+                with patch("builtins.print") as output:
+                    self.cli.hello(SimpleNamespace(chat_id=-5))
+
+        self.assertEqual(fake_agent.request, (-5, "AP-1", True))
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("Approval details", printed)
+        self.assertIn("systemctl restart sshd", printed)
+        self.assertIn("Run: /confirm [approval_id] or /reject [approval_id]", printed)
+
+    def test_terminal_continue_uses_round_limit_resolution(self):
+        class FakeAgent:
+            def __init__(self):
+                self.continued = []
+                self.resume_calls = []
+
+            async def resolve_round_limit(self, chat_id, action):
+                self.continued.append((chat_id, action))
+                return SimpleNamespace(kind="reply", content="continued", payload={})
+
+            async def resume_session(self, chat_id, action, approval_id=None):
+                self.resume_calls.append((chat_id, action, approval_id))
+                return "", SimpleNamespace(kind="reply", content="approved", payload={})
+
+            async def stop(self):
+                pass
+
+        fake_agent = FakeAgent()
+        runtime = self.cli._TerminalChatRuntime(fake_agent, -6)
+        with patch.object(self.cli, "_create_terminal_chat_runtime", return_value=runtime):
+            with patch("builtins.input", side_effect=["/continue", "/confirm AP-1", "/exit"]):
+                with patch("builtins.print"):
+                    self.cli.hello(SimpleNamespace(chat_id=-6))
+
+        self.assertEqual(fake_agent.continued, [(-6, "CONTINUE")])
+        self.assertEqual(fake_agent.resume_calls, [(-6, "APPROVE", "AP-1")])
+
+    def test_read_terminal_line_handles_ctrl_h_backspace(self):
+        class FakeIn:
+            def __init__(self):
+                self.chars = iter("ab\x08c\n")
+
+            def isatty(self):
+                return True
+
+            def fileno(self):
+                return 0
+
+            def read(self, _size):
+                return next(self.chars)
+
+        class FakeOut:
+            def __init__(self):
+                self.text = ""
+
+            def isatty(self):
+                return True
+
+            def write(self, value):
+                self.text += value
+
+            def flush(self):
+                pass
+
+        fake_in = FakeIn()
+        fake_out = FakeOut()
+        fake_termios = SimpleNamespace(
+            TCSADRAIN=0,
+            tcgetattr=lambda _fd: ["old"],
+            tcsetattr=lambda _fd, _when, _attrs: None,
+        )
+        fake_tty = SimpleNamespace(setraw=lambda _fd: None)
+        modules = {"termios": fake_termios, "tty": fake_tty}
+        with patch.dict(sys.modules, modules):
+            with patch.object(sys, "stdin", fake_in):
+                with patch.object(sys, "stdout", fake_out):
+                    line = self.cli._read_terminal_line("you> ")
+
+        self.assertEqual(line, "ac")
+        self.assertIn("\b \b", fake_out.text)
+
+    def test_terminal_command_completion_matches_model_commands(self):
+        self.assertEqual(self.cli._terminal_command_matches("/l"), ["/model_list"])
+        self.assertEqual(self.cli._terminal_command_matches("/m")[0], "/model")
+        self.assertEqual(self.cli._terminal_command_matches("/model other"), [])
+
+    def test_read_terminal_line_completes_single_slash_command_match(self):
+        class FakeIn:
+            def __init__(self):
+                self.chars = iter("/l\n")
+
+            def isatty(self):
+                return True
+
+            def fileno(self):
+                return 0
+
+            def read(self, _size):
+                return next(self.chars)
+
+        class FakeOut:
+            def __init__(self):
+                self.text = ""
+
+            def isatty(self):
+                return True
+
+            def write(self, value):
+                self.text += value
+
+            def flush(self):
+                pass
+
+        fake_in = FakeIn()
+        fake_out = FakeOut()
+        fake_termios = SimpleNamespace(
+            TCSADRAIN=0,
+            tcgetattr=lambda _fd: ["old"],
+            tcsetattr=lambda _fd, _when, _attrs: None,
+        )
+        fake_tty = SimpleNamespace(setraw=lambda _fd: None)
+        modules = {"termios": fake_termios, "tty": fake_tty}
+        with patch.dict(sys.modules, modules):
+            with patch.object(sys, "stdin", fake_in):
+                with patch.object(sys, "stdout", fake_out):
+                    line = self.cli._read_terminal_line("you> ")
+
+        self.assertEqual(line, "/model_list")
+        self.assertIn("/model_list", fake_out.text)
+
+    def test_terminal_model_commands_list_and_switch(self):
+        class FakeManager:
+            def __init__(self):
+                self.switched = []
+
+            def get_active_profile_name(self):
+                return "base"
+
+            def list_profiles(self):
+                return [
+                    SimpleNamespace(
+                        name="base",
+                        provider="openai",
+                        api_mode="openai_api",
+                        model="gpt-4o",
+                        base_url="https://api.openai.com/v1",
+                        key_ref="configured fp=12345678",
+                        status="ready",
+                        active=True,
+                    ),
+                    SimpleNamespace(
+                        name="other",
+                        provider="openai",
+                        api_mode="openai_api",
+                        model="gpt-4o-mini",
+                        base_url="https://api.openai.com/v1",
+                        key_ref="configured fp=87654321",
+                        status="ready",
+                        active=False,
+                    ),
+                ]
+
+            async def switch_profile(self, profile_name):
+                self.switched.append(profile_name)
+                return SimpleNamespace(
+                    profile_name=profile_name,
+                    profile=SimpleNamespace(
+                        provider="openai",
+                        api_mode="openai_api",
+                        model="gpt-4o-mini",
+                    ),
+                )
+
+        class FakeAgent:
+            def __init__(self):
+                self.llm_manager = FakeManager()
+
+        fake_agent = FakeAgent()
+        runtime = self.cli._TerminalChatRuntime(fake_agent, -7)
+
+        with patch("builtins.print") as output:
+            asyncio.run(self.cli._handle_terminal_command(runtime, "/model_list"))
+            asyncio.run(self.cli._handle_terminal_command(runtime, "/model other"))
+            asyncio.run(self.cli._handle_terminal_command(runtime, "/llm_list"))
+
+        self.assertEqual(fake_agent.llm_manager.switched, ["other"])
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("Switch: /model <profile_name>", printed)
+        self.assertIn("  /model other", printed)
+        self.assertIn("model switched for this terminal session: other", printed)
+
     def test_set_admin_chat_ids_writes_telegram_config(self):
         with patch("builtins.print") as output:
             self.cli.set_admin_chat_ids(SimpleNamespace(chat_ids="1, 2"))
@@ -344,7 +561,7 @@ class ChatDomeCLITests(unittest.TestCase):
             self.cli.telegram_status(SimpleNamespace())
 
         output.assert_any_call("- allowed chat ids: [123]")
-        output.assert_any_call("- LLM admin chat ids: [123]")
+        output.assert_any_call("- model admin chat ids: [123]")
 
     def test_health_check_requires_matching_ready_process(self):
         self.pid_path.parent.mkdir(parents=True, exist_ok=True)

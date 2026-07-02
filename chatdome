@@ -77,6 +77,19 @@ prompt_secret() {
   printf -v "$var_name" '%s' "$value"
 }
 
+prompt_choice() {
+  local var_name="$1"
+  local prompt="$2"
+  local default="${3-}"
+  local value
+  if ! read -r -p "$prompt" value; then
+    echo
+    value="$default"
+  fi
+  [[ -z "$value" ]] && value="$default"
+  printf -v "$var_name" '%s' "$value"
+}
+
 configure_openai_profile() {
   local profile profile_state model base_url api_key overwrite confirm
   local existing_mode="" existing_model="" existing_base_url="" fingerprint=""
@@ -176,7 +189,7 @@ delete_llm_profile() {
   prompt_value profile "Profile to delete: " || return $?
   active="$(run_cli llm-profile-info "$profile" --field active)" || { pause; return 1; }
   if [[ "$active" == "true" ]]; then
-    echo "Switch LLM before deleting this profile."
+    echo "Switch model before deleting this profile."
     pause
     return 0
   fi
@@ -396,12 +409,12 @@ service_menu() {
 llm_menu() {
   while true; do
     show_header
-    echo "LLM Management"
+    echo "Model Management"
     echo "1) List profiles"
-    echo "2) Add OpenAI-compatible LLM"
-    echo "3) Add Codex OAuth LLM"
-    echo "4) Delete LLM"
-    echo "5) Switch LLM"
+    echo "2) Add OpenAI-compatible model"
+    echo "3) Add Codex OAuth model"
+    echo "4) Delete model"
+    echo "5) Switch model"
     echo "6) Show setup guide"
     echo "0) Back"
     echo
@@ -423,10 +436,10 @@ llm_menu() {
 OpenAI-compatible:
   1. Choose a profile name, model, base URL, and API key.
   2. Confirm before adding or overwriting a profile.
-  3. ChatDome applies the LLM configuration automatically.
+  3. ChatDome applies the model configuration automatically.
 
 Codex OAuth:
-  1. Run Add Codex OAuth LLM.
+  1. Run Add Codex OAuth model.
   2. Open the URL and enter the code shown in this terminal.
   3. The profile is saved after authorization succeeds.
 GUIDE
@@ -444,7 +457,7 @@ telegram_menu() {
     echo "1) Show Telegram config"
     echo "2) Set Bot Token"
     echo "3) Set allowed Chat IDs"
-    echo "4) Set LLM admin Chat IDs"
+    echo "4) Set model admin Chat IDs"
     echo "5) Check Telegram API"
     echo "6) Send test message"
     echo "7) Set proxy URL"
@@ -995,14 +1008,82 @@ maintenance_menu() {
   done
 }
 
-setup_guidance() {
+setup_wizard() {
+  local choice answer token chat_ids
+  if ! prepare_runtime_layout; then
+    echo "❌ Cannot prepare ChatDome runtime directories."
+    return 1
+  fi
+  run_cli ensure-config >/dev/null
+
+  show_header
+  echo "ChatDome Setup"
+  echo "1) Configure model"
+  echo "2) Configure Telegram"
+  echo "3) Test Telegram API"
+  echo "4) Send test message"
+  echo "5) Start service"
+  echo "6) Show status"
+  echo
+
   run_cli status || true
   echo
-  echo "Configure ChatDome:"
-  echo "- LLM: chatdome -> AI model management"
-  echo "- Telegram: chatdome -> Telegram configuration"
-  echo "- Service: chatdome -> Start service"
-  echo "- Check: chatdome doctor"
+
+  echo "Step 1: Model"
+  prompt_choice choice "Configure model now? [1=Codex OAuth, 2=OpenAI-compatible, 0=skip]: " "0"
+  case "$choice" in
+    1) configure_codex_profile || true ;;
+    2) configure_openai_profile || true ;;
+    *) echo "Skipped model." ;;
+  esac
+  echo
+
+  echo "Step 2: Telegram"
+  prompt_choice answer "Set Telegram Bot Token? [y/N]: " "n"
+  case "${answer,,}" in
+    y|yes)
+      prompt_secret token "Bot Token: " && run_cli set-bot-token "$token"
+      ;;
+    *) echo "Skipped Bot Token." ;;
+  esac
+  prompt_choice answer "Set allowed Chat IDs? [y/N]: " "n"
+  case "${answer,,}" in
+    y|yes)
+      prompt_value chat_ids "Chat IDs (comma-separated): " && run_cli set-chat-ids "$chat_ids"
+      ;;
+    *) echo "Skipped Chat IDs." ;;
+  esac
+  echo
+
+  echo "Step 3: Telegram API"
+  prompt_choice answer "Test Telegram API now? [y/N]: " "n"
+  case "${answer,,}" in
+    y|yes) run_cli check-telegram || true ;;
+    *) echo "Skipped API test." ;;
+  esac
+  echo
+
+  echo "Step 4: Test message"
+  prompt_choice answer "Send Telegram test message now? [y/N]: " "n"
+  case "${answer,,}" in
+    y|yes) run_cli send-test-message || true ;;
+    *) echo "Skipped test message." ;;
+  esac
+  echo
+
+  echo "Step 5: Service"
+  prompt_choice answer "Start ChatDome service now? [y/N]: " "n"
+  case "${answer,,}" in
+    y|yes) start_service_with_result || true ;;
+    *) echo "Skipped service start." ;;
+  esac
+  echo
+
+  echo "Step 6: Status"
+  run_cli status || true
+  echo
+  echo "✅ Setup finished."
+  echo "Next: chatdome doctor"
 }
 
 show_usage() {
@@ -1013,7 +1094,7 @@ Commands:
   hello    Start terminal chat
   status   Show installation status
   doctor   Check local configuration
-  setup    Show setup steps
+  setup    Run setup wizard
 
 Run "chatdome" to open the management menu.
 USAGE
@@ -1058,7 +1139,7 @@ case "${1:-}" in
   hello) run_cli hello ;;
   status) run_cli status ;;
   doctor) run_cli doctor ;;
-  setup) setup_guidance ;;
+  setup) setup_wizard ;;
   help|--help|-h) show_usage ;;
   --update) update_chatdome ;;
   --stop) stop_service_with_result ;;

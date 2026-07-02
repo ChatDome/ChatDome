@@ -128,7 +128,7 @@ class TelegramLLMAdminTests(unittest.TestCase):
         self.run_async(bot._handle_llm(update, context))
 
         self.assertFalse(service.switched)
-        self.assertIn("没有 LLM 管理权限", message.replies[-1])
+        self.assertIn("没有 model 管理权限", message.replies[-1])
 
     def test_allowed_private_chat_can_manage_when_admin_chat_ids_empty(self):
         bot, service = self.make_bot(admin_ids=[], allowed_ids=[1])
@@ -140,7 +140,7 @@ class TelegramLLMAdminTests(unittest.TestCase):
 
         self.assertEqual(service.config.active_ai_profile, "other")
         self.assertEqual(service.switched[0][0], "other")
-        self.assertIn("已切换 LLM", message.replies[-1])
+        self.assertIn("已切换 model", message.replies[-1])
 
     def test_empty_allowed_and_admin_chat_ids_do_not_grant_management(self):
         bot, service = self.make_bot(admin_ids=[], allowed_ids=[])
@@ -151,7 +151,7 @@ class TelegramLLMAdminTests(unittest.TestCase):
         self.run_async(bot._handle_llm(update, context))
 
         self.assertFalse(service.switched)
-        self.assertIn("没有 LLM 管理权限", message.replies[-1])
+        self.assertIn("没有 model 管理权限", message.replies[-1])
 
     def test_admin_must_also_be_in_allowed_chat_ids(self):
         bot, service = self.make_bot(allowed_ids=[99])
@@ -177,7 +177,7 @@ class TelegramLLMAdminTests(unittest.TestCase):
 
         self.assertEqual(service.config.active_ai_profile, "other")
         self.assertEqual(service.switched[0][0], "other")
-        self.assertIn("已切换 LLM", message.replies[-1])
+        self.assertIn("已切换 model", message.replies[-1])
 
     def test_openai_add_flow_deletes_key_message_and_confirms(self):
         bot, service = self.make_bot()
@@ -241,7 +241,7 @@ class TelegramLLMAdminTests(unittest.TestCase):
 
         self.assertNotIn(key, bot._llm_admin_sessions)
         self.assertFalse(bot._llm_admin_confirmations)
-        self.assertIn("已取消 LLM 操作", message.replies[-1])
+        self.assertIn("已取消 model 操作", message.replies[-1])
 
     def test_delete_confirmation_is_bound_and_one_time(self):
         bot, service = self.make_bot()
@@ -344,7 +344,7 @@ class TelegramLLMAdminTests(unittest.TestCase):
         )
 
         self.assertFalse(bot._llm_admin_sessions)
-        self.assertIn("没有 LLM 管理权限", message.replies[-1])
+        self.assertIn("没有 model 管理权限", message.replies[-1])
 
 
     def test_codex_overwrite_passes_confirmed_fingerprint(self):

@@ -63,10 +63,10 @@ class TelegramLLMListTests(unittest.TestCase):
         text = bot._format_llm_profile_list()
 
         self.assertIn("当前: codex-gpt5", text)
-        self.assertIn("切换命令: /llm <profile_name>", text)
-        self.assertIn("  /llm codex-gpt5  (current)", text)
-        self.assertIn("  /llm deepseek", text)
-        self.assertNotIn("* /llm codex-gpt5", text)
+        self.assertIn("切换命令: /model <profile_name>", text)
+        self.assertIn("  /model codex-gpt5  (current)", text)
+        self.assertIn("  /model deepseek", text)
+        self.assertNotIn("* /model codex-gpt5", text)
         self.assertIn("[当前] codex-gpt5", text)
         self.assertIn("[可选] deepseek", text)
         self.assertIn("状态: ready，可切换", text)
@@ -78,17 +78,17 @@ class TelegramLLMListTests(unittest.TestCase):
         update = SimpleNamespace(
             effective_chat=SimpleNamespace(id=123456),
             effective_user=SimpleNamespace(id=789),
-            effective_message=SimpleNamespace(text='/llm deepseek\nnext "quoted"'),
+            effective_message=SimpleNamespace(text='/model deepseek\nnext "quoted"'),
         )
 
         with self.assertLogs("chatdome.telegram.bot", level="INFO") as captured:
-            bot._log_telegram_command(update, "llm")
+            bot._log_telegram_command(update, "model")
 
         line = captured.output[0]
         self.assertIn("[Telegram command received]", line)
         self.assertIn("chat_id=123456", line)
         self.assertIn("user_id=789", line)
-        self.assertIn('command="/llm deepseek next \\"quoted\\""', line)
+        self.assertIn('command="/model deepseek next \\"quoted\\""', line)
 
     def test_telegram_callback_log_is_structured(self):
         bot = TelegramBot(ChatDomeConfig(), FakeAgent())

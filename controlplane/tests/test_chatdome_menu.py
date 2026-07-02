@@ -343,7 +343,7 @@ def test_ctrl_c_cancels_openai_configuration_and_exits_main_menu(tmp_path):
         _read_pty_until(master_fd, "Select: ")
         os.write(master_fd, b"4\n")
         output = _read_pty_until(master_fd, "Select: ")
-        assert "LLM Management" in output
+        assert "Model Management" in output
         os.write(master_fd, b"2\n")
         _read_pty_until(master_fd, "Profile name [my-openai-profile]: ")
         os.write(master_fd, b"broken-profile\n")
@@ -353,7 +353,7 @@ def test_ctrl_c_cancels_openai_configuration_and_exits_main_menu(tmp_path):
         output = _read_pty_until(master_fd, "Select: ")
 
         assert "Cancelled." in output
-        assert "LLM Management" in output
+        assert "Model Management" in output
         assert process.poll() is None
         python_calls = fixture["command_log"].read_text(encoding="utf-8")
         assert "set-openai" not in python_calls
@@ -392,7 +392,7 @@ def test_existing_openai_profile_requires_explicit_overwrite(tmp_path):
 
         os.write(master_fd, b"n\n")
         output = _read_pty_until(master_fd, "Select: ")
-        assert "LLM Management" in output
+        assert "Model Management" in output
         calls = fixture["command_log"].read_text(encoding="utf-8")
         assert "set-openai" not in calls
     finally:
@@ -712,9 +712,9 @@ def test_setup_shows_guidance_without_opening_menu(tmp_path):
     result = _run(["bash", deploy / "chatdome", "setup"], env=fixture["env"], check=False)
 
     assert result.returncode == 0
-    assert "Configure ChatDome:" in result.stdout
-    assert "AI model management" in result.stdout
-    assert "Telegram configuration" in result.stdout
+    assert "ChatDome Setup" in result.stdout
+    assert "Step 1: Model" in result.stdout
+    assert "Step 2: Telegram" in result.stdout
     assert "1) Lets chat" not in result.stdout
     calls = fixture["command_log"].read_text(encoding="utf-8")
     assert "status" in calls
@@ -819,7 +819,7 @@ def test_ctrl_c_exits_from_llm_menu(tmp_path):
         _read_pty_until(master_fd, "Select: ")
         os.write(master_fd, b"4\n")
         output = _read_pty_until(master_fd, "Select: ")
-        assert "LLM Management" in output
+        assert "Model Management" in output
 
         os.killpg(process.pid, signal.SIGINT)
         assert process.wait(timeout=5) == 130

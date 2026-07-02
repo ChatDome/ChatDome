@@ -354,7 +354,7 @@ def show_status(args: argparse.Namespace) -> None:
     print(f"- Version: {__version__}")
     print(f"- Config: {config_status} ({CONFIG_PATH})")
     print(f"- Service: {'running' if running else 'stopped'}")
-    print(f"- LLM: {llm_status} ({llm_detail})")
+    print(f"- Model: {llm_status} ({llm_detail})")
     print(f"- Telegram: {_telegram_status(root)}")
     print(f"- Sentinel: {_sentinel_status(root)}")
     print(f"- Logs: {os.environ.get('CHATDOME_LOG_DIR', str(DATA_DIR))}")
@@ -445,20 +445,112 @@ def _create_terminal_chat_runtime(args: argparse.Namespace) -> _TerminalChatRunt
     return _TerminalChatRuntime(agent=agent, chat_id=_terminal_chat_id(args))
 
 
-def _terminal_help_text() -> str:
-    return "\n".join(
-        [
-            "Commands:",
-            "  /help              Show commands",
-            "  /clear             Clear this terminal session",
-            "  /env               Show environment summary",
-            "  /audit [N]         Show recent command audit events",
-            "  /confirm [ID]      Approve pending command or continue task",
-            "  /reject [ID]       Reject pending command or stop task",
-            "  /exit              Exit terminal chat",
-        ]
-    )
 
+def _terminal_symbol(emoji: str, fallback: str) -> str:
+    if os.environ.get("CHATDOME_PLAIN", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return fallback
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        emoji.encode(encoding)
+        return emoji
+    except UnicodeEncodeError:
+        return fallback
+
+
+def _status_label(emoji: str, fallback: str, text: str) -> str:
+    symbol = _terminal_symbol(emoji, fallback)
+    return f"{symbol} {text}" if symbol else text
+
+
+def _terminal_command_specs() -> list[tuple[str, str]]:
+    return [
+        ("/help", "Show commands"),
+        ("/clear", "Clear this terminal session"),
+        ("/env", "Show environment summary"),
+        ("/audit [N]", "Show recent command audit events"),
+        ("/details [ID]", "Show pending approval details"),
+        ("/confirm [ID]", "Approve pending command"),
+        ("/continue", "Continue paused task"),
+        ("/reject [ID]", "Reject pending command or stop task"),
+        ("/model <profile>", "Switch model for this terminal session"),
+        ("/model_list", "Show configured models"),
+        ("/exit", "Exit terminal chat"),
+    ]
+
+
+def _terminal_command_names() -> list[str]:
+    names: list[str] = []
+    for usage, _description in _terminal_command_specs():
+        command = usage.split()[0]
+        if command not in names:
+            names.append(command)
+    return names
+
+
+def _terminal_command_matches(text: str) -> list[str]:
+    stripped = str(text or "")
+    if not stripped.startswith("/"):
+        return []
+    token = stripped.split(maxsplit=1)[0].lower()
+    names = _terminal_command_names()
+    known = {name.lower() for name in names}
+    if any(char.isspace() for char in stripped) and token in known:
+        return []
+
+    query = token[1:]
+    if not query:
+        return names
+
+    exact_matches = [name for name in names if name.lower() == token]
+    prefix_matches = [
+        name for name in names
+        if name.lower().startswith(token) and name not in exact_matches
+    ]
+    segment_matches = []
+    for name in names:
+        if name in exact_matches or name in prefix_matches:
+            continue
+        if any(part.startswith(query) for part in name[1:].lower().split("_")):
+            segment_matches.append(name)
+    return exact_matches + prefix_matches + segment_matches
+
+
+def _terminal_command_token(text: str) -> str:
+    value = str(text or "")
+    return value.split(maxsplit=1)[0] if value.strip() else value
+
+
+def _replace_terminal_command_token(text: str, command: str) -> str:
+    value = str(text or "")
+    token = _terminal_command_token(value)
+    suffix = value[len(token):] if token else ""
+    return f"{command}{suffix}"
+
+
+def _terminal_completion_line(matches: list[str], selected_index: int) -> str:
+    visible = matches[:8]
+    parts = []
+    for index, command in enumerate(visible):
+        parts.append(f"[{command}]" if index == selected_index else command)
+    if len(matches) > len(visible):
+        parts.append("...")
+    return f"{_status_label('⌨️', '[cmd]', 'Commands:')} {'  '.join(parts)}"
+
+
+def _print_terminal_completion(prompt: str, text: str, matches: list[str], selected_index: int) -> None:
+    if not matches:
+        return
+    sys.stdout.write("\n")
+    sys.stdout.write(f"chatdome> {_terminal_completion_line(matches, selected_index)}\n")
+    sys.stdout.write(f"{prompt}{text}")
+    sys.stdout.flush()
+
+
+def _terminal_help_text() -> str:
+    lines = [_status_label("🧭", "[i]", "Commands")]
+    for usage, description in _terminal_command_specs():
+        lines.append(f"  {usage:<18} {description}")
+    return "\n".join(lines)
 
 def _print_chatdome_message(text: str) -> None:
     value = str(text or "").rstrip()
@@ -479,31 +571,42 @@ def _compact_terminal_text(value: Any, fallback: str, max_chars: int = 120) -> s
     return text
 
 
+def _terminal_command_excerpt(command: Any, max_chars: int = 160) -> str:
+    text = " ".join(str(command or "").split()).strip()
+    if len(text) > max_chars:
+        text = text[: max_chars - 3].rstrip() + "..."
+    return text
+
+
 def _format_terminal_pending_approval(payload: dict[str, Any]) -> str:
     approval_id = str((payload or {}).get("approval_id") or "").strip()
     risk_level = str((payload or {}).get("risk_level") or "unknown").strip()
     command_hash = str((payload or {}).get("command_hash") or "").strip()
+    command = _terminal_command_excerpt((payload or {}).get("command"))
     purpose = _compact_terminal_text((payload or {}).get("reason"), "not provided")
     impact = _compact_terminal_text((payload or {}).get("impact_analysis"), "review required")
 
-    lines = ["Pending approval"]
+    lines = [_status_label("⚠️", "[!]", "Pending approval")]
     if approval_id:
         lines.append(f"Approval ID: {approval_id}")
     lines.append(f"Risk: {risk_level}")
+    if command:
+        lines.append(f"Command: {command}")
     if command_hash:
         lines.append(f"Command hash: {command_hash[:12]}")
     lines.append(f"Purpose: {purpose}")
     lines.append(f"Impact: {impact}")
-    lines.append("Run: /confirm [approval_id] or /reject [approval_id]")
+    lines.append("Run: /details [approval_id], /confirm [approval_id], or /reject [approval_id]")
     return "\n".join(lines)
 
 
 def _format_terminal_round_limit(payload: dict[str, Any]) -> str:
     rounds = int((payload or {}).get("rounds") or 0)
     window = int((payload or {}).get("window") or 0)
+    title = _status_label("⏸️", "[pause]", f"Task paused after {rounds} rounds.")
     return (
-        f"Task paused after {rounds} rounds.\n"
-        f"Run: /confirm to continue {window} rounds, or /reject to stop."
+        f"{title}\n"
+        f"Run: /continue to execute {window} more rounds, or /reject to stop."
     )
 
 
@@ -521,13 +624,13 @@ def _print_terminal_agent_result(result: Any) -> None:
 def _terminal_environment_summary(max_chars: int = 4000) -> str:
     path = ENV_PROFILE_PATH if ENV_PROFILE_PATH.exists() or not LEGACY_ENV_PROFILE_PATH.exists() else LEGACY_ENV_PROFILE_PATH
     if not path.exists():
-        return "Environment profile not found.\nRun: chatdome doctor"
+        return _status_label("🧭", "[i]", "Environment profile not found.") + "\nRun: chatdome doctor"
     try:
         text = path.read_text(encoding="utf-8").strip()
     except OSError:
-        return "Environment profile unreadable.\nRun: chatdome doctor"
+        return _status_label("❌", "[x]", "Environment profile unreadable.") + "\nRun: chatdome doctor"
     if not text:
-        return "Environment profile is empty.\nRun: chatdome doctor"
+        return _status_label("🧭", "[i]", "Environment profile is empty.") + "\nRun: chatdome doctor"
     if len(text) > max_chars:
         return text[:max_chars].rstrip() + "\n..."
     return text
@@ -560,7 +663,7 @@ def _format_terminal_audit_events(chat_id: int, limit: int) -> str:
             break
 
     if not events:
-        return "No user command audit events yet."
+        return _status_label("🧾", "[audit]", "No user command audit events yet.")
 
     lines = [f"User command audit events (latest {len(events)}):"]
     for event in events:
@@ -577,6 +680,251 @@ def _format_terminal_audit_events(chat_id: int, limit: int) -> str:
     return "\n".join(lines)
 
 
+
+def _get_terminal_model_manager(runtime: _TerminalChatRuntime) -> Any:
+    return getattr(runtime.agent, "llm_manager", None)
+
+
+def _terminal_model_status(status: str) -> str:
+    labels = {
+        "ready": "ready",
+        "missing_key": "missing_key, configure api_key",
+        "token_file_present": "token_file_present",
+        "not_authenticated": "not_authenticated, run chatdome setup",
+        "invalid_key_ref": "invalid_key_ref, update config.yaml",
+        "unsupported": "unsupported",
+    }
+    return labels.get(status, status)
+
+
+def _format_terminal_model_profiles(runtime: _TerminalChatRuntime) -> str:
+    manager = _get_terminal_model_manager(runtime)
+    if manager is None:
+        return "model manager is not available.\nRun: chatdome setup"
+
+    profiles = manager.list_profiles()
+    if not profiles:
+        return "No model is configured.\nRun: chatdome setup"
+
+    active = next((item for item in profiles if item.active), None)
+    active_name = active.name if active else manager.get_active_profile_name()
+    lines = [
+        "Model profiles",
+        "",
+        f"Active: {active_name}",
+        "Switch: /model <profile_name>",
+        "",
+        "Commands:",
+    ]
+    for item in profiles:
+        suffix = "  (current)" if item.active else ""
+        lines.append(f"  /model {item.name}{suffix}")
+
+    lines.extend(["", "Details:"])
+    for item in profiles:
+        marker = "[active]" if item.active else "[available]"
+        lines.extend([
+            "",
+            f"{marker} {item.name}",
+            f"  Status: {_terminal_model_status(item.status)}",
+            f"  Type: {item.provider}/{item.api_mode}",
+            f"  Model: {item.model}",
+        ])
+        if item.base_url:
+            lines.append(f"  Base URL: {item.base_url}")
+        if item.key_ref:
+            lines.append(f"  Key: {item.key_ref}")
+    return "\n".join(lines)
+
+
+def _terminal_model_error_text(exc: BaseException) -> str:
+    text = user_facing_error_message(exc, fallback="model switch failed. Run: /model_list")
+    replacements = {
+        "LLM profile": "model profile",
+        "LLM is": "model is",
+        "LLM": "model",
+        "Run /codex_login before switching to it.": "Run: chatdome setup",
+        "Run /codex_login": "Run: chatdome setup",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+
+async def _switch_terminal_model(runtime: _TerminalChatRuntime, profile_name: str | None) -> None:
+    manager = _get_terminal_model_manager(runtime)
+    if manager is None:
+        _print_chatdome_message("model manager is not available.\nRun: chatdome setup")
+        return
+    if not profile_name:
+        _print_chatdome_message(_format_terminal_model_profiles(runtime))
+        return
+    try:
+        snapshot = await manager.switch_profile(profile_name)
+    except Exception as exc:
+        _print_chatdome_message(
+            _status_label("❌", "[x]", "model switch failed.")
+            + "\n"
+            + _terminal_model_error_text(exc)
+        )
+        return
+
+    profile = snapshot.profile
+    _print_chatdome_message(
+        _status_label("✅", "[ok]", f"model switched for this terminal session: {snapshot.profile_name}")
+        + f"\n{profile.provider}/{profile.api_mode}, model={profile.model}"
+    )
+
+def _indent_terminal_block(text: Any, max_chars: int = 3000) -> str:
+    value = str(text or "").strip()
+    if len(value) > max_chars:
+        value = value[: max_chars - 20].rstrip() + "\n... (truncated)"
+    return "\n".join(f"  {line}" for line in value.splitlines()) if value else "  (empty)"
+
+
+def _yes_no(value: Any) -> str:
+    return "yes" if bool(value) else "no"
+
+
+def _format_terminal_approval_details(details: dict[str, Any]) -> str:
+    if not details.get("ok"):
+        return _status_label("ℹ️", "[i]", str(details.get("message", "No pending approval.")))
+
+    analysis = details.get("analysis") if isinstance(details.get("analysis"), dict) else {}
+    command = str(details.get("command") or "").strip()
+    approval_id = str(details.get("approval_id") or "").strip()
+    command_hash = str(details.get("command_hash") or "").strip()
+    reason = str(details.get("reason") or "not provided").strip()
+    risk = str(analysis.get("risk_level") or details.get("risk_level") or "unknown").strip()
+    safety = str(analysis.get("safety_status") or "unknown").strip()
+    impact = str(analysis.get("impact_analysis") or "review required").strip()
+
+    lines = [_status_label("🔎", "[details]", "Approval details")]
+    if approval_id:
+        lines.append(f"Approval ID: {approval_id}")
+    lines.append(f"Risk: {risk}")
+    lines.append(f"Safety: {safety}")
+    if command_hash:
+        lines.append(f"Command hash: {command_hash[:12]}")
+    lines.append(f"Mutation: {_yes_no(analysis.get('mutation_detected'))}")
+    lines.append(f"Deletion: {_yes_no(analysis.get('deletion_detected'))}")
+    lines.append(f"Reason: {reason}")
+    lines.append("Command:")
+    lines.append(_indent_terminal_block(command, max_chars=2000))
+    lines.append("Impact:")
+    lines.append(_indent_terminal_block(impact, max_chars=2400))
+    lines.append("Run: /confirm [approval_id] or /reject [approval_id]")
+    return "\n".join(lines)
+
+
+def _read_terminal_line(prompt: str) -> str:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return input(prompt)
+
+    try:
+        import termios
+        import tty
+    except ImportError:
+        return input(prompt)
+
+    fd = sys.stdin.fileno()
+    old_attrs = termios.tcgetattr(fd)
+    buffer: list[str] = []
+    completion_matches: list[str] = []
+    selected_index = 0
+    last_completion_state: tuple[str, tuple[str, ...], int] | None = None
+
+    def current_text() -> str:
+        return "".join(buffer)
+
+    def redraw_prompt() -> None:
+        sys.stdout.write("\r\x1b[2K" + prompt + current_text())
+        sys.stdout.flush()
+
+    def refresh_completion(force: bool = False) -> None:
+        nonlocal completion_matches, selected_index, last_completion_state
+        matches = _terminal_command_matches(current_text())
+        if matches != completion_matches:
+            completion_matches = matches
+            selected_index = 0
+        if not completion_matches:
+            last_completion_state = None
+            return
+        if selected_index >= len(completion_matches):
+            selected_index = 0
+        state = (current_text(), tuple(completion_matches[:8]), selected_index)
+        if force or state != last_completion_state:
+            _print_terminal_completion(prompt, current_text(), completion_matches, selected_index)
+            last_completion_state = state
+
+    def apply_completion(command: str) -> None:
+        buffer[:] = list(_replace_terminal_command_token(current_text(), command))
+        redraw_prompt()
+
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    try:
+        tty.setraw(fd)
+        while True:
+            char = sys.stdin.read(1)
+            if char in {"\r", "\n"}:
+                if completion_matches:
+                    token = _terminal_command_token(current_text()).lower()
+                    known = {name.lower() for name in _terminal_command_names()}
+                    if token not in known and len(completion_matches) == 1:
+                        buffer[:] = list(
+                            _replace_terminal_command_token(current_text(), completion_matches[0])
+                        )
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return current_text()
+            if char == "\x03":
+                raise KeyboardInterrupt
+            if char == "\x04":
+                if not buffer:
+                    raise EOFError
+                continue
+            if char in {"\x08", "\x7f"}:
+                if buffer:
+                    buffer.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+                    refresh_completion()
+                continue
+            if char == "\t":
+                matches = completion_matches or _terminal_command_matches(current_text())
+                if matches:
+                    if selected_index >= len(matches):
+                        selected_index = 0
+                    completion_matches = matches
+                    apply_completion(matches[selected_index])
+                    refresh_completion(force=True)
+                continue
+            if char == "\x1b":
+                leader = sys.stdin.read(1)
+                if leader != "[":
+                    continue
+                code = sys.stdin.read(1)
+                if code not in {"A", "B"}:
+                    continue
+                if not completion_matches:
+                    completion_matches = _terminal_command_matches(current_text())
+                    selected_index = 0
+                if completion_matches:
+                    delta = -1 if code == "A" else 1
+                    selected_index = (selected_index + delta) % len(completion_matches)
+                    apply_completion(completion_matches[selected_index])
+                    _print_terminal_completion(prompt, current_text(), completion_matches, selected_index)
+                continue
+            if char >= " ":
+                buffer.append(char)
+                sys.stdout.write(char)
+                sys.stdout.flush()
+                refresh_completion()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+
+
 def _terminal_session(runtime: _TerminalChatRuntime) -> Any:
     manager = getattr(runtime.agent, "session_manager", None)
     getter = getattr(manager, "get_or_create", None)
@@ -588,13 +936,23 @@ def _terminal_session(runtime: _TerminalChatRuntime) -> Any:
         return None
 
 
+async def _show_terminal_details(runtime: _TerminalChatRuntime, approval_id: str | None) -> None:
+    _print_chatdome_message(_status_label("🔎", "[details]", "Loading approval details..."))
+    details = await runtime.agent.get_pending_approval_details(
+        runtime.chat_id,
+        approval_id=approval_id,
+        include_llm=True,
+    )
+    _print_chatdome_message(_format_terminal_approval_details(details))
+
+
 async def _resolve_terminal_confirm(runtime: _TerminalChatRuntime, approval_id: str | None) -> None:
-    session = _terminal_session(runtime)
-    if session is not None and getattr(session, "pending_round_limit", False) and not getattr(session, "pending_approval", False):
-        result = await runtime.agent.resolve_round_limit(runtime.chat_id, "CONTINUE")
-        _print_terminal_agent_result(result)
-        return
     _, result = await runtime.agent.resume_session(runtime.chat_id, "APPROVE", approval_id=approval_id)
+    _print_terminal_agent_result(result)
+
+
+async def _resolve_terminal_continue(runtime: _TerminalChatRuntime) -> None:
+    result = await runtime.agent.resolve_round_limit(runtime.chat_id, "CONTINUE")
     _print_terminal_agent_result(result)
 
 
@@ -610,7 +968,8 @@ async def _resolve_terminal_reject(runtime: _TerminalChatRuntime, approval_id: s
 
 async def _handle_terminal_command(runtime: _TerminalChatRuntime, line: str) -> bool:
     parts = line.split()
-    command = parts[0].lower() if parts else ""
+    raw_command = parts[0].lower() if parts else ""
+    command = {"/llm": "/model", "/llm_list": "/model_list"}.get(raw_command, raw_command)
     if command in {"/exit", "/quit"}:
         return False
     if command == "/help":
@@ -618,7 +977,7 @@ async def _handle_terminal_command(runtime: _TerminalChatRuntime, line: str) -> 
         return True
     if command == "/clear":
         runtime.agent.clear_session(runtime.chat_id)
-        _print_chatdome_message("Session cleared.")
+        _print_chatdome_message(_status_label("✅", "[ok]", "Session cleared."))
         return True
     if command == "/env":
         _print_chatdome_message(_terminal_environment_summary())
@@ -626,16 +985,30 @@ async def _handle_terminal_command(runtime: _TerminalChatRuntime, line: str) -> 
     if command == "/audit":
         _print_chatdome_message(_format_terminal_audit_events(runtime.chat_id, _terminal_audit_limit(parts)))
         return True
+    if command == "/model_list":
+        _print_chatdome_message(_format_terminal_model_profiles(runtime))
+        return True
+    if command == "/model":
+        profile_name = parts[1] if len(parts) > 1 else None
+        await _switch_terminal_model(runtime, profile_name)
+        return True
+    if command == "/details":
+        approval_id = parts[1] if len(parts) > 1 else None
+        await _show_terminal_details(runtime, approval_id)
+        return True
     if command == "/confirm":
         approval_id = parts[1] if len(parts) > 1 else None
         await _resolve_terminal_confirm(runtime, approval_id)
+        return True
+    if command == "/continue":
+        await _resolve_terminal_continue(runtime)
         return True
     if command == "/reject":
         approval_id = parts[1] if len(parts) > 1 else None
         await _resolve_terminal_reject(runtime, approval_id)
         return True
 
-    _print_chatdome_message("Unknown command.\nRun: /help")
+    _print_chatdome_message(_status_label("ℹ️", "[i]", "Unknown command.") + "\nRun: /help")
     return True
 
 
@@ -644,7 +1017,7 @@ async def _terminal_chat_loop(args: argparse.Namespace) -> None:
     try:
         while True:
             try:
-                line = input("you> ")
+                line = _read_terminal_line("you> ")
             except EOFError:
                 print()
                 break
@@ -681,6 +1054,7 @@ async def _terminal_chat_loop(args: argparse.Namespace) -> None:
                     break
                 continue
 
+            _print_chatdome_message(_status_label("⏳", "[...]", "Working..."))
             result = await runtime.agent.handle_message(runtime.chat_id, text)
             _print_terminal_agent_result(result)
     finally:
@@ -730,8 +1104,8 @@ def doctor(args: argparse.Namespace) -> None:
             failures += _doctor_line("ok", "config-permission", "0600")
 
     llm_status, llm_detail = _profile_status(root)
-    llm_message = f"ready ({llm_detail})" if llm_status == "ready" else f"configure active LLM profile ({llm_detail})"
-    failures += _doctor_line("ok" if llm_status == "ready" else "fail", "llm", llm_message)
+    llm_message = f"ready ({llm_detail})" if llm_status == "ready" else f"configure active model profile ({llm_detail})"
+    failures += _doctor_line("ok" if llm_status == "ready" else "fail", "model", llm_message)
 
     telegram = root.get("telegram") if isinstance(root.get("telegram"), dict) else {}
     token_ready = bool(str(telegram.get("bot_token") or "").strip())
@@ -816,7 +1190,7 @@ def llm_list(args: argparse.Namespace) -> None:
     data = _load_yaml()
     root = _chatdome_root(data)
     active = str(root.get("active_ai_profile") or "")
-    print("LLM profiles")
+    print("Model profiles")
     print(f"- active: {active or '(unset)'}")
     for name, profile in sorted(_profile_items(root).items()):
         if not isinstance(profile, dict):
@@ -976,7 +1350,7 @@ def delete_profile(args: argparse.Namespace) -> None:
             ProfileActor(source="menu"),
         )
     )
-    print(f"deleted LLM profile: {result.profile_name}")
+    print(f"deleted model profile: {result.profile_name}")
 
 
 def telegram_status(args: argparse.Namespace) -> None:
@@ -986,7 +1360,7 @@ def telegram_status(args: argparse.Namespace) -> None:
     print("Telegram")
     print(f"- bot token: {_mask_secret(telegram.get('bot_token', ''))}")
     print(f"- allowed chat ids: {telegram.get('allowed_chat_ids') or '(all)'}")
-    print(f"- LLM admin chat ids: {_llm_admin_chat_ids_display(telegram)}")
+    print(f"- model admin chat ids: {_llm_admin_chat_ids_display(telegram)}")
     print(f"- proxy_url: {telegram.get('proxy_url') or '(none)'}")
 
 

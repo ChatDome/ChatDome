@@ -86,11 +86,11 @@ HELP_TEXT = """\
 /sentinel\\_packs \\- 查看已加载的命令包
 /sentinel\\_mute \\[时长\\] \\- 暂停 Sentinel 告警推送
 /sentinel\\_resume \\- 恢复 Sentinel 告警推送
-/llm \\[profile\\] \\- 查看或切换当前 LLM profile
-/llm\\_list \\- 查看所有 LLM profiles
-/llm\\_add \\- 新增 OpenAI-compatible 或 Codex LLM
-/llm\\_delete <profile> \\- 删除 LLM profile
-/llm\\_cancel \\- 取消正在进行的 LLM 新增流程
+/model \\[profile\\] \\- 查看或切换当前 model profile
+/model\\_list \\- 查看所有 model profiles
+/model\\_add \\- 新增 OpenAI-compatible 或 Codex model
+/model\\_delete <profile> \\- 删除 model profile
+/model\\_cancel \\- 取消正在进行的 model 新增流程
 /codex\\_login \\- 触发 OpenAI Codex OAuth 设备码认证流程
 
 _直接发送你的问题即可，无需命令前缀。_
@@ -202,6 +202,11 @@ class TelegramBot:
         self._app.add_handler(self._command_handler("sentinel_mute", self._handle_sentinel_mute))
         self._app.add_handler(self._command_handler("sentinel_resume", self._handle_sentinel_resume))
         self._app.add_handler(self._command_handler("engram", self._handle_engram))
+        self._app.add_handler(self._command_handler("model", self._handle_llm))
+        self._app.add_handler(self._command_handler("model_list", self._handle_llm_list))
+        self._app.add_handler(self._command_handler("model_add", self._handle_llm_add))
+        self._app.add_handler(self._command_handler("model_delete", self._handle_llm_delete))
+        self._app.add_handler(self._command_handler("model_cancel", self._handle_llm_cancel))
         self._app.add_handler(self._command_handler("llm", self._handle_llm))
         self._app.add_handler(self._command_handler("llm_list", self._handle_llm_list))
         self._app.add_handler(self._command_handler("llm_add", self._handle_llm_add))
@@ -767,25 +772,25 @@ class TelegramBot:
     def _format_llm_profile_list(self) -> str:
         manager = self._get_llm_manager()
         if manager is None:
-            return "LLMManager 未启用。"
+            return "model 管理服务未启用。"
 
         profiles = manager.list_profiles()
         if not profiles:
-            return "No LLM is configured. Please configure an LLM before use."
+            return "No model is configured. Run /model_add."
         active = next((item for item in profiles if item.active), None)
         active_name = active.name if active else manager.get_active_profile_name()
 
         lines = [
-            "LLM Profiles",
+            "Model profiles",
             "",
             f"当前: {active_name}",
-            "切换命令: /llm <profile_name>",
+            "切换命令: /model <profile_name>",
             "",
             "可复制的切换命令:",
         ]
         for item in profiles:
             suffix = "  (current)" if item.active else ""
-            lines.append(f"  /llm {item.name}{suffix}")
+            lines.append(f"  /model {item.name}{suffix}")
 
         lines.extend(["", "详细信息:"])
         for item in profiles:
@@ -818,7 +823,7 @@ class TelegramBot:
     async def _handle_llm_list(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Handle /llm_list command."""
+        """Handle /model_list command."""
         if not self._check_auth(update):
             return
         await self._send_long_message(update.message, self._format_llm_profile_list())
@@ -829,12 +834,12 @@ class TelegramBot:
         if not await self._require_llm_admin(update):
             return
         if self.profile_admin is None:
-            await update.message.reply_text("LLM 管理服务未启用。")
+            await update.message.reply_text("model 管理服务未启用。")
             return
         key = self._llm_admin_key(update)
         current = self._active_llm_admin_session(key)
         if current is not None:
-            await update.message.reply_text("请先完成当前 LLM 配置，或发送 /llm_cancel。")
+            await update.message.reply_text("请先完成当前 model 配置，或发送 /model_cancel。")
             return
         nonce = uuid.uuid4().hex[:12]
         self._llm_admin_sessions[key] = {
@@ -856,7 +861,7 @@ class TelegramBot:
         ]]
         await self._reply_text(
             update.message,
-            "选择 LLM 类型。",
+            "选择 model 类型。",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
@@ -873,9 +878,9 @@ class TelegramBot:
                 self._llm_admin_confirmations.pop(nonce, None)
                 removed_any = True
         if removed_any:
-            await update.message.reply_text("已取消 LLM 操作。")
+            await update.message.reply_text("已取消 model 操作。")
         else:
-            await update.message.reply_text("当前没有待取消的 LLM 操作。")
+            await update.message.reply_text("当前没有待取消的 model 操作。")
 
     async def _handle_llm_delete(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -883,11 +888,11 @@ class TelegramBot:
         if not await self._require_llm_admin(update):
             return
         if self.profile_admin is None:
-            await update.message.reply_text("LLM 管理服务未启用。")
+            await update.message.reply_text("model 管理服务未启用。")
             return
         args = getattr(context, "args", []) or []
         if len(args) != 1:
-            await update.message.reply_text("用法: /llm_delete <profile>")
+            await update.message.reply_text("用法: /model_delete <profile>")
             return
         try:
             summary = await self.profile_admin.get_profile_summary(str(args[0]).strip())
@@ -895,16 +900,16 @@ class TelegramBot:
             await update.message.reply_text(
                 self._format_error_text(
                     exc,
-                    prefix="无法删除 LLM",
-                    fallback="无法读取 LLM profile。",
+                    prefix="无法删除 model",
+                    fallback="无法读取 model profile。",
                 )
             )
             return
         if summary is None:
-            await update.message.reply_text(f"未找到 LLM profile: {args[0]}")
+            await update.message.reply_text(f"未找到 model profile: {args[0]}")
             return
         if summary.active:
-            await update.message.reply_text("请先切换 LLM，再删除该 profile。")
+            await update.message.reply_text("请先切换 model，再删除该 profile。")
             return
         nonce = uuid.uuid4().hex[:12]
         key = self._llm_admin_key(update)
@@ -920,7 +925,7 @@ class TelegramBot:
         ]]
         await self._reply_text(
             update.message,
-            f"删除 LLM profile '{summary.name}'？",
+            f"删除 model profile '{summary.name}'？",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
@@ -935,7 +940,7 @@ class TelegramBot:
         if session is None:
             return False
         if self._active_llm_admin_session(key) is None:
-            await update.message.reply_text("LLM 配置已超时，请重新运行 /llm_add。")
+            await update.message.reply_text("model 配置已超时，请重新运行 /model_add。")
             return True
         if not await self._require_llm_admin(update):
             return True
@@ -1045,7 +1050,7 @@ class TelegramBot:
             )
             return True
 
-        await update.message.reply_text("使用按钮继续，或发送 /llm_cancel。")
+        await update.message.reply_text("使用按钮继续，或发送 /model_cancel。")
         return True
 
     async def _advance_llm_admin_after_name(self, message, session: dict[str, Any]) -> None:
@@ -1075,7 +1080,7 @@ class TelegramBot:
     async def _handle_llm(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """List profiles or persistently switch the active LLM."""
+        """List profiles or persistently switch the active model."""
         if not self._check_auth(update):
             return
 
@@ -1086,7 +1091,7 @@ class TelegramBot:
         if not await self._require_llm_admin(update):
             return
         if self.profile_admin is None:
-            await update.message.reply_text("LLM 管理服务未启用。")
+            await update.message.reply_text("model 管理服务未启用。")
             return
 
         profile_name = str(args[0]).strip()
@@ -1097,23 +1102,23 @@ class TelegramBot:
                 self._profile_actor(update),
             )
         except Exception as exc:
-            logger.warning("LLM profile switch failed: %s", exc)
+            logger.warning("Model profile switch failed: %s", exc)
             await update.message.reply_text(
                 self._format_error_text(
                     exc,
-                    prefix="LLM 切换失败",
-                    fallback="LLM 切换失败，请检查配置后重试。",
+                    prefix="model 切换失败",
+                    fallback="model 切换失败，请检查配置后重试。",
                 )
             )
             return
 
         profile = self.config.ai_profiles[result.profile_name]
         await update.message.reply_text(
-            "已切换 LLM: "
+            "已切换 model: "
             f"{result.profile_name} ({profile.provider}/{profile.api_mode}, model={profile.model})"
         )
         logger.info(
-            "LLM profile switched by Telegram: %s -> %s",
+            "Model profile switched by Telegram: %s -> %s",
             old_profile,
             result.profile_name,
         )
@@ -1157,7 +1162,7 @@ class TelegramBot:
                 try:
                     validate_profile_name(requested)
                 except ValueError as exc:
-                    raise LLMProfileNotFound(f"未知 LLM profile: {requested}") from exc
+                    raise LLMProfileNotFound(f"未知 model profile: {requested}") from exc
                 return requested, self._default_codex_profile(requested), True
             if profile.api_mode != "codex_responses":
                 raise LLMProfileNotReady(f"profile {requested} 不是 Codex OAuth profile。")
@@ -1199,7 +1204,7 @@ class TelegramBot:
         if not await self._require_llm_admin(update):
             return
         if self.profile_admin is None:
-            await update.message.reply_text("LLM 管理服务未启用。")
+            await update.message.reply_text("model 管理服务未启用。")
             return
 
         chat_id = update.effective_chat.id
@@ -1236,7 +1241,7 @@ class TelegramBot:
                 self._format_error_text(
                     e,
                     prefix="❌ 无法启动 Codex 认证",
-                    fallback="无法启动 Codex 认证，请检查 LLM profile 配置。",
+                    fallback="无法启动 Codex 认证，请检查 model profile 配置。",
                 )
             )
             return
@@ -1352,7 +1357,7 @@ class TelegramBot:
             return
         parts = callback_data.split(":", 2)
         if len(parts) != 3:
-            await query.message.reply_text("LLM 操作已失效，请重新开始。")
+            await query.message.reply_text("Model 操作已失效，请重新开始。")
             return
         _, action, nonce = parts
         key = self._llm_admin_key(update)
@@ -1364,7 +1369,7 @@ class TelegramBot:
                 or item.get("key") != key
                 or float(item.get("expires_at", 0)) < time.time()
             ):
-                await query.message.reply_text("删除确认已失效，请重新运行 /llm_delete。")
+                await query.message.reply_text("删除确认已失效，请重新运行 /model_delete。")
                 return
             await query.edit_message_reply_markup(reply_markup=None)
             if action == "delete_no":
@@ -1379,17 +1384,17 @@ class TelegramBot:
                 await query.message.reply_text(
                     self._format_error_text(
                         exc,
-                        prefix="删除 LLM 失败",
-                        fallback="删除 LLM 失败，请重试。",
+                        prefix="删除 model 失败",
+                        fallback="删除 model 失败，请重试。",
                     )
                 )
                 return
-            await query.message.reply_text(f"已删除 LLM profile: {result.profile_name}")
+            await query.message.reply_text(f"已删除 model profile: {result.profile_name}")
             return
 
         session = self._active_llm_admin_session(key)
         if session is None or session.get("nonce") != nonce:
-            await query.message.reply_text("LLM 配置已失效，请重新运行 /llm_add。")
+            await query.message.reply_text("model 配置已失效，请重新运行 /model_add。")
             return
 
         if action == "type_openai":
@@ -1407,7 +1412,7 @@ class TelegramBot:
         if action in {"cancel", "overwrite_no", "save_no"}:
             self._llm_admin_sessions.pop(key, None)
             await query.edit_message_reply_markup(reply_markup=None)
-            await query.message.reply_text("已取消 LLM 配置。")
+            await query.message.reply_text("已取消 model 配置。")
             return
         if action == "overwrite_yes":
             session["overwrite"] = True
@@ -1416,7 +1421,7 @@ class TelegramBot:
             return
         if action == "save_yes":
             if session.get("step") != "confirm_save":
-                await query.message.reply_text("LLM 配置状态无效，请重新开始。")
+                await query.message.reply_text("model 配置状态无效，请重新开始。")
                 return
             saved = dict(session)
             self._llm_admin_sessions.pop(key, None)
@@ -1437,13 +1442,13 @@ class TelegramBot:
                 await query.message.reply_text(
                     self._format_error_text(
                         exc,
-                        prefix="保存 LLM 失败",
-                        fallback="保存 LLM 失败，请重新开始。",
+                        prefix="保存 model 失败",
+                        fallback="保存 model 失败，请重新开始。",
                     )
                 )
                 return
             verb = "已更新" if result.action == "updated" else "已新增"
-            await query.message.reply_text(f"{verb} LLM profile: {result.profile_name}")
+            await query.message.reply_text(f"{verb} model profile: {result.profile_name}")
             return
         if action == "codex_start":
             saved = dict(session)
@@ -1464,7 +1469,7 @@ class TelegramBot:
             await self._handle_codex_login(proxy_update, proxy_context)
             return
 
-        await query.message.reply_text("LLM 操作已失效，请重新开始。")
+        await query.message.reply_text("Model 操作已失效，请重新开始。")
 
     async def _clear_callback_message_markup(self, query, context_label: str = "callback message") -> None:
         await self._set_callback_message_markup(query, None, context_label)
@@ -2012,7 +2017,7 @@ class TelegramBot:
         message = update.effective_message
         if message is not None:
             await message.reply_text(
-                "当前会话没有 LLM 管理权限。请配置 telegram.admin_chat_ids 或 telegram.allowed_chat_ids。"
+                "当前会话没有 model 管理权限。请配置 telegram.admin_chat_ids 或 telegram.allowed_chat_ids。"
             )
         return False
 

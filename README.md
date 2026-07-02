@@ -342,11 +342,11 @@ The AI uses **function calling** (tool use) to interact with the host. It can:
 | `/cmd_echo` | Toggle command echo mode in replies |
 | `/audit [N]` | Show latest command audit events for current chat (default 10, max 30) |
 | `/codex_login [profile]` | Start Codex OAuth device-code login for the current or named Codex profile |
-| `/llm_list` | Show configured LLM profiles and auth status |
-| `/llm [profile]` | Show profiles or switch the active LLM profile as an administrator |
-| `/llm_add` | Add or overwrite an LLM profile as an administrator |
-| `/llm_delete` | Delete an inactive LLM profile as an administrator |
-| `/llm_cancel` | Cancel the current LLM management flow |
+| `/model_list` | Show configured model profiles and auth status |
+| `/model [profile]` | Show profiles or switch the active model profile as an administrator |
+| `/model_add` | Add or overwrite a model profile as an administrator |
+| `/model_delete` | Delete an inactive model profile as an administrator |
+| `/model_cancel` | Cancel the current model management flow |
 | `/help` | Show usage guide and example questions |
 
 No rigid command syntax — just talk to it.
