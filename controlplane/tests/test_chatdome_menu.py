@@ -238,6 +238,7 @@ def test_lets_chat_runs_hello_and_returns_to_menu(tmp_path):
 
     try:
         output = _read_pty_until(master_fd, "Select: ")
+        assert "____  _   _" in output
         assert "1) Lets chat" in output
         assert "2) Start service" in output
 
@@ -248,6 +249,7 @@ def test_lets_chat_runs_hello_and_returns_to_menu(tmp_path):
 
         os.write(master_fd, b"\n")
         output = _read_pty_until(master_fd, "Select: ")
+        assert "____  _   _" in output
         assert "1) Lets chat" in output
         assert "2) Start service" in output
     finally:
@@ -358,6 +360,7 @@ def test_ctrl_c_cancels_openai_configuration_and_exits_main_menu(tmp_path):
 
         os.write(master_fd, b"0\n")
         output = _read_pty_until(master_fd, "Select: ")
+        assert "____  _   _" in output
         assert "1) Lets chat" in output
         assert "2) Start service" in output
         os.killpg(process.pid, signal.SIGINT)
@@ -700,6 +703,33 @@ def test_start_menu_restarts_running_service(tmp_path):
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
         os.close(master_fd)
+
+
+def test_setup_shows_guidance_without_opening_menu(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    deploy = fixture["deploy"]
+
+    result = _run(["bash", deploy / "chatdome", "setup"], env=fixture["env"], check=False)
+
+    assert result.returncode == 0
+    assert "Configure ChatDome:" in result.stdout
+    assert "AI model management" in result.stdout
+    assert "Telegram configuration" in result.stdout
+    assert "1) Lets chat" not in result.stdout
+    calls = fixture["command_log"].read_text(encoding="utf-8")
+    assert "status" in calls
+
+
+def test_unknown_command_shows_usage_without_opening_menu(tmp_path):
+    fixture = _create_fixture(tmp_path)
+    deploy = fixture["deploy"]
+
+    result = _run(["bash", deploy / "chatdome", "missing-command"], env=fixture["env"], check=False)
+
+    assert result.returncode == 2
+    assert "Unknown command: missing-command" in result.stdout
+    assert "Usage: chatdome [command]" in result.stdout
+    assert "1) Lets chat" not in result.stdout
 
 
 def test_stop_reports_success_and_repeated_state(tmp_path):

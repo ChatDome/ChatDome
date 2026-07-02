@@ -325,6 +325,14 @@ permanently_remove_chatdome() {
 
 show_header() {
   clear
+  cat <<'CHATDOME_LOGO'
+    ____  _   _   ___   _____  ____    ___   __  __  _____
+   / ___|| | | | / _ \ |_   _||  _ \  / _ \ |  \/  || ____|
+  / /    | |_| |/ /_\ \  | |  | | | |/ / \ \| |\/| ||  _|
+ / /___  |  _  ||  _  |  | |  | |_| |\ \_/ /| |  | || |___
+ \_____| |_| |_||_| |_|  |_|  |____/  \___/ |_|  |_||_____|
+CHATDOME_LOGO
+  echo
   echo "ChatDome Management Menu"
   echo "========================"
   echo
@@ -987,6 +995,30 @@ maintenance_menu() {
   done
 }
 
+setup_guidance() {
+  run_cli status || true
+  echo
+  echo "Configure ChatDome:"
+  echo "- LLM: chatdome -> AI model management"
+  echo "- Telegram: chatdome -> Telegram configuration"
+  echo "- Service: chatdome -> Start service"
+  echo "- Check: chatdome doctor"
+}
+
+show_usage() {
+  cat <<'USAGE'
+Usage: chatdome [command]
+
+Commands:
+  hello    Show terminal chat entry
+  status   Show installation status
+  doctor   Check local configuration
+  setup    Show setup steps
+
+Run "chatdome" to open the management menu.
+USAGE
+}
+
 main_menu() {
   if ! prepare_runtime_layout; then
     echo "❌ Cannot prepare ChatDome runtime directories."
@@ -1022,11 +1054,19 @@ main_menu() {
 }
 
 case "${1:-}" in
+  "") main_menu ;;
   hello) run_cli hello ;;
   status) run_cli status ;;
   doctor) run_cli doctor ;;
+  setup) setup_guidance ;;
+  help|--help|-h) show_usage ;;
   --update) update_chatdome ;;
   --stop) stop_service_with_result ;;
   --disable-service) disable_service_with_result ;;
-  *) main_menu ;;
+  *)
+    echo "Unknown command: $1"
+    echo
+    show_usage
+    exit 2
+    ;;
 esac
