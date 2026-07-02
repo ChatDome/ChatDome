@@ -1010,7 +1010,7 @@ show_usage() {
 Usage: chatdome [command]
 
 Commands:
-  hello    Show terminal chat entry
+  hello    Start terminal chat
   status   Show installation status
   doctor   Check local configuration
   setup    Show setup steps

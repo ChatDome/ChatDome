@@ -235,6 +235,97 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertIn("Traceback", log_text)
         self.assertIn("Unexpected OAuth polling HTTP status: 429", log_text)
 
+    def test_hello_runs_terminal_chat_loop_with_fake_agent(self):
+        class FakeAgent:
+            def __init__(self):
+                self.messages = []
+                self.stopped = False
+
+            async def handle_message(self, chat_id, message):
+                self.messages.append((chat_id, message))
+                return SimpleNamespace(kind="reply", content="pong", payload={})
+
+            async def stop(self):
+                self.stopped = True
+
+            def clear_session(self, chat_id):
+                raise AssertionError("clear_session should not be called")
+
+        fake_agent = FakeAgent()
+        runtime = self.cli._TerminalChatRuntime(fake_agent, -42)
+
+        with patch.object(self.cli, "_create_terminal_chat_runtime", return_value=runtime):
+            with patch("builtins.input", side_effect=["hello", "/exit"]):
+                with patch("builtins.print") as output:
+                    self.cli.hello(SimpleNamespace(chat_id=-42))
+
+        self.assertEqual(fake_agent.messages, [(-42, "hello")])
+        self.assertTrue(fake_agent.stopped)
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("____  _   _", printed)
+        self.assertIn("chatdome> pong", printed)
+
+    def test_terminal_chat_handles_help_and_clear_commands(self):
+        class FakeAgent:
+            def __init__(self):
+                self.cleared = []
+                self.stopped = False
+
+            def clear_session(self, chat_id):
+                self.cleared.append(chat_id)
+
+            async def stop(self):
+                self.stopped = True
+
+        fake_agent = FakeAgent()
+        runtime = self.cli._TerminalChatRuntime(fake_agent, -9)
+
+        with patch.object(self.cli, "_create_terminal_chat_runtime", return_value=runtime):
+            with patch("builtins.input", side_effect=["/help", "/clear", "/exit"]):
+                with patch("builtins.print") as output:
+                    self.cli.hello(SimpleNamespace(chat_id=-9))
+
+        self.assertEqual(fake_agent.cleared, [-9])
+        self.assertTrue(fake_agent.stopped)
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("/audit [N]", printed)
+        self.assertIn("chatdome> Session cleared.", printed)
+
+    def test_terminal_audit_filters_command_events(self):
+        events = [
+            {"timestamp_iso": "2026-07-02T00:00:02Z", "event_type": "llm_profile_updated"},
+            {
+                "timestamp_iso": "2026-07-02T00:00:01Z",
+                "event_type": "command_pending_approval",
+                "risk_level": "high",
+                "command": "systemctl restart sshd",
+            },
+        ]
+        with patch.object(self.cli.CommandAuditTracker, "get_recent_events", return_value=events):
+            text = self.cli._format_terminal_audit_events(-1, 10)
+
+        self.assertIn("command_pending_approval", text)
+        self.assertIn("systemctl restart sshd", text)
+        self.assertNotIn("llm_profile_updated", text)
+
+    def test_terminal_audit_command_does_not_initialize_agent_runtime(self):
+        events = [
+            {
+                "timestamp_iso": "2026-07-02T00:00:01Z",
+                "event_type": "command_executed",
+                "risk_level": "low",
+                "command": "whoami",
+            }
+        ]
+        with patch.object(self.cli.CommandAuditTracker, "get_recent_events", return_value=events):
+            with patch.object(self.cli, "_create_terminal_chat_runtime", side_effect=AssertionError("runtime initialized")):
+                with patch("builtins.input", side_effect=["/audit 1", "/exit"]):
+                    with patch("builtins.print") as output:
+                        self.cli.hello(SimpleNamespace(chat_id=-1))
+
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("command_executed", printed)
+        self.assertIn("whoami", printed)
     def test_set_admin_chat_ids_writes_telegram_config(self):
         with patch("builtins.print") as output:
             self.cli.set_admin_chat_ids(SimpleNamespace(chat_ids="1, 2"))
@@ -297,10 +388,11 @@ class ChatDomeCLITests(unittest.TestCase):
 
 
 class ChatDomeCLIHelloTests(unittest.TestCase):
-    def test_hello_prints_logo_only(self):
+    def test_hello_starts_terminal_chat_and_exits(self):
         result = subprocess.run(
             [sys.executable, str(CLI_PATH), "hello"],
             text=True,
+            input="/exit\n",
             capture_output=True,
             check=False,
         )

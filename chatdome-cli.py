@@ -360,9 +360,349 @@ def show_status(args: argparse.Namespace) -> None:
     print(f"- Logs: {os.environ.get('CHATDOME_LOG_DIR', str(DATA_DIR))}")
 
 
+class _TerminalChatRuntime:
+    def __init__(self, agent: Any, chat_id: int) -> None:
+        self.agent = agent
+        self.chat_id = chat_id
+
+
+def _terminal_chat_id(args: argparse.Namespace) -> int:
+    raw = getattr(args, "chat_id", None)
+    if raw is None:
+        raw = os.environ.get("CHATDOME_CLI_CHAT_ID", "-1")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return -1
+
+
+def _sync_terminal_runtime_paths() -> None:
+    os.environ["CHATDOME_CONFIG"] = str(CONFIG_PATH)
+    os.environ["CHATDOME_DATA_DIR"] = str(DATA_DIR)
+    os.environ["CHATDOME_RUN_DIR"] = str(RUN_DIR)
+    try:
+        import chatdome.agent.audit as audit_module
+
+        audit_module.AUDIT_DIR = DATA_DIR / "audit"
+    except Exception:
+        pass
+
+
+def _load_terminal_chat_config() -> Any:
+    from chatdome.config import parse_config_document, validate_llm_config
+
+    if not CONFIG_PATH.exists():
+        raise FileNotFoundError(f"missing config: {CONFIG_PATH}")
+    raw_document = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw_document, dict):
+        raise ValueError("configuration document must be a mapping")
+    config = parse_config_document(raw_document)
+    validate_llm_config(config)
+    return config
+
+
+def _create_terminal_chat_runtime(args: argparse.Namespace) -> _TerminalChatRuntime:
+    _sync_terminal_runtime_paths()
+    config = _load_terminal_chat_config()
+
+    from chatdome.agent.core import Agent
+    from chatdome.agent.engram import EngramStore
+    from chatdome.executor.sandbox import CommandSandbox
+    from chatdome.llm.manager import LLMManager
+    from chatdome.runtime_environment import collect_and_persist_runtime_environment
+    from chatdome.sentinel.pack_loader import PackLoader
+    from chatdome.sentinel.user_context import UserContextLedger
+
+    pack_loader = PackLoader(builtin_dir=CONTROLPLANE_SRC / "chatdome" / "packs")
+    pack_loader.load(enabled_packs=config.sentinel.builtin_packs)
+    llm_manager = LLMManager(config.ai_profiles, config.active_ai_profile)
+    sandbox = CommandSandbox(
+        default_timeout=config.agent.command_timeout,
+        max_output_chars=config.agent.max_output_chars,
+        allow_generated_commands=config.agent.allow_generated_commands,
+        allow_unrestricted_commands=config.agent.allow_unrestricted_commands,
+        persist_command_outputs=config.agent.persist_command_outputs,
+        command_output_retention_days=config.agent.command_output_retention_days,
+        command_output_max_chars=config.agent.command_output_max_chars,
+        pack_loader=pack_loader,
+    )
+    try:
+        _, runtime_environment_context = collect_and_persist_runtime_environment(ENV_PROFILE_PATH)
+    except Exception:
+        runtime_environment_context = ""
+
+    agent = Agent(
+        llm=None,
+        llm_manager=llm_manager,
+        sandbox=sandbox,
+        config=config.agent,
+        runtime_environment_context=runtime_environment_context,
+        pack_loader=pack_loader,
+        user_context_ledger=UserContextLedger(),
+        valid_check_ids=[str(c.get("check_id")) for c in config.sentinel.checks if c.get("check_id")],
+        engram_store=EngramStore(),
+    )
+    return _TerminalChatRuntime(agent=agent, chat_id=_terminal_chat_id(args))
+
+
+def _terminal_help_text() -> str:
+    return "\n".join(
+        [
+            "Commands:",
+            "  /help              Show commands",
+            "  /clear             Clear this terminal session",
+            "  /env               Show environment summary",
+            "  /audit [N]         Show recent command audit events",
+            "  /confirm [ID]      Approve pending command or continue task",
+            "  /reject [ID]       Reject pending command or stop task",
+            "  /exit              Exit terminal chat",
+        ]
+    )
+
+
+def _print_chatdome_message(text: str) -> None:
+    value = str(text or "").rstrip()
+    if not value:
+        print("chatdome>")
+        return
+    lines = value.splitlines()
+    print(f"chatdome> {lines[0]}")
+    indent = " " * 10
+    for line in lines[1:]:
+        print(f"{indent}{line}")
+
+
+def _compact_terminal_text(value: Any, fallback: str, max_chars: int = 120) -> str:
+    text = " ".join(str(value or "").split()).strip() or fallback
+    if len(text) > max_chars:
+        text = text[: max_chars - 3].rstrip() + "..."
+    return text
+
+
+def _format_terminal_pending_approval(payload: dict[str, Any]) -> str:
+    approval_id = str((payload or {}).get("approval_id") or "").strip()
+    risk_level = str((payload or {}).get("risk_level") or "unknown").strip()
+    command_hash = str((payload or {}).get("command_hash") or "").strip()
+    purpose = _compact_terminal_text((payload or {}).get("reason"), "not provided")
+    impact = _compact_terminal_text((payload or {}).get("impact_analysis"), "review required")
+
+    lines = ["Pending approval"]
+    if approval_id:
+        lines.append(f"Approval ID: {approval_id}")
+    lines.append(f"Risk: {risk_level}")
+    if command_hash:
+        lines.append(f"Command hash: {command_hash[:12]}")
+    lines.append(f"Purpose: {purpose}")
+    lines.append(f"Impact: {impact}")
+    lines.append("Run: /confirm [approval_id] or /reject [approval_id]")
+    return "\n".join(lines)
+
+
+def _format_terminal_round_limit(payload: dict[str, Any]) -> str:
+    rounds = int((payload or {}).get("rounds") or 0)
+    window = int((payload or {}).get("window") or 0)
+    return (
+        f"Task paused after {rounds} rounds.\n"
+        f"Run: /confirm to continue {window} rounds, or /reject to stop."
+    )
+
+
+def _print_terminal_agent_result(result: Any) -> None:
+    kind = str(getattr(result, "kind", "reply") or "reply")
+    if kind == "pending_approval":
+        _print_chatdome_message(_format_terminal_pending_approval(getattr(result, "payload", {}) or {}))
+        return
+    if kind == "round_limit":
+        _print_chatdome_message(_format_terminal_round_limit(getattr(result, "payload", {}) or {}))
+        return
+    _print_chatdome_message(str(getattr(result, "content", result) or ""))
+
+
+def _terminal_environment_summary(max_chars: int = 4000) -> str:
+    path = ENV_PROFILE_PATH if ENV_PROFILE_PATH.exists() or not LEGACY_ENV_PROFILE_PATH.exists() else LEGACY_ENV_PROFILE_PATH
+    if not path.exists():
+        return "Environment profile not found.\nRun: chatdome doctor"
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "Environment profile unreadable.\nRun: chatdome doctor"
+    if not text:
+        return "Environment profile is empty.\nRun: chatdome doctor"
+    if len(text) > max_chars:
+        return text[:max_chars].rstrip() + "\n..."
+    return text
+
+
+def _terminal_audit_limit(parts: list[str]) -> int:
+    if len(parts) < 2:
+        return 10
+    try:
+        value = int(parts[1])
+    except (TypeError, ValueError):
+        return 10
+    return min(max(value, 1), 30)
+
+
+def _format_terminal_audit_events(chat_id: int, limit: int) -> str:
+    raw_events = CommandAuditTracker.get_recent_events(
+        chat_id=chat_id,
+        limit=max(100, limit * 10),
+        audit_source="user",
+    )
+    direct_command_events = {"security_check_executed", "security_check_invalid"}
+    events = []
+    for event in raw_events:
+        event_type = str(event.get("event_type", ""))
+        if not event_type.startswith("command_") and event_type not in direct_command_events:
+            continue
+        events.append(event)
+        if len(events) >= limit:
+            break
+
+    if not events:
+        return "No user command audit events yet."
+
+    lines = [f"User command audit events (latest {len(events)}):"]
+    for event in events:
+        ts = str(event.get("timestamp_iso", "unknown"))
+        event_type = str(event.get("event_type", "unknown"))
+        risk = str(event.get("risk_level", "-"))
+        command = str(event.get("command", "")).replace("\n", " ").strip()
+        if len(command) > 100:
+            command = command[:100] + "..."
+        line = f"- {ts} | {event_type} | risk={risk}"
+        if command:
+            line += f"\n  {command}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _terminal_session(runtime: _TerminalChatRuntime) -> Any:
+    manager = getattr(runtime.agent, "session_manager", None)
+    getter = getattr(manager, "get_or_create", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter(runtime.chat_id)
+    except Exception:
+        return None
+
+
+async def _resolve_terminal_confirm(runtime: _TerminalChatRuntime, approval_id: str | None) -> None:
+    session = _terminal_session(runtime)
+    if session is not None and getattr(session, "pending_round_limit", False) and not getattr(session, "pending_approval", False):
+        result = await runtime.agent.resolve_round_limit(runtime.chat_id, "CONTINUE")
+        _print_terminal_agent_result(result)
+        return
+    _, result = await runtime.agent.resume_session(runtime.chat_id, "APPROVE", approval_id=approval_id)
+    _print_terminal_agent_result(result)
+
+
+async def _resolve_terminal_reject(runtime: _TerminalChatRuntime, approval_id: str | None) -> None:
+    session = _terminal_session(runtime)
+    if session is not None and getattr(session, "pending_round_limit", False) and not getattr(session, "pending_approval", False):
+        result = await runtime.agent.resolve_round_limit(runtime.chat_id, "ABANDON")
+        _print_terminal_agent_result(result)
+        return
+    _, result = await runtime.agent.resume_session(runtime.chat_id, "REJECT", approval_id=approval_id)
+    _print_terminal_agent_result(result)
+
+
+async def _handle_terminal_command(runtime: _TerminalChatRuntime, line: str) -> bool:
+    parts = line.split()
+    command = parts[0].lower() if parts else ""
+    if command in {"/exit", "/quit"}:
+        return False
+    if command == "/help":
+        _print_chatdome_message(_terminal_help_text())
+        return True
+    if command == "/clear":
+        runtime.agent.clear_session(runtime.chat_id)
+        _print_chatdome_message("Session cleared.")
+        return True
+    if command == "/env":
+        _print_chatdome_message(_terminal_environment_summary())
+        return True
+    if command == "/audit":
+        _print_chatdome_message(_format_terminal_audit_events(runtime.chat_id, _terminal_audit_limit(parts)))
+        return True
+    if command == "/confirm":
+        approval_id = parts[1] if len(parts) > 1 else None
+        await _resolve_terminal_confirm(runtime, approval_id)
+        return True
+    if command == "/reject":
+        approval_id = parts[1] if len(parts) > 1 else None
+        await _resolve_terminal_reject(runtime, approval_id)
+        return True
+
+    _print_chatdome_message("Unknown command.\nRun: /help")
+    return True
+
+
+async def _terminal_chat_loop(args: argparse.Namespace) -> None:
+    runtime: _TerminalChatRuntime | None = None
+    try:
+        while True:
+            try:
+                line = input("you> ")
+            except EOFError:
+                print()
+                break
+            except KeyboardInterrupt:
+                print()
+                break
+
+            text = line.strip()
+            if not text:
+                continue
+            command = text.split()[0].lower() if text.startswith("/") else ""
+            if command in {"/exit", "/quit"}:
+                break
+            if command == "/help":
+                _print_chatdome_message(_terminal_help_text())
+                continue
+            if command == "/env":
+                _print_chatdome_message(_terminal_environment_summary())
+                continue
+            if command == "/audit":
+                _sync_terminal_runtime_paths()
+                _print_chatdome_message(
+                    _format_terminal_audit_events(
+                        _terminal_chat_id(args),
+                        _terminal_audit_limit(text.split()),
+                    )
+                )
+                continue
+
+            if runtime is None:
+                runtime = _create_terminal_chat_runtime(args)
+            if text.startswith("/"):
+                if not await _handle_terminal_command(runtime, text):
+                    break
+                continue
+
+            result = await runtime.agent.handle_message(runtime.chat_id, text)
+            _print_terminal_agent_result(result)
+    finally:
+        if runtime is not None:
+            stop = getattr(runtime.agent, "stop", None)
+            if callable(stop):
+                try:
+                    await stop()
+                except Exception:
+                    pass
+
+
 def hello(args: argparse.Namespace) -> None:
-    del args
     print(CHATDOME_LOGO)
+    try:
+        asyncio.run(_terminal_chat_loop(args))
+    except KeyboardInterrupt:
+        print()
+    except ChatDomeError as exc:
+        _exit_with_logged_error("Terminal chat", exc, fallback="Terminal chat failed. Run chatdome doctor.")
+    except Exception as exc:
+        _exit_with_logged_error("Terminal chat", exc, fallback="Terminal chat failed. Run chatdome doctor.")
 
 
 def _doctor_line(level: str, name: str, message: str) -> bool:
@@ -874,7 +1214,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("ensure-config").set_defaults(func=ensure_config)
     sub.add_parser("validate-config").set_defaults(func=validate_config)
     sub.add_parser("health-check").set_defaults(func=health_check)
-    sub.add_parser("hello").set_defaults(func=hello)
+    p = sub.add_parser("hello")
+    p.add_argument("--chat-id", type=int, default=None, help=argparse.SUPPRESS)
+    p.set_defaults(func=hello)
     sub.add_parser("status").set_defaults(func=show_status)
     sub.add_parser("doctor").set_defaults(func=doctor)
     sub.add_parser("env-summary").set_defaults(func=show_env_summary)
