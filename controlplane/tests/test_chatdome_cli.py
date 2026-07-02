@@ -209,6 +209,32 @@ class ChatDomeCLITests(unittest.TestCase):
 
         self.assertEqual(token_file, "~/.chatdome/codex-auth/codex-old.json")
 
+    def test_codex_login_logs_auth_error_without_traceback_output(self):
+        from chatdome.errors import CodexAuthError
+
+        async def fail_login(_args):
+            raise CodexAuthError(
+                "Unexpected OAuth polling HTTP status: 429 - <html>Just a moment</html>",
+                user_message="Codex 认证轮询被限流，请稍后重试或切换网络。",
+                retryable=True,
+            )
+
+        with patch.object(self.cli, "_codex_login_async", fail_login):
+            with patch("builtins.print") as output:
+                with self.assertRaises(SystemExit) as raised:
+                    self.cli.codex_login(SimpleNamespace())
+
+        self.assertEqual(raised.exception.code, 1)
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("Codex 认证轮询被限流，请稍后重试或切换网络。", printed)
+        self.assertIn("操作: 稍后重试，或切换网络后重新认证。", printed)
+        self.assertIn("查看日志: tail -n 80", printed)
+        self.assertNotIn("Traceback", printed)
+
+        log_text = (self.cli.DATA_DIR / "chatdome-cli.log").read_text(encoding="utf-8")
+        self.assertIn("Traceback", log_text)
+        self.assertIn("Unexpected OAuth polling HTTP status: 429", log_text)
+
     def test_set_admin_chat_ids_writes_telegram_config(self):
         with patch("builtins.print") as output:
             self.cli.set_admin_chat_ids(SimpleNamespace(chat_ids="1, 2"))

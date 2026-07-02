@@ -219,7 +219,14 @@ class CodexOAuth:
                         )
                         
                     elif resp.status_code in (400, 403):
-                        data = resp.json()
+                        try:
+                            data = resp.json()
+                        except ValueError as exc:
+                            raise CodexAuthError(
+                                f"OAuth polling returned non-JSON response (HTTP {resp.status_code}): {resp.text}",
+                                user_message="Codex 认证轮询失败，请稍后重试或切换网络。",
+                                retryable=True,
+                            ) from exc
                         # Handle both standard {"error": "..."} and OpenAI {"error": {"code": "..."}}
                         err_obj = data.get("error", {})
                         if isinstance(err_obj, dict):
@@ -241,9 +248,12 @@ class CodexOAuth:
                                 user_message="Codex 授权未完成或已被拒绝，请重新运行 /codex_login。",
                             )
                     else:
+                        user_message = "Codex 认证轮询被限流，请稍后重试或切换网络。"
+                        if resp.status_code != 429:
+                            user_message = "Codex 认证轮询失败，请稍后重试。"
                         raise CodexAuthError(
                             f"Unexpected OAuth polling HTTP status: {resp.status_code} - {resp.text}",
-                            user_message="Codex 认证轮询失败，请稍后重试。",
+                            user_message=user_message,
                             retryable=True,
                         )
                         

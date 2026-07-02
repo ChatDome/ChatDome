@@ -8,9 +8,11 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import stat
 import sys
 import time
+import traceback
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -41,6 +43,7 @@ if CONTROLPLANE_SRC.is_dir():
 from chatdome import __version__
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.config import validate_profile_name
+from chatdome.errors import ChatDomeError, user_facing_error_message
 from chatdome.llm.profile_admin import (
     CreateCodexProfileRequest,
     CreateOpenAIProfileRequest,
@@ -55,6 +58,60 @@ CHATDOME_LOGO = r"""    ____  _   _   ___   _____  ____    ___   __  __  _____
   / /    | |_| |/ /_\ \  | |  | | | |/ / \ \| |\/| ||  _|
  / /___  |  _  ||  _  |  | |  | |_| |\ \_/ /| |  | || |___
  \_____| |_| |_||_| |_|  |_|  |____/  \___/ |_|  |_||_____|"""
+
+
+def _cli_error_log_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    if os.environ.get("CHATDOME_CLI_LOG_FILE"):
+        candidates.append(Path(os.environ["CHATDOME_CLI_LOG_FILE"]).expanduser())
+    if os.environ.get("CHATDOME_LOG_DIR"):
+        candidates.append(Path(os.environ["CHATDOME_LOG_DIR"]).expanduser() / "chatdome-cli.log")
+    candidates.append(DATA_DIR / "chatdome-cli.log")
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def _append_cli_exception_log(action: str, exc: BaseException) -> tuple[Path, bool]:
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+
+    candidates = _cli_error_log_candidates()
+    for log_path in candidates:
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"\n[{timestamp}] {action} failed\n")
+                handle.write(detail)
+                if not detail.endswith("\n"):
+                    handle.write("\n")
+            return log_path, True
+        except OSError:
+            continue
+    return candidates[0], False
+
+
+def _tail_log_command(log_path: Path) -> str:
+    return f"tail -n 80 {shlex.quote(str(log_path))}"
+
+
+def _exit_with_logged_error(action: str, exc: BaseException, *, fallback: str) -> None:
+    log_path, logged = _append_cli_exception_log(action, exc)
+    print(user_facing_error_message(exc, fallback=fallback))
+    if isinstance(exc, ChatDomeError) and exc.retryable:
+        print("操作: 稍后重试，或切换网络后重新认证。")
+    if logged:
+        print(f"查看日志: {_tail_log_command(log_path)}")
+    else:
+        print(f"日志写入失败。检查目录权限: {log_path.parent}")
+    raise SystemExit(1) from None
+
 
 def _chmod_owner_only(path: Path) -> None:
     try:
@@ -557,7 +614,10 @@ def codex_login(args: argparse.Namespace) -> None:
         asyncio.run(_codex_login_async(args))
     except KeyboardInterrupt as exc:
         raise SystemExit("cancelled") from exc
-
+    except ChatDomeError as exc:
+        _exit_with_logged_error("Codex OAuth", exc, fallback="Codex 认证失败，请查看日志。")
+    except Exception as exc:
+        _exit_with_logged_error("Codex OAuth", exc, fallback="Codex 认证失败，请查看日志。")
 
 def set_active_profile(args: argparse.Namespace) -> None:
     result = _run_profile_admin(
