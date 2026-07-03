@@ -731,11 +731,10 @@ def _format_terminal_pending_approval(payload: dict[str, Any]) -> str:
 
 def _format_terminal_round_limit(payload: dict[str, Any]) -> str:
     rounds = int((payload or {}).get("rounds") or 0)
-    window = int((payload or {}).get("window") or 0)
     title = _status_label("⏸️", "[pause]", f"Task paused after {rounds} rounds.")
     return (
         f"{title}\n"
-        f"Run: /continue to execute {window} more rounds, or /reject to stop."
+        "Enter y to continue, n to stop."
     )
 
 
@@ -749,6 +748,7 @@ def _print_terminal_agent_result(result: Any) -> str:
         return ChatSessionState.CONTINUATION_REQUIRED.value
     _print_chatdome_message(str(getattr(result, "content", result) or ""))
     return ChatSessionState.IDLE.value
+
 
 def _terminal_environment_summary(max_chars: int = 4000) -> str:
     path = ENV_PROFILE_PATH if ENV_PROFILE_PATH.exists() or not LEGACY_ENV_PROFILE_PATH.exists() else LEGACY_ENV_PROFILE_PATH
@@ -1094,6 +1094,18 @@ async def _resolve_terminal_reject(runtime: _TerminalChatRuntime, approval_id: s
     return _print_terminal_agent_result(result)
 
 
+
+async def _handle_terminal_continuation_choice(provider: Any, text: str) -> CommandResult:
+    value = str(text or "").strip().lower()
+    if value in {"y", "yes"}:
+        state = await _resolve_terminal_continue(provider.get())
+        return CommandResult(state=state)
+    if value in {"n", "no"}:
+        state = await _resolve_terminal_reject(provider.get(), None)
+        return CommandResult(state=state)
+    _print_chatdome_message("Enter y to continue, n to stop.")
+    return CommandResult(state=ChatSessionState.CONTINUATION_REQUIRED.value)
+
 async def _handle_terminal_command(runtime: _TerminalChatRuntime, line: str) -> bool:
     provider = _StaticTerminalRuntimeProvider(runtime)
     result = await _build_terminal_command_registry(provider).execute(line)
@@ -1162,6 +1174,7 @@ def _terminal_start_status() -> str:
 def _terminal_prompt() -> str:
     return os.environ.get("CHATDOME_PROMPT", "> ")
 
+
 async def _terminal_chat_loop(args: argparse.Namespace) -> None:
     provider = _TerminalRuntimeProvider(args)
     registry = _build_terminal_command_registry(provider)
@@ -1170,6 +1183,7 @@ async def _terminal_chat_loop(args: argparse.Namespace) -> None:
         message_handler=lambda text: _send_terminal_user_message(provider, text),
         unknown_handler=_handle_unknown_terminal_command,
         stop_handler=provider.stop,
+        continuation_handler=lambda text: _handle_terminal_continuation_choice(provider, text),
     )
     view = _create_terminal_chat_view(registry, lambda: controller.status_text)
     app = TerminalChatApp(view, controller, prompt=_terminal_prompt())

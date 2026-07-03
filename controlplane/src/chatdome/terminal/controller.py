@@ -30,11 +30,13 @@ class ChatSessionController:
         message_handler: Callable[[str], Any],
         unknown_handler: Callable[[str], Any] | None = None,
         stop_handler: Callable[[], Any] | None = None,
+        continuation_handler: Callable[[str], Any] | None = None,
     ) -> None:
         self._registry = registry
         self._message_handler = message_handler
         self._unknown_handler = unknown_handler
         self._stop_handler = stop_handler
+        self._continuation_handler = continuation_handler
         self.state = ChatSessionState.IDLE
 
     @property
@@ -46,7 +48,7 @@ class ChatSessionController:
         if self.state == ChatSessionState.APPROVAL_REQUIRED:
             return "approval: run /details, /confirm, or /reject"
         if self.state == ChatSessionState.CONTINUATION_REQUIRED:
-            return "paused: run /continue or /reject"
+            return "paused: enter y to continue, n to stop"
         if self.state == ChatSessionState.ERROR:
             return "error: run /retry or send a new message"
         return ""
@@ -62,6 +64,11 @@ class ChatSessionController:
             result = await self._registry.execute(text)
             if not result.handled:
                 result = await self._run_unknown_handler(text)
+            self._apply_result_state(result)
+            return result.keep_running
+
+        if self.state == ChatSessionState.CONTINUATION_REQUIRED and self._continuation_handler is not None:
+            result = await self._run_continuation_handler(text)
             self._apply_result_state(result)
             return result.keep_running
 
@@ -96,6 +103,14 @@ class ChatSessionController:
         if inspect.isawaitable(result):
             result = await result
         return self._coerce_result(result)
+
+    async def _run_continuation_handler(self, text: str) -> CommandResult:
+        if self._continuation_handler is None:
+            return CommandResult(state=ChatSessionState.CONTINUATION_REQUIRED.value)
+        result = self._continuation_handler(text)
+        if inspect.isawaitable(result):
+            result = await result
+        return self._coerce_result(result, default_state=ChatSessionState.CONTINUATION_REQUIRED.value)
 
     def _apply_result_state(self, result: CommandResult) -> None:
         if result.state:

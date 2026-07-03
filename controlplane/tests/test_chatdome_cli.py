@@ -389,6 +389,45 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertEqual(fake_agent.continued, [(-6, "CONTINUE")])
         self.assertEqual(fake_agent.resume_calls, [(-6, "APPROVE", "AP-1")])
 
+    def test_terminal_round_limit_accepts_yes_no_choice(self):
+        class FakeSessionManager:
+            def get_or_create(self, _chat_id):
+                return SimpleNamespace(pending_round_limit=True, pending_approval=False)
+
+        class FakeAgent:
+            def __init__(self):
+                self.messages = []
+                self.resolutions = []
+                self.session_manager = FakeSessionManager()
+
+            async def handle_message(self, chat_id, message):
+                self.messages.append((chat_id, message))
+                return SimpleNamespace(
+                    kind="round_limit",
+                    content="",
+                    payload={"rounds": 10, "window": 5},
+                )
+
+            async def resolve_round_limit(self, chat_id, action):
+                self.resolutions.append((chat_id, action))
+                return SimpleNamespace(kind="reply", content=f"resolved {action}", payload={})
+
+            async def stop(self):
+                pass
+
+        fake_agent = FakeAgent()
+        runtime = self.cli._TerminalChatRuntime(fake_agent, -10)
+        with patch.object(self.cli, "_create_terminal_chat_runtime", return_value=runtime):
+            with patch("builtins.input", side_effect=["task", "y", "task", "n", "/exit"]):
+                with patch("builtins.print") as output:
+                    self.cli.hello(SimpleNamespace(chat_id=-10))
+
+        self.assertEqual(fake_agent.messages, [(-10, "task"), (-10, "task")])
+        self.assertEqual(fake_agent.resolutions, [(-10, "CONTINUE"), (-10, "ABANDON")])
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("Enter y to continue, n to stop.", printed)
+        self.assertIn("resolved CONTINUE", printed)
+        self.assertIn("resolved ABANDON", printed)
     def test_read_terminal_line_handles_ctrl_h_backspace(self):
         class FakeIn:
             def __init__(self):
