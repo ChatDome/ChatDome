@@ -51,6 +51,17 @@ from chatdome.llm.profile_admin import (
     ProfileActor,
     ProfileConfigStore,
 )
+from chatdome.terminal import (
+    ChatSessionController,
+    ChatSessionState,
+    CommandDef,
+    CommandInvocation,
+    CommandRegistry,
+    CommandResult,
+    CompletionItem,
+    PlainTerminalChatView,
+    TerminalChatApp,
+)
 
 PROFILE_AUDIT_RECORDER = CommandAuditTracker.record_event
 CHATDOME_LOGO = r"""    ____  _   _   ___   _____  ____    ___   __  __  _____
@@ -366,6 +377,59 @@ class _TerminalChatRuntime:
         self.chat_id = chat_id
 
 
+class _TerminalRuntimeProvider:
+    def __init__(self, args: argparse.Namespace) -> None:
+        self._args = args
+        self._runtime: _TerminalChatRuntime | None = None
+        self.last_message: str | None = None
+        self.last_failed_message: str | None = None
+
+    @property
+    def runtime(self) -> _TerminalChatRuntime | None:
+        return self._runtime
+
+    @property
+    def chat_id(self) -> int:
+        return _terminal_chat_id(self._args)
+
+    def get(self) -> _TerminalChatRuntime:
+        if self._runtime is None:
+            self._runtime = _create_terminal_chat_runtime(self._args)
+        return self._runtime
+
+    async def stop(self) -> None:
+        runtime = self._runtime
+        if runtime is None:
+            return
+        stop = getattr(runtime.agent, "stop", None)
+        if not callable(stop):
+            return
+        try:
+            await stop()
+        except Exception:
+            pass
+
+
+class _StaticTerminalRuntimeProvider:
+    def __init__(self, runtime: _TerminalChatRuntime) -> None:
+        self._runtime = runtime
+        self.last_failed_message: str | None = None
+
+    @property
+    def runtime(self) -> _TerminalChatRuntime:
+        return self._runtime
+
+    @property
+    def chat_id(self) -> int:
+        return self._runtime.chat_id
+
+    def get(self) -> _TerminalChatRuntime:
+        return self._runtime
+
+    async def stop(self) -> None:
+        return None
+
+
 def _terminal_chat_id(args: argparse.Namespace) -> int:
     raw = getattr(args, "chat_id", None)
     if raw is None:
@@ -462,57 +526,122 @@ def _status_label(emoji: str, fallback: str, text: str) -> str:
     return f"{symbol} {text}" if symbol else text
 
 
+def _terminal_model_completion_items(arg_text: str) -> list[CompletionItem]:
+    current_arg = "" if arg_text.endswith(" ") else arg_text.split()[-1] if arg_text else ""
+    root, status = _config_root_for_report()
+    if status != "ready":
+        return []
+    profiles = root.get("ai_profiles") if isinstance(root.get("ai_profiles"), dict) else {}
+    active = str(root.get("active_ai_profile") or "").strip()
+    items = []
+    for name in sorted(str(key) for key in profiles):
+        if current_arg and not name.startswith(current_arg):
+            continue
+        description = "current model profile" if name == active else "model profile"
+        items.append(CompletionItem(text=name, display=name, description=description))
+    return items
+
+
+def _build_terminal_command_registry(runtime_provider: Any | None = None) -> CommandRegistry:
+    registry = CommandRegistry()
+
+    def require_provider() -> Any:
+        if runtime_provider is None:
+            raise RuntimeError("terminal runtime unavailable")
+        return runtime_provider
+
+    async def help_handler(_invocation: CommandInvocation) -> CommandResult:
+        _print_chatdome_message(_terminal_help_text())
+        return CommandResult()
+
+    async def clear_handler(_invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        runtime.agent.clear_session(runtime.chat_id)
+        _print_chatdome_message(_status_label("✅", "[ok]", "Session cleared."))
+        return CommandResult()
+
+    async def exit_handler(_invocation: CommandInvocation) -> CommandResult:
+        return CommandResult(keep_running=False)
+
+    async def env_handler(_invocation: CommandInvocation) -> CommandResult:
+        _print_chatdome_message(_terminal_environment_summary())
+        return CommandResult()
+
+    async def audit_handler(invocation: CommandInvocation) -> CommandResult:
+        _sync_terminal_runtime_paths()
+        provider = runtime_provider
+        chat_id = provider.chat_id if provider is not None else -1
+        parts = [invocation.command.name, *invocation.args]
+        _print_chatdome_message(_format_terminal_audit_events(chat_id, _terminal_audit_limit(parts)))
+        return CommandResult()
+
+    async def model_handler(invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        profile_name = invocation.args[0] if invocation.args else None
+        await _switch_terminal_model(runtime, profile_name)
+        return CommandResult()
+
+    async def model_list_handler(_invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        _print_chatdome_message(_format_terminal_model_profiles(runtime))
+        return CommandResult()
+
+    async def details_handler(invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        approval_id = invocation.args[0] if invocation.args else None
+        await _show_terminal_details(runtime, approval_id)
+        return CommandResult(state=ChatSessionState.APPROVAL_REQUIRED.value)
+
+    async def confirm_handler(invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        approval_id = invocation.args[0] if invocation.args else None
+        state = await _resolve_terminal_confirm(runtime, approval_id)
+        return CommandResult(state=state)
+
+    async def continue_handler(_invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        state = await _resolve_terminal_continue(runtime)
+        return CommandResult(state=state)
+
+    async def reject_handler(invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        approval_id = invocation.args[0] if invocation.args else None
+        state = await _resolve_terminal_reject(runtime, approval_id)
+        return CommandResult(state=state)
+
+    async def retry_handler(_invocation: CommandInvocation) -> CommandResult:
+        provider = require_provider()
+        message = getattr(provider, "last_failed_message", None)
+        if not message:
+            _print_chatdome_message(_status_label("ℹ️", "[i]", "No failed request to retry."))
+            return CommandResult()
+        return await _send_terminal_user_message(provider, message)
+
+    registry.register(CommandDef("/help", "Show commands", "basic", handler=help_handler))
+    registry.register(CommandDef("/clear", "Clear this terminal session", "basic", handler=clear_handler))
+    registry.register(CommandDef("/exit", "Exit terminal chat", "basic", aliases=("/quit",), handler=exit_handler))
+    registry.register(CommandDef("/env", "Show environment summary", "context", handler=env_handler))
+    registry.register(CommandDef("/audit", "Show recent command audit events", "context", args_hint="[N]", handler=audit_handler))
+    registry.register(CommandDef("/model", "Switch current model profile", "model", aliases=("/llm",), args_hint="<profile>", handler=model_handler, completer=_terminal_model_completion_items))
+    registry.register(CommandDef("/model_list", "Show configured model profiles", "model", aliases=("/llm_list", "/l"), keywords=("list", "llm"), handler=model_list_handler))
+    registry.register(CommandDef("/details", "Show pending approval details", "approval", args_hint="[ID]", handler=details_handler))
+    registry.register(CommandDef("/confirm", "Approve pending command", "approval", args_hint="[ID]", handler=confirm_handler))
+    registry.register(CommandDef("/reject", "Reject pending command or stop task", "approval", args_hint="[ID]", handler=reject_handler))
+    registry.register(CommandDef("/continue", "Continue paused task", "approval", handler=continue_handler))
+    registry.register(CommandDef("/retry", "Retry the last failed request", "recovery", handler=retry_handler))
+    return registry
+
+
 def _terminal_command_specs() -> list[tuple[str, str]]:
-    return [
-        ("/help", "Show commands"),
-        ("/clear", "Clear this terminal session"),
-        ("/env", "Show environment summary"),
-        ("/audit [N]", "Show recent command audit events"),
-        ("/details [ID]", "Show pending approval details"),
-        ("/confirm [ID]", "Approve pending command"),
-        ("/continue", "Continue paused task"),
-        ("/reject [ID]", "Reject pending command or stop task"),
-        ("/model <profile>", "Switch model for this terminal session"),
-        ("/model_list", "Show configured models"),
-        ("/exit", "Exit terminal chat"),
-    ]
+    return _build_terminal_command_registry().specs()
 
 
 def _terminal_command_names() -> list[str]:
-    names: list[str] = []
-    for usage, _description in _terminal_command_specs():
-        command = usage.split()[0]
-        if command not in names:
-            names.append(command)
-    return names
+    return _build_terminal_command_registry().command_names()
 
 
 def _terminal_command_matches(text: str) -> list[str]:
-    stripped = str(text or "")
-    if not stripped.startswith("/"):
-        return []
-    token = stripped.split(maxsplit=1)[0].lower()
-    names = _terminal_command_names()
-    known = {name.lower() for name in names}
-    if any(char.isspace() for char in stripped) and token in known:
-        return []
-
-    query = token[1:]
-    if not query:
-        return names
-
-    exact_matches = [name for name in names if name.lower() == token]
-    prefix_matches = [
-        name for name in names
-        if name.lower().startswith(token) and name not in exact_matches
-    ]
-    segment_matches = []
-    for name in names:
-        if name in exact_matches or name in prefix_matches:
-            continue
-        if any(part.startswith(query) for part in name[1:].lower().split("_")):
-            segment_matches.append(name)
-    return exact_matches + prefix_matches + segment_matches
+    return _build_terminal_command_registry().command_matches(text)
 
 
 def _terminal_command_token(text: str) -> str:
@@ -610,16 +739,16 @@ def _format_terminal_round_limit(payload: dict[str, Any]) -> str:
     )
 
 
-def _print_terminal_agent_result(result: Any) -> None:
+def _print_terminal_agent_result(result: Any) -> str:
     kind = str(getattr(result, "kind", "reply") or "reply")
     if kind == "pending_approval":
         _print_chatdome_message(_format_terminal_pending_approval(getattr(result, "payload", {}) or {}))
-        return
+        return ChatSessionState.APPROVAL_REQUIRED.value
     if kind == "round_limit":
         _print_chatdome_message(_format_terminal_round_limit(getattr(result, "payload", {}) or {}))
-        return
+        return ChatSessionState.CONTINUATION_REQUIRED.value
     _print_chatdome_message(str(getattr(result, "content", result) or ""))
-
+    return ChatSessionState.IDLE.value
 
 def _terminal_environment_summary(max_chars: int = 4000) -> str:
     path = ENV_PROFILE_PATH if ENV_PROFILE_PATH.exists() or not LEGACY_ENV_PROFILE_PATH.exists() else LEGACY_ENV_PROFILE_PATH
@@ -946,129 +1075,108 @@ async def _show_terminal_details(runtime: _TerminalChatRuntime, approval_id: str
     _print_chatdome_message(_format_terminal_approval_details(details))
 
 
-async def _resolve_terminal_confirm(runtime: _TerminalChatRuntime, approval_id: str | None) -> None:
+async def _resolve_terminal_confirm(runtime: _TerminalChatRuntime, approval_id: str | None) -> str:
     _, result = await runtime.agent.resume_session(runtime.chat_id, "APPROVE", approval_id=approval_id)
-    _print_terminal_agent_result(result)
+    return _print_terminal_agent_result(result)
 
 
-async def _resolve_terminal_continue(runtime: _TerminalChatRuntime) -> None:
+async def _resolve_terminal_continue(runtime: _TerminalChatRuntime) -> str:
     result = await runtime.agent.resolve_round_limit(runtime.chat_id, "CONTINUE")
-    _print_terminal_agent_result(result)
+    return _print_terminal_agent_result(result)
 
 
-async def _resolve_terminal_reject(runtime: _TerminalChatRuntime, approval_id: str | None) -> None:
+async def _resolve_terminal_reject(runtime: _TerminalChatRuntime, approval_id: str | None) -> str:
     session = _terminal_session(runtime)
     if session is not None and getattr(session, "pending_round_limit", False) and not getattr(session, "pending_approval", False):
         result = await runtime.agent.resolve_round_limit(runtime.chat_id, "ABANDON")
-        _print_terminal_agent_result(result)
-        return
+        return _print_terminal_agent_result(result)
     _, result = await runtime.agent.resume_session(runtime.chat_id, "REJECT", approval_id=approval_id)
-    _print_terminal_agent_result(result)
+    return _print_terminal_agent_result(result)
 
 
 async def _handle_terminal_command(runtime: _TerminalChatRuntime, line: str) -> bool:
-    parts = line.split()
-    raw_command = parts[0].lower() if parts else ""
-    command = {"/llm": "/model", "/llm_list": "/model_list"}.get(raw_command, raw_command)
-    if command in {"/exit", "/quit"}:
-        return False
-    if command == "/help":
-        _print_chatdome_message(_terminal_help_text())
-        return True
-    if command == "/clear":
-        runtime.agent.clear_session(runtime.chat_id)
-        _print_chatdome_message(_status_label("✅", "[ok]", "Session cleared."))
-        return True
-    if command == "/env":
-        _print_chatdome_message(_terminal_environment_summary())
-        return True
-    if command == "/audit":
-        _print_chatdome_message(_format_terminal_audit_events(runtime.chat_id, _terminal_audit_limit(parts)))
-        return True
-    if command == "/model_list":
-        _print_chatdome_message(_format_terminal_model_profiles(runtime))
-        return True
-    if command == "/model":
-        profile_name = parts[1] if len(parts) > 1 else None
-        await _switch_terminal_model(runtime, profile_name)
-        return True
-    if command == "/details":
-        approval_id = parts[1] if len(parts) > 1 else None
-        await _show_terminal_details(runtime, approval_id)
-        return True
-    if command == "/confirm":
-        approval_id = parts[1] if len(parts) > 1 else None
-        await _resolve_terminal_confirm(runtime, approval_id)
-        return True
-    if command == "/continue":
-        await _resolve_terminal_continue(runtime)
-        return True
-    if command == "/reject":
-        approval_id = parts[1] if len(parts) > 1 else None
-        await _resolve_terminal_reject(runtime, approval_id)
-        return True
+    provider = _StaticTerminalRuntimeProvider(runtime)
+    result = await _build_terminal_command_registry(provider).execute(line)
+    if not result.handled:
+        result = await _handle_unknown_terminal_command(line)
+    return result.keep_running
 
+
+async def _handle_unknown_terminal_command(_line: str) -> CommandResult:
     _print_chatdome_message(_status_label("ℹ️", "[i]", "Unknown command.") + "\nRun: /help")
-    return True
+    return CommandResult()
+
+
+async def _send_terminal_user_message(provider: Any, text: str) -> CommandResult:
+    provider.last_message = text
+    _print_chatdome_message(_status_label("⏳", "[...]", "Working..."))
+    try:
+        runtime = provider.get()
+        result = await runtime.agent.handle_message(runtime.chat_id, text)
+    except Exception as exc:
+        provider.last_failed_message = text
+        log_path, logged = _append_cli_exception_log("Terminal chat request", exc)
+        message = user_facing_error_message(exc, fallback="Request failed.")
+        lines = [message, "Run: /retry"]
+        if logged:
+            lines.append(f"Log: {_tail_log_command(log_path)}")
+        _print_chatdome_message("\n".join(lines))
+        return CommandResult(state=ChatSessionState.ERROR.value)
+    provider.last_failed_message = None
+    state = _print_terminal_agent_result(result)
+    return CommandResult(state=state)
+
+
+def _terminal_history_path() -> Path:
+    return DATA_DIR / "terminal_history"
+
+
+def _create_terminal_chat_view(registry: CommandRegistry, status_provider) -> Any:
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            from chatdome.terminal.prompt_toolkit_view import PromptToolkitChatView
+
+            return PromptToolkitChatView(
+                registry,
+                history_path=_terminal_history_path(),
+                write_message=_print_chatdome_message,
+                status_provider=status_provider,
+            )
+        except ImportError:
+            pass
+        except OSError:
+            pass
+    return PlainTerminalChatView(
+        read_line=_read_terminal_line,
+        write_message=_print_chatdome_message,
+    )
+
+
+def _terminal_start_status() -> str:
+    root, status = _config_root_for_report()
+    active = str(root.get("active_ai_profile") or "").strip() if status == "ready" else ""
+    return f"model: {active or 'not configured'}\nsession: local"
 
 
 async def _terminal_chat_loop(args: argparse.Namespace) -> None:
-    runtime: _TerminalChatRuntime | None = None
-    try:
-        while True:
-            try:
-                line = _read_terminal_line("you> ")
-            except EOFError:
-                print()
-                break
-            except KeyboardInterrupt:
-                print()
-                break
-
-            text = line.strip()
-            if not text:
-                continue
-            command = text.split()[0].lower() if text.startswith("/") else ""
-            if command in {"/exit", "/quit"}:
-                break
-            if command == "/help":
-                _print_chatdome_message(_terminal_help_text())
-                continue
-            if command == "/env":
-                _print_chatdome_message(_terminal_environment_summary())
-                continue
-            if command == "/audit":
-                _sync_terminal_runtime_paths()
-                _print_chatdome_message(
-                    _format_terminal_audit_events(
-                        _terminal_chat_id(args),
-                        _terminal_audit_limit(text.split()),
-                    )
-                )
-                continue
-
-            if runtime is None:
-                runtime = _create_terminal_chat_runtime(args)
-            if text.startswith("/"):
-                if not await _handle_terminal_command(runtime, text):
-                    break
-                continue
-
-            _print_chatdome_message(_status_label("⏳", "[...]", "Working..."))
-            result = await runtime.agent.handle_message(runtime.chat_id, text)
-            _print_terminal_agent_result(result)
-    finally:
-        if runtime is not None:
-            stop = getattr(runtime.agent, "stop", None)
-            if callable(stop):
-                try:
-                    await stop()
-                except Exception:
-                    pass
+    provider = _TerminalRuntimeProvider(args)
+    registry = _build_terminal_command_registry(provider)
+    controller = ChatSessionController(
+        registry,
+        message_handler=lambda text: _send_terminal_user_message(provider, text),
+        unknown_handler=_handle_unknown_terminal_command,
+        stop_handler=provider.stop,
+    )
+    view = _create_terminal_chat_view(registry, lambda: controller.status_text)
+    app = TerminalChatApp(view, controller, prompt="you > ")
+    await app.run()
 
 
 def hello(args: argparse.Namespace) -> None:
     print(CHATDOME_LOGO)
+    print("")
+    print(_terminal_start_status())
+    print("")
     try:
         asyncio.run(_terminal_chat_loop(args))
     except KeyboardInterrupt:

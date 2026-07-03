@@ -334,6 +334,27 @@ The AI uses **function calling** (tool use) to interact with the host. It can:
 | `large_files` | Find large files |
 | `last_reboot` | Reboot history |
 
+## Terminal Chat
+
+Run:
+
+```bash
+chatdome hello
+```
+
+`chatdome hello` starts an editable terminal session with command history, slash completion, and protected agent output. Non-TTY input uses plain stdin/stdout.
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show terminal commands |
+| `/model <profile>` | Switch the model profile for this terminal session |
+| `/model_list` | Show configured model profiles and auth status |
+| `/details [ID]` | Show pending approval details |
+| `/confirm [ID]` | Approve a pending command |
+| `/reject [ID]` | Reject a pending command or stop a paused task |
+| `/continue` | Continue a paused task |
+| `/retry` | Retry the last failed request |
+
 ## Telegram Commands
 
 | Command | Description |

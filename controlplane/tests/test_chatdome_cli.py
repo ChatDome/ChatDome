@@ -438,6 +438,43 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertEqual(self.cli._terminal_command_matches("/m")[0], "/model")
         self.assertEqual(self.cli._terminal_command_matches("/model other"), [])
 
+    def test_terminal_command_registry_completes_model_profiles(self):
+        registry = self.cli._build_terminal_command_registry()
+
+        self.assertEqual(registry.command_matches("/l"), ["/model_list"])
+        self.assertEqual(registry.completions("/m")[0].text, "/model")
+        self.assertEqual(registry.completions("/model ")[0].text, "base")
+
+    def test_terminal_retry_replays_last_failed_message(self):
+        class FakeAgent:
+            def __init__(self):
+                self.messages = []
+                self.stopped = False
+
+            async def handle_message(self, chat_id, message):
+                self.messages.append((chat_id, message))
+                if len(self.messages) == 1:
+                    raise RuntimeError("boom")
+                return SimpleNamespace(kind="reply", content=f"retried {message}", payload={})
+
+            async def stop(self):
+                self.stopped = True
+
+        fake_agent = FakeAgent()
+        runtime = self.cli._TerminalChatRuntime(fake_agent, -8)
+
+        with patch.object(self.cli, "_create_terminal_chat_runtime", return_value=runtime):
+            with patch("builtins.input", side_effect=["fail", "/retry", "/exit"]):
+                with patch("builtins.print") as output:
+                    self.cli.hello(SimpleNamespace(chat_id=-8))
+
+        self.assertEqual(fake_agent.messages, [(-8, "fail"), (-8, "fail")])
+        self.assertTrue(fake_agent.stopped)
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("Request failed.", printed)
+        self.assertIn("Run: /retry", printed)
+        self.assertIn("retried fail", printed)
+
     def test_read_terminal_line_completes_single_slash_command_match(self):
         class FakeIn:
             def __init__(self):
