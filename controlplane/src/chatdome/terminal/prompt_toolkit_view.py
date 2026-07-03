@@ -26,6 +26,10 @@ class PromptToolkitCommandCompleter:
                 display_meta=item.description,
             )
 
+    async def get_completions_async(self, document, complete_event):  # noqa: ANN001
+        for completion in self.get_completions(document, complete_event):
+            yield completion
+
 
 class PromptToolkitChatView:
     """Terminal view with history, completion, styling, and stdout protection."""

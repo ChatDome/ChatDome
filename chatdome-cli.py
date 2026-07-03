@@ -1158,6 +1158,10 @@ def _terminal_start_status() -> str:
     return f"model: {active or 'not configured'}\nsession: local"
 
 
+
+def _terminal_prompt() -> str:
+    return os.environ.get("CHATDOME_PROMPT", "> ")
+
 async def _terminal_chat_loop(args: argparse.Namespace) -> None:
     provider = _TerminalRuntimeProvider(args)
     registry = _build_terminal_command_registry(provider)
@@ -1168,7 +1172,7 @@ async def _terminal_chat_loop(args: argparse.Namespace) -> None:
         stop_handler=provider.stop,
     )
     view = _create_terminal_chat_view(registry, lambda: controller.status_text)
-    app = TerminalChatApp(view, controller, prompt="you > ")
+    app = TerminalChatApp(view, controller, prompt=_terminal_prompt())
     await app.run()
 
 

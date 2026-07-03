@@ -14,7 +14,7 @@ class TerminalChatApp:
         view: TerminalChatView,
         controller: ChatSessionController,
         *,
-        prompt: str = "you > ",
+        prompt: str = "> ",
     ) -> None:
         self._view = view
         self._controller = controller

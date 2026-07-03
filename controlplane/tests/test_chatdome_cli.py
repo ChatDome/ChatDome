@@ -445,6 +445,38 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertEqual(registry.completions("/m")[0].text, "/model")
         self.assertEqual(registry.completions("/model ")[0].text, "base")
 
+    def test_prompt_toolkit_completer_exposes_async_interface(self):
+        from chatdome.terminal.prompt_toolkit_view import PromptToolkitCommandCompleter
+
+        class FakeCompletion:
+            def __init__(self, text, **_kwargs):
+                self.text = text
+
+        fake_completion_module = SimpleNamespace(Completion=FakeCompletion)
+        fake_prompt_module = SimpleNamespace(completion=fake_completion_module)
+        registry = self.cli._build_terminal_command_registry()
+        completer = PromptToolkitCommandCompleter(registry)
+
+        async def collect():
+            document = SimpleNamespace(text_before_cursor="/m")
+            with patch.dict(
+                sys.modules,
+                {
+                    "prompt_toolkit": fake_prompt_module,
+                    "prompt_toolkit.completion": fake_completion_module,
+                },
+            ):
+                return [item.text async for item in completer.get_completions_async(document, None)]
+
+        self.assertIn("/model", asyncio.run(collect()))
+
+    def test_terminal_prompt_can_be_overridden(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(self.cli._terminal_prompt(), "> ")
+        with patch.dict("os.environ", {"CHATDOME_PROMPT": ""}):
+            self.assertEqual(self.cli._terminal_prompt(), "")
+        with patch.dict("os.environ", {"CHATDOME_PROMPT": "chat> "}):
+            self.assertEqual(self.cli._terminal_prompt(), "chat> ")
     def test_terminal_retry_replays_last_failed_message(self):
         class FakeAgent:
             def __init__(self):
