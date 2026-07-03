@@ -342,16 +342,16 @@ Run:
 chatdome hello
 ```
 
-`chatdome hello` starts an editable terminal session with command history, slash completion, and protected agent output. Non-TTY input uses plain stdin/stdout. Set `CHATDOME_PROMPT` to change or hide the input prompt. When a task pauses, enter `y` to continue or `n` to stop.
+`chatdome hello` starts an editable terminal session with command history, slash completion, and protected agent output. Non-TTY input uses plain stdin/stdout. Set `CHATDOME_PROMPT` to change or hide the input prompt. For approvals, enter `y` to allow, `n` to reject, or `d` for details. When a task pauses, enter `y` to continue or `n` to stop.
 
 | Command | Description |
 |---------|-------------|
 | `/help` | Show terminal commands |
 | `/model <profile>` | Switch the model profile for this terminal session |
 | `/model_list` | Show configured model profiles and auth status |
-| `/details [ID]` | Show pending approval details |
-| `/confirm [ID]` | Approve a pending command |
-| `/reject [ID]` | Reject a pending command or stop a paused task |
+| `/details` | Show pending approval details |
+| `/confirm` | Approve a pending command |
+| `/reject` | Reject a pending command or stop a paused task |
 | `/continue` | Continue a paused task |
 | `/retry` | Retry the last failed request |
 

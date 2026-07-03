@@ -624,9 +624,9 @@ def _build_terminal_command_registry(runtime_provider: Any | None = None) -> Com
     registry.register(CommandDef("/audit", "Show recent command audit events", "context", args_hint="[N]", handler=audit_handler))
     registry.register(CommandDef("/model", "Switch current model profile", "model", aliases=("/llm",), args_hint="<profile>", handler=model_handler, completer=_terminal_model_completion_items))
     registry.register(CommandDef("/model_list", "Show configured model profiles", "model", aliases=("/llm_list", "/l"), keywords=("list", "llm"), handler=model_list_handler))
-    registry.register(CommandDef("/details", "Show pending approval details", "approval", args_hint="[ID]", handler=details_handler))
-    registry.register(CommandDef("/confirm", "Approve pending command", "approval", args_hint="[ID]", handler=confirm_handler))
-    registry.register(CommandDef("/reject", "Reject pending command or stop task", "approval", args_hint="[ID]", handler=reject_handler))
+    registry.register(CommandDef("/details", "Show pending approval details", "approval", handler=details_handler))
+    registry.register(CommandDef("/confirm", "Approve pending command", "approval", handler=confirm_handler))
+    registry.register(CommandDef("/reject", "Reject pending command or stop task", "approval", handler=reject_handler))
     registry.register(CommandDef("/continue", "Continue paused task", "approval", handler=continue_handler))
     registry.register(CommandDef("/retry", "Retry the last failed request", "recovery", handler=retry_handler))
     return registry
@@ -693,49 +693,20 @@ def _print_chatdome_message(text: str) -> None:
         print(f"{indent}{line}")
 
 
-def _compact_terminal_text(value: Any, fallback: str, max_chars: int = 120) -> str:
-    text = " ".join(str(value or "").split()).strip() or fallback
-    if len(text) > max_chars:
-        text = text[: max_chars - 3].rstrip() + "..."
-    return text
-
-
-def _terminal_command_excerpt(command: Any, max_chars: int = 160) -> str:
-    text = " ".join(str(command or "").split()).strip()
-    if len(text) > max_chars:
-        text = text[: max_chars - 3].rstrip() + "..."
-    return text
-
-
 def _format_terminal_pending_approval(payload: dict[str, Any]) -> str:
-    approval_id = str((payload or {}).get("approval_id") or "").strip()
-    risk_level = str((payload or {}).get("risk_level") or "unknown").strip()
-    command_hash = str((payload or {}).get("command_hash") or "").strip()
-    command = _terminal_command_excerpt((payload or {}).get("command"))
-    purpose = _compact_terminal_text((payload or {}).get("reason"), "not provided")
-    impact = _compact_terminal_text((payload or {}).get("impact_analysis"), "review required")
-
-    lines = [_status_label("⚠️", "[!]", "Pending approval")]
-    if approval_id:
-        lines.append(f"Approval ID: {approval_id}")
-    lines.append(f"Risk: {risk_level}")
-    if command:
-        lines.append(f"Command: {command}")
-    if command_hash:
-        lines.append(f"Command hash: {command_hash[:12]}")
-    lines.append(f"Purpose: {purpose}")
-    lines.append(f"Impact: {impact}")
-    lines.append("Run: /details [approval_id], /confirm [approval_id], or /reject [approval_id]")
-    return "\n".join(lines)
+    del payload
+    return "\n".join(
+        [
+            _status_label("⚠️", "[!]", "Approval required"),
+            "Allow operation? [y/n]  d=details",
+        ]
+    )
 
 
 def _format_terminal_round_limit(payload: dict[str, Any]) -> str:
     rounds = int((payload or {}).get("rounds") or 0)
     title = _status_label("⏸️", "[pause]", f"Task paused after {rounds} rounds.")
-    return (
-        f"{title}\n"
-        "Enter y to continue, n to stop."
-    )
+    return f"{title}\nContinue? [y/n]"
 
 
 def _print_terminal_agent_result(result: Any) -> str:
@@ -921,7 +892,6 @@ def _format_terminal_approval_details(details: dict[str, Any]) -> str:
 
     analysis = details.get("analysis") if isinstance(details.get("analysis"), dict) else {}
     command = str(details.get("command") or "").strip()
-    approval_id = str(details.get("approval_id") or "").strip()
     command_hash = str(details.get("command_hash") or "").strip()
     reason = str(details.get("reason") or "not provided").strip()
     risk = str(analysis.get("risk_level") or details.get("risk_level") or "unknown").strip()
@@ -929,8 +899,6 @@ def _format_terminal_approval_details(details: dict[str, Any]) -> str:
     impact = str(analysis.get("impact_analysis") or "review required").strip()
 
     lines = [_status_label("🔎", "[details]", "Approval details")]
-    if approval_id:
-        lines.append(f"Approval ID: {approval_id}")
     lines.append(f"Risk: {risk}")
     lines.append(f"Safety: {safety}")
     if command_hash:
@@ -942,7 +910,7 @@ def _format_terminal_approval_details(details: dict[str, Any]) -> str:
     lines.append(_indent_terminal_block(command, max_chars=2000))
     lines.append("Impact:")
     lines.append(_indent_terminal_block(impact, max_chars=2400))
-    lines.append("Run: /confirm [approval_id] or /reject [approval_id]")
+    lines.append("Allow operation? [y/n]")
     return "\n".join(lines)
 
 
@@ -1094,6 +1062,20 @@ async def _resolve_terminal_reject(runtime: _TerminalChatRuntime, approval_id: s
     return _print_terminal_agent_result(result)
 
 
+async def _handle_terminal_approval_choice(provider: Any, text: str) -> CommandResult:
+    value = str(text or "").strip().lower()
+    if value in {"y", "yes"}:
+        state = await _resolve_terminal_confirm(provider.get(), None)
+        return CommandResult(state=state)
+    if value in {"n", "no"}:
+        state = await _resolve_terminal_reject(provider.get(), None)
+        return CommandResult(state=state)
+    if value in {"d", "detail", "details"}:
+        await _show_terminal_details(provider.get(), None)
+        return CommandResult(state=ChatSessionState.APPROVAL_REQUIRED.value)
+    _print_chatdome_message("Allow operation? [y/n]  d=details")
+    return CommandResult(state=ChatSessionState.APPROVAL_REQUIRED.value)
+
 
 async def _handle_terminal_continuation_choice(provider: Any, text: str) -> CommandResult:
     value = str(text or "").strip().lower()
@@ -1103,7 +1085,7 @@ async def _handle_terminal_continuation_choice(provider: Any, text: str) -> Comm
     if value in {"n", "no"}:
         state = await _resolve_terminal_reject(provider.get(), None)
         return CommandResult(state=state)
-    _print_chatdome_message("Enter y to continue, n to stop.")
+    _print_chatdome_message("Continue? [y/n]")
     return CommandResult(state=ChatSessionState.CONTINUATION_REQUIRED.value)
 
 async def _handle_terminal_command(runtime: _TerminalChatRuntime, line: str) -> bool:
@@ -1183,6 +1165,7 @@ async def _terminal_chat_loop(args: argparse.Namespace) -> None:
         message_handler=lambda text: _send_terminal_user_message(provider, text),
         unknown_handler=_handle_unknown_terminal_command,
         stop_handler=provider.stop,
+        approval_handler=lambda text: _handle_terminal_approval_choice(provider, text),
         continuation_handler=lambda text: _handle_terminal_continuation_choice(provider, text),
     )
     view = _create_terminal_chat_view(registry, lambda: controller.status_text)

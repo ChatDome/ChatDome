@@ -30,12 +30,14 @@ class ChatSessionController:
         message_handler: Callable[[str], Any],
         unknown_handler: Callable[[str], Any] | None = None,
         stop_handler: Callable[[], Any] | None = None,
+        approval_handler: Callable[[str], Any] | None = None,
         continuation_handler: Callable[[str], Any] | None = None,
     ) -> None:
         self._registry = registry
         self._message_handler = message_handler
         self._unknown_handler = unknown_handler
         self._stop_handler = stop_handler
+        self._approval_handler = approval_handler
         self._continuation_handler = continuation_handler
         self.state = ChatSessionState.IDLE
 
@@ -46,9 +48,9 @@ class ChatSessionController:
         if self.state == ChatSessionState.WORKING:
             return "assistant: working..."
         if self.state == ChatSessionState.APPROVAL_REQUIRED:
-            return "approval: run /details, /confirm, or /reject"
+            return "approval: y=allow n=reject d=details"
         if self.state == ChatSessionState.CONTINUATION_REQUIRED:
-            return "paused: enter y to continue, n to stop"
+            return "paused: y=continue n=stop"
         if self.state == ChatSessionState.ERROR:
             return "error: run /retry or send a new message"
         return ""
@@ -64,6 +66,11 @@ class ChatSessionController:
             result = await self._registry.execute(text)
             if not result.handled:
                 result = await self._run_unknown_handler(text)
+            self._apply_result_state(result)
+            return result.keep_running
+
+        if self.state == ChatSessionState.APPROVAL_REQUIRED and self._approval_handler is not None:
+            result = await self._run_approval_handler(text)
             self._apply_result_state(result)
             return result.keep_running
 
@@ -103,6 +110,14 @@ class ChatSessionController:
         if inspect.isawaitable(result):
             result = await result
         return self._coerce_result(result)
+
+    async def _run_approval_handler(self, text: str) -> CommandResult:
+        if self._approval_handler is None:
+            return CommandResult(state=ChatSessionState.APPROVAL_REQUIRED.value)
+        result = self._approval_handler(text)
+        if inspect.isawaitable(result):
+            result = await result
+        return self._coerce_result(result, default_state=ChatSessionState.APPROVAL_REQUIRED.value)
 
     async def _run_continuation_handler(self, text: str) -> CommandResult:
         if self._continuation_handler is None:

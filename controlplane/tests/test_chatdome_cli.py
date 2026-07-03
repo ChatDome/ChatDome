@@ -352,15 +352,91 @@ class ChatDomeCLITests(unittest.TestCase):
         fake_agent = FakeAgent()
         runtime = self.cli._TerminalChatRuntime(fake_agent, -5)
         with patch.object(self.cli, "_create_terminal_chat_runtime", return_value=runtime):
-            with patch("builtins.input", side_effect=["/details AP-1", "/exit"]):
+            with patch("builtins.input", side_effect=["/details", "/exit"]):
                 with patch("builtins.print") as output:
                     self.cli.hello(SimpleNamespace(chat_id=-5))
 
-        self.assertEqual(fake_agent.request, (-5, "AP-1", True))
+        self.assertEqual(fake_agent.request, (-5, None, True))
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
         self.assertIn("Approval details", printed)
         self.assertIn("systemctl restart sshd", printed)
-        self.assertIn("Run: /confirm [approval_id] or /reject [approval_id]", printed)
+        self.assertIn("Allow operation? [y/n]", printed)
+        self.assertNotIn("Approval ID:", printed)
+
+    def test_terminal_pending_approval_accepts_yes_no_and_details_choice(self):
+        compact = self.cli._format_terminal_pending_approval(
+            {
+                "approval_id": "AP-1",
+                "risk_level": "HIGH",
+                "command": "systemctl restart sshd",
+                "command_hash": "abcdef1234567890",
+            }
+        )
+        self.assertIn("Approval required", compact)
+        self.assertIn("Allow operation? [y/n]  d=details", compact)
+        self.assertNotIn("Approval ID", compact)
+        self.assertNotIn("systemctl restart sshd", compact)
+
+        class FakeAgent:
+            def __init__(self):
+                self.messages = []
+                self.detail_requests = []
+                self.resume_calls = []
+
+            async def handle_message(self, chat_id, message):
+                self.messages.append((chat_id, message))
+                return SimpleNamespace(
+                    kind="pending_approval",
+                    content="",
+                    payload={
+                        "approval_id": "AP-1",
+                        "risk_level": "HIGH",
+                        "command": "systemctl restart sshd",
+                        "command_hash": "abcdef1234567890",
+                    },
+                )
+
+            async def get_pending_approval_details(self, chat_id, approval_id=None, include_llm=True):
+                self.detail_requests.append((chat_id, approval_id, include_llm))
+                return {
+                    "ok": True,
+                    "approval_id": "AP-1",
+                    "command": "systemctl restart sshd",
+                    "command_hash": "abcdef1234567890",
+                    "reason": "restart ssh service",
+                    "analysis": {
+                        "risk_level": "HIGH",
+                        "safety_status": "UNSAFE",
+                        "mutation_detected": True,
+                        "deletion_detected": False,
+                        "impact_analysis": "Restarts SSH service.",
+                    },
+                }
+
+            async def resume_session(self, chat_id, action, approval_id=None):
+                self.resume_calls.append((chat_id, action, approval_id))
+                return "", SimpleNamespace(kind="reply", content=f"{action.lower()} ok", payload={})
+
+            async def stop(self):
+                pass
+
+        fake_agent = FakeAgent()
+        runtime = self.cli._TerminalChatRuntime(fake_agent, -11)
+        with patch.object(self.cli, "_create_terminal_chat_runtime", return_value=runtime):
+            with patch("builtins.input", side_effect=["task", "d", "y", "task", "n", "/exit"]):
+                with patch("builtins.print") as output:
+                    self.cli.hello(SimpleNamespace(chat_id=-11))
+
+        self.assertEqual(fake_agent.messages, [(-11, "task"), (-11, "task")])
+        self.assertEqual(fake_agent.detail_requests, [(-11, None, True)])
+        self.assertEqual(fake_agent.resume_calls, [(-11, "APPROVE", None), (-11, "REJECT", None)])
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("Allow operation? [y/n]  d=details", printed)
+        self.assertIn("Approval details", printed)
+        self.assertIn("approve ok", printed)
+        self.assertIn("reject ok", printed)
+        self.assertNotIn("Approval ID:", printed)
+
 
     def test_terminal_continue_uses_round_limit_resolution(self):
         class FakeAgent:
@@ -425,9 +501,10 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertEqual(fake_agent.messages, [(-10, "task"), (-10, "task")])
         self.assertEqual(fake_agent.resolutions, [(-10, "CONTINUE"), (-10, "ABANDON")])
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
-        self.assertIn("Enter y to continue, n to stop.", printed)
+        self.assertIn("Continue? [y/n]", printed)
         self.assertIn("resolved CONTINUE", printed)
         self.assertIn("resolved ABANDON", printed)
+
     def test_read_terminal_line_handles_ctrl_h_backspace(self):
         class FakeIn:
             def __init__(self):
