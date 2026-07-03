@@ -87,3 +87,9 @@ if not token_file and legacy_path.exists():
 - CLI 输出使用 `print()`，emoji 前缀保持一致：`✅` 成功、`❌` 失败、`⚠️` 警告、`ℹ️` 提示。
 - 配置读写通过 `chatdome-cli.py` 的子命令完成，不要在 Bash 菜单中直接操作 `config.yaml`。
 - 遵循 `ChatDome-docs/docs/00-governance/coding-standards.md` 中的 Python 规范。
+
+## 提交与协作规范
+
+- 开始代码、文档、CI、发布或仓库维护改动前，先阅读并遵守 `CONTRIBUTING.md`。
+- 提交前检查、测试范围、Commit Message、发布规范、安全敏感变更 review 要求，以 `CONTRIBUTING.md` 为准。
+- 若本文件与 `CONTRIBUTING.md` 冲突，优先执行 `CONTRIBUTING.md` 中更具体的工程协作规则。
