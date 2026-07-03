@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose a scoped ChatDome capability or product improvement
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user workflow or operational gap should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the expected behavior and user-facing interface.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: List simpler or safer alternatives if applicable.
+  - type: textarea
+    id: risk
+    attributes:
+      label: Security and Operational Risk
+      description: Note any effect on command execution, approvals, auth, installation, or secrets.

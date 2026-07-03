@@ -7,13 +7,35 @@ name = "chatdome"
 version = "0.2.0"
 description = "AI-powered host security assistant, delivered through Telegram."
 license = {text = "Apache-2.0"}
+authors = [{name = "ChatDome contributors"}]
 requires-python = ">=3.9"
+keywords = ["ai-agent", "host-security", "llm", "security", "telegram"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+]
 dependencies = [
     "python-telegram-bot[ext]>=20.0",
     "openai>=1.0",
     "pyyaml>=6.0",
     "httpx>=0.25.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ChatDome/ChatDome"
+Repository = "https://github.com/ChatDome/ChatDome"
+Issues = "https://github.com/ChatDome/ChatDome/issues"
+Documentation = "https://github.com/ChatDome/ChatDome#readme"
 
 [project.scripts]
 chatdome-server = "chatdome.main:main"
@@ -22,4 +44,5 @@ chatdome-server = "chatdome.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
+"chatdome" = ["packs/*.yaml"]
 "chatdome.agent" = ["manual/*.yaml", "manual/*.md"]

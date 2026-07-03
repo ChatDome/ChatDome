@@ -5,6 +5,11 @@
     <strong>English</strong> | <a href="README_ZH.md">中文</a>
   </p>
   <p align="center">
+    <a href="https://github.com/ChatDome/ChatDome/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/ChatDome/ChatDome/actions/workflows/tests.yml/badge.svg"></a>
+    <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+    <img alt="Python" src="https://img.shields.io/badge/python-3.9%2B-blue.svg">
+  </p>
+  <p align="center">
     <a href="#features">Features</a> •
     <a href="#what-pain-does-it-solve">Pain Points</a> •
     <a href="#why-sub-agent-instead-of-another-main-agent">Why Sub-Agent</a> •
@@ -429,7 +434,7 @@ Additional implementation modules (current codebase):
 
 ## Contributing
 
-Contributions are welcome! Please open an issue to discuss before submitting a PR.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Report security issues through [SECURITY.md](SECURITY.md), not public issues.
 
 ## License
 

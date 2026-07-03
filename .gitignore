@@ -1,6 +1,8 @@
 # Dependencies
 __pycache__/
 *.py[cod]
+.pytest_cache/
+pytest-cache-files-*/
 *.egg-info/
 dist/
 build/
@@ -32,8 +34,7 @@ Thumbs.db
 chat_data/
 controlplane/src/chat_data/
 
-
-__pycache__/
-*.py[cod]
+# Local verification artifacts
 .pycache-verify/
 controlplane/.pycache-verify/
+controlplane/pytest-cache-files-*/
