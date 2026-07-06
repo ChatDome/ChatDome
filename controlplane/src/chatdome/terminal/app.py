@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from chatdome.terminal.controller import ChatSessionController
 from chatdome.terminal.views import TerminalChatView
 
@@ -14,11 +16,17 @@ class TerminalChatApp:
         view: TerminalChatView,
         controller: ChatSessionController,
         *,
-        prompt: str = "> ",
+        prompt: str | Callable[[], str] = "> ",
     ) -> None:
         self._view = view
         self._controller = controller
         self._prompt = prompt
+
+    def _prompt_text(self) -> str:
+        if callable(self._prompt):
+            return str(self._prompt())
+        return str(self._prompt)
+
 
     async def run(self) -> None:
         """Read input until the controller asks to exit."""
@@ -27,7 +35,7 @@ class TerminalChatApp:
             with self._view.output_context():
                 while True:
                     try:
-                        line = await self._view.read_line(self._prompt)
+                        line = await self._view.read_line(self._prompt_text())
                     except EOFError:
                         self._view.write_line_break()
                         break

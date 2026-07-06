@@ -652,6 +652,74 @@ class ChatDomeCLITests(unittest.TestCase):
 
         self.assertIn("/model", asyncio.run(collect()))
 
+    def test_terminal_prompt_reflects_approval_and_continue_state(self):
+        self.assertEqual(
+            self.cli._terminal_prompt_for_state(self.cli.ChatSessionState.APPROVAL_REQUIRED),
+            "approve [y/n/d]> ",
+        )
+        self.assertEqual(
+            self.cli._terminal_prompt_for_state(self.cli.ChatSessionState.CONTINUATION_REQUIRED),
+            "continue [y/n]> ",
+        )
+
+        class FakeSessionManager:
+            def __init__(self, agent):
+                self._agent = agent
+
+            def get_or_create(self, _chat_id):
+                return SimpleNamespace(
+                    pending_round_limit=self._agent.pending_kind == "round_limit",
+                    pending_approval=self._agent.pending_kind == "approval",
+                )
+
+        class FakeAgent:
+            def __init__(self):
+                self.messages = []
+                self.resume_calls = []
+                self.resolutions = []
+                self.pending_kind = None
+                self.session_manager = FakeSessionManager(self)
+
+            async def handle_message(self, chat_id, message):
+                self.messages.append((chat_id, message))
+                if message == "needs approval":
+                    self.pending_kind = "approval"
+                    return SimpleNamespace(kind="pending_approval", content="", payload={})
+                self.pending_kind = "round_limit"
+                return SimpleNamespace(kind="round_limit", content="", payload={"rounds": 10})
+
+            async def resume_session(self, chat_id, action, approval_id=None):
+                self.pending_kind = None
+                self.resume_calls.append((chat_id, action, approval_id))
+                return "", SimpleNamespace(kind="reply", content="rejected", payload={})
+
+            async def resolve_round_limit(self, chat_id, action):
+                self.pending_kind = None
+                self.resolutions.append((chat_id, action))
+                return SimpleNamespace(kind="reply", content="stopped", payload={})
+
+            async def stop(self):
+                pass
+
+        fake_agent = FakeAgent()
+        runtime = self.cli._TerminalChatRuntime(fake_agent, -13)
+        prompts = []
+        values = iter(["needs approval", "n", "needs continue", "n", "/exit"])
+
+        def fake_input(prompt):
+            prompts.append(prompt)
+            return next(values)
+
+        with patch.object(self.cli, "_create_terminal_chat_runtime", return_value=runtime):
+            with patch("builtins.input", side_effect=fake_input):
+                with patch("builtins.print"):
+                    self.cli.hello(SimpleNamespace(chat_id=-13))
+
+        self.assertEqual(prompts, ["> ", "approve [y/n/d]> ", "> ", "continue [y/n]> ", "> "])
+        self.assertEqual(fake_agent.resume_calls, [(-13, "REJECT", None)])
+        self.assertEqual(fake_agent.resolutions, [(-13, "ABANDON")])
+
+
     def test_terminal_prompt_can_be_overridden(self):
         with patch.dict("os.environ", {}, clear=True):
             self.assertEqual(self.cli._terminal_prompt(), "> ")
@@ -659,6 +727,7 @@ class ChatDomeCLITests(unittest.TestCase):
             self.assertEqual(self.cli._terminal_prompt(), "")
         with patch.dict("os.environ", {"CHATDOME_PROMPT": "chat> "}):
             self.assertEqual(self.cli._terminal_prompt(), "chat> ")
+            self.assertEqual(self.cli._terminal_prompt_for_state(self.cli.ChatSessionState.IDLE), "chat> ")
     def test_terminal_retry_replays_last_failed_message(self):
         class FakeAgent:
             def __init__(self):

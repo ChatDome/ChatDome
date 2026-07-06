@@ -1237,6 +1237,15 @@ def _terminal_prompt() -> str:
     return os.environ.get("CHATDOME_PROMPT", "> ")
 
 
+def _terminal_prompt_for_state(state: ChatSessionState | str) -> str:
+    value = ChatSessionState(state)
+    if value == ChatSessionState.APPROVAL_REQUIRED:
+        return "approve [y/n/d]> "
+    if value == ChatSessionState.CONTINUATION_REQUIRED:
+        return "continue [y/n]> "
+    return _terminal_prompt()
+
+
 async def _terminal_chat_loop(args: argparse.Namespace) -> None:
     provider = _TerminalRuntimeProvider(args)
     registry = _build_terminal_command_registry(provider)
@@ -1249,7 +1258,7 @@ async def _terminal_chat_loop(args: argparse.Namespace) -> None:
         continuation_handler=lambda text: _handle_terminal_continuation_choice(provider, text),
     )
     view = _create_terminal_chat_view(registry, lambda: controller.status_text)
-    app = TerminalChatApp(view, controller, prompt=_terminal_prompt())
+    app = TerminalChatApp(view, controller, prompt=lambda: _terminal_prompt_for_state(controller.state))
     await app.run()
 
 
