@@ -671,7 +671,7 @@ def _print_terminal_completion(prompt: str, text: str, matches: list[str], selec
     if not matches:
         return
     sys.stdout.write("\n")
-    sys.stdout.write(f"chatdome> {_terminal_completion_line(matches, selected_index)}\n")
+    sys.stdout.write(_format_chatdome_block(_terminal_completion_line(matches, selected_index)) + "\n")
     sys.stdout.write(f"{prompt}{text}")
     sys.stdout.flush()
 
@@ -682,16 +682,53 @@ def _terminal_help_text() -> str:
         lines.append(f"  {usage:<18} {description}")
     return "\n".join(lines)
 
-def _print_chatdome_message(text: str) -> None:
+def _terminal_ascii_mode() -> bool:
+    return os.environ.get("CHATDOME_PLAIN", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _terminal_can_encode(value: str) -> bool:
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        value.encode(encoding)
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _terminal_block_bar() -> str:
+    return "|" if _terminal_ascii_mode() or not _terminal_can_encode("│") else "│"
+
+
+def _terminal_default_prompt() -> str:
+    return "> " if _terminal_ascii_mode() or not _terminal_can_encode("›") else "› "
+
+
+def _terminal_message_title(first_line: str) -> str:
+    normalized = " ".join(str(first_line or "").lower().split())
+    if "approval required" in normalized:
+        return "ChatDome · approval"
+    if "approval details" in normalized or "loading approval details" in normalized:
+        return "ChatDome · details"
+    if "task paused" in normalized:
+        return "ChatDome · paused"
+    if "request failed" in normalized or "unknown command" in normalized:
+        return "ChatDome · error"
+    return "ChatDome"
+
+
+def _format_chatdome_block(text: str) -> str:
     value = str(text or "").rstrip()
     if not value:
-        print("chatdome>")
-        return
+        return "ChatDome"
     lines = value.splitlines()
-    print(f"chatdome> {lines[0]}")
-    indent = " " * 10
-    for line in lines[1:]:
-        print(f"{indent}{line}")
+    title = _terminal_message_title(lines[0])
+    bar = _terminal_block_bar()
+    body = [f"{bar} {line}" if line else bar for line in lines]
+    return "\n".join([title, *body])
+
+
+def _print_chatdome_message(text: str) -> None:
+    print(_format_chatdome_block(str(text or "")))
 
 
 def _format_terminal_pending_approval(payload: dict[str, Any]) -> str:
@@ -1234,7 +1271,7 @@ def _print_terminal_start(args: argparse.Namespace) -> None:
 
 
 def _terminal_prompt() -> str:
-    return os.environ.get("CHATDOME_PROMPT", "> ")
+    return os.environ.get("CHATDOME_PROMPT", _terminal_default_prompt())
 
 
 def _terminal_prompt_for_state(state: ChatSessionState | str) -> str:

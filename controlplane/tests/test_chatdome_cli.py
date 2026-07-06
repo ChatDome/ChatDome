@@ -263,7 +263,7 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertTrue(fake_agent.stopped)
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
         self.assertIn("____  _   _", printed)
-        self.assertIn("chatdome> pong", printed)
+        self.assertIn("ChatDome\n│ pong", printed)
 
     def test_terminal_compact_start_can_be_enabled_by_flag_or_env(self):
         async def noop_loop(_args):
@@ -312,7 +312,7 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertTrue(fake_agent.stopped)
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
         self.assertIn("/audit [N]", printed)
-        self.assertIn("chatdome> ✅ Session cleared.", printed)
+        self.assertIn("ChatDome\n│ ✅ Session cleared.", printed)
 
     def test_terminal_audit_filters_command_events(self):
         events = [
@@ -381,6 +381,7 @@ class ChatDomeCLITests(unittest.TestCase):
 
         self.assertEqual(fake_agent.request, (-5, None, True))
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("ChatDome · details", printed)
         self.assertIn("Approval details", printed)
         self.assertIn("systemctl restart sshd", printed)
         self.assertIn("Risk: HIGH    Safety: UNSAFE", printed)
@@ -459,6 +460,7 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertEqual(fake_agent.detail_requests, [(-11, None, True)])
         self.assertEqual(fake_agent.resume_calls, [(-11, "APPROVE", None), (-11, "REJECT", None)])
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("ChatDome · approval", printed)
         self.assertIn("Allow operation? [y/n]  d=details", printed)
         self.assertIn("Approval details", printed)
         self.assertIn("approve ok", printed)
@@ -715,14 +717,14 @@ class ChatDomeCLITests(unittest.TestCase):
                 with patch("builtins.print"):
                     self.cli.hello(SimpleNamespace(chat_id=-13))
 
-        self.assertEqual(prompts, ["> ", "approve [y/n/d]> ", "> ", "continue [y/n]> ", "> "])
+        self.assertEqual(prompts, ["› ", "approve [y/n/d]> ", "› ", "continue [y/n]> ", "› "])
         self.assertEqual(fake_agent.resume_calls, [(-13, "REJECT", None)])
         self.assertEqual(fake_agent.resolutions, [(-13, "ABANDON")])
 
 
     def test_terminal_prompt_can_be_overridden(self):
         with patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(self.cli._terminal_prompt(), "> ")
+            self.assertEqual(self.cli._terminal_prompt(), "› ")
         with patch.dict("os.environ", {"CHATDOME_PROMPT": ""}):
             self.assertEqual(self.cli._terminal_prompt(), "")
         with patch.dict("os.environ", {"CHATDOME_PROMPT": "chat> "}):
@@ -754,6 +756,7 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertEqual(fake_agent.messages, [(-8, "fail"), (-8, "fail")])
         self.assertTrue(fake_agent.stopped)
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("ChatDome · error", printed)
         self.assertIn("Request failed.", printed)
         self.assertIn("Run: /retry", printed)
         self.assertIn("retried fail", printed)
