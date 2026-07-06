@@ -383,6 +383,11 @@ class ChatDomeCLITests(unittest.TestCase):
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
         self.assertIn("Approval details", printed)
         self.assertIn("systemctl restart sshd", printed)
+        self.assertIn("Risk: HIGH    Safety: UNSAFE", printed)
+        self.assertIn("Flags: modifies system", printed)
+        self.assertNotIn("Command hash:", printed)
+        self.assertNotIn("Mutation:", printed)
+        self.assertNotIn("Deletion:", printed)
         self.assertIn("Allow operation? [y/n]", printed)
         self.assertNotIn("Approval ID:", printed)
 
@@ -459,6 +464,44 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertIn("approve ok", printed)
         self.assertIn("reject ok", printed)
         self.assertNotIn("Approval ID:", printed)
+
+
+    def test_terminal_details_full_expands_reason_and_impact_without_hash(self):
+        class FakeAgent:
+            async def get_pending_approval_details(self, chat_id, approval_id=None, include_llm=True):
+                self.request = (chat_id, approval_id, include_llm)
+                return {
+                    "ok": True,
+                    "approval_id": "AP-1",
+                    "command": "rm -rf /tmp/chatdome-old",
+                    "command_hash": "abcdef1234567890",
+                    "reason": "clean old temporary files",
+                    "analysis": {
+                        "risk_level": "HIGH",
+                        "safety_status": "UNSAFE",
+                        "mutation_detected": True,
+                        "deletion_detected": True,
+                        "impact_analysis": "Removes old temporary files and may delete data if the path is wrong.",
+                    },
+                }
+
+            async def stop(self):
+                pass
+
+        fake_agent = FakeAgent()
+        runtime = self.cli._TerminalChatRuntime(fake_agent, -12)
+        with patch.object(self.cli, "_create_terminal_chat_runtime", return_value=runtime):
+            with patch("builtins.input", side_effect=["/details full", "/exit"]):
+                with patch("builtins.print") as output:
+                    self.cli.hello(SimpleNamespace(chat_id=-12))
+
+        self.assertEqual(fake_agent.request, (-12, None, True))
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("Flags: modifies system, deletes files", printed)
+        self.assertIn("Reason:", printed)
+        self.assertIn("clean old temporary files", printed)
+        self.assertIn("Removes old temporary files and may delete data if the path is wrong.", printed)
+        self.assertNotIn("Command hash:", printed)
 
 
     def test_terminal_continue_uses_round_limit_resolution(self):

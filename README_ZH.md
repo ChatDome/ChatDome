@@ -353,7 +353,7 @@ chatdome hello
 | `/help` | 查看终端命令 |
 | `/model <profile>` | 切换当前终端会话使用的 model profile |
 | `/model_list` | 查看已配置 model profile 与鉴权状态 |
-| `/details` | 查看待审批动作详情 |
+| `/details [full]` | 查看待审批动作详情 |
 | `/confirm` | 批准待审批命令 |
 | `/reject` | 拒绝待审批命令或停止暂停任务 |
 | `/continue` | 继续暂停中的任务 |

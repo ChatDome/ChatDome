@@ -588,9 +588,10 @@ def _build_terminal_command_registry(runtime_provider: Any | None = None) -> Com
 
     async def details_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        approval_id = invocation.args[0] if invocation.args else None
-        await _show_terminal_details(runtime, approval_id)
+        approval_id, full = _terminal_details_options(invocation.args)
+        await _show_terminal_details(runtime, approval_id, full=full)
         return CommandResult(state=ChatSessionState.APPROVAL_REQUIRED.value)
+
 
     async def confirm_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
@@ -624,7 +625,7 @@ def _build_terminal_command_registry(runtime_provider: Any | None = None) -> Com
     registry.register(CommandDef("/audit", "Show recent command audit events", "context", args_hint="[N]", handler=audit_handler))
     registry.register(CommandDef("/model", "Switch current model profile", "model", aliases=("/llm",), args_hint="<profile>", handler=model_handler, completer=_terminal_model_completion_items))
     registry.register(CommandDef("/model_list", "Show configured model profiles", "model", aliases=("/llm_list", "/l"), keywords=("list", "llm"), handler=model_list_handler))
-    registry.register(CommandDef("/details", "Show pending approval details", "approval", handler=details_handler))
+    registry.register(CommandDef("/details", "Show pending approval details", "approval", args_hint="[full]", handler=details_handler))
     registry.register(CommandDef("/confirm", "Approve pending command", "approval", handler=confirm_handler))
     registry.register(CommandDef("/reject", "Reject pending command or stop task", "approval", handler=reject_handler))
     registry.register(CommandDef("/continue", "Continue paused task", "approval", handler=continue_handler))
@@ -882,34 +883,72 @@ def _indent_terminal_block(text: Any, max_chars: int = 3000) -> str:
     return "\n".join(f"  {line}" for line in value.splitlines()) if value else "  (empty)"
 
 
-def _yes_no(value: Any) -> str:
-    return "yes" if bool(value) else "no"
+def _terminal_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
 
 
-def _format_terminal_approval_details(details: dict[str, Any]) -> str:
+def _terminal_approval_flags(analysis: dict[str, Any]) -> str:
+    flags = []
+    if _terminal_bool(analysis.get("mutation_detected")):
+        flags.append("modifies system")
+    if _terminal_bool(analysis.get("deletion_detected")):
+        flags.append("deletes files")
+    return ", ".join(flags)
+
+
+def _compact_terminal_impact(text: str, *, full: bool, max_chars: int = 220) -> str:
+    value = " ".join(str(text or "").split()).strip() or "review required"
+    if full or len(value) <= max_chars:
+        return value
+    suffix = " Run /details full for full analysis."
+    return value[: max_chars - len(suffix) - 3].rstrip() + "..." + suffix
+
+
+def _normalized_terminal_text(value: str) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
+def _terminal_reason_adds_context(reason: str, impact: str) -> bool:
+    normalized_reason = _normalized_terminal_text(reason)
+    normalized_impact = _normalized_terminal_text(impact)
+    if not normalized_reason or normalized_reason == "not provided":
+        return False
+    if not normalized_impact:
+        return True
+    return normalized_reason not in normalized_impact and normalized_impact not in normalized_reason
+
+
+def _format_terminal_approval_details(details: dict[str, Any], *, full: bool = False) -> str:
     if not details.get("ok"):
         return _status_label("ℹ️", "[i]", str(details.get("message", "No pending approval.")))
 
     analysis = details.get("analysis") if isinstance(details.get("analysis"), dict) else {}
     command = str(details.get("command") or "").strip()
-    command_hash = str(details.get("command_hash") or "").strip()
     reason = str(details.get("reason") or "not provided").strip()
     risk = str(analysis.get("risk_level") or details.get("risk_level") or "unknown").strip()
     safety = str(analysis.get("safety_status") or "unknown").strip()
     impact = str(analysis.get("impact_analysis") or "review required").strip()
+    flags = _terminal_approval_flags(analysis)
 
     lines = [_status_label("🔎", "[details]", "Approval details")]
-    lines.append(f"Risk: {risk}")
-    lines.append(f"Safety: {safety}")
-    if command_hash:
-        lines.append(f"Command hash: {command_hash[:12]}")
-    lines.append(f"Mutation: {_yes_no(analysis.get('mutation_detected'))}")
-    lines.append(f"Deletion: {_yes_no(analysis.get('deletion_detected'))}")
-    lines.append(f"Reason: {reason}")
+    lines.append(f"Risk: {risk}    Safety: {safety}")
+    if flags:
+        lines.append(f"Flags: {flags}")
+    if full and _terminal_reason_adds_context(reason, impact):
+        lines.append("")
+        lines.append("Reason:")
+        lines.append(_indent_terminal_block(reason, max_chars=1600))
+    lines.append("")
     lines.append("Command:")
-    lines.append(_indent_terminal_block(command, max_chars=2000))
+    lines.append("```bash")
+    lines.append(command or "(empty)")
+    lines.append("```")
+    lines.append("")
     lines.append("Impact:")
-    lines.append(_indent_terminal_block(impact, max_chars=2400))
+    lines.append(_indent_terminal_block(_compact_terminal_impact(impact, full=full), max_chars=4000))
+    lines.append("")
     lines.append("Allow operation? [y/n]")
     return "\n".join(lines)
 
@@ -1033,14 +1072,29 @@ def _terminal_session(runtime: _TerminalChatRuntime) -> Any:
         return None
 
 
-async def _show_terminal_details(runtime: _TerminalChatRuntime, approval_id: str | None) -> None:
+def _terminal_details_options(args: tuple[str, ...]) -> tuple[str | None, bool]:
+    full = False
+    approval_id: str | None = None
+    for arg in args:
+        value = str(arg or "").strip()
+        if not value:
+            continue
+        if value.lower() in {"full", "--full", "-f"}:
+            full = True
+            continue
+        if approval_id is None:
+            approval_id = value
+    return approval_id, full
+
+
+async def _show_terminal_details(runtime: _TerminalChatRuntime, approval_id: str | None, *, full: bool = False) -> None:
     _print_chatdome_message(_status_label("🔎", "[details]", "Loading approval details..."))
     details = await runtime.agent.get_pending_approval_details(
         runtime.chat_id,
         approval_id=approval_id,
         include_llm=True,
     )
-    _print_chatdome_message(_format_terminal_approval_details(details))
+    _print_chatdome_message(_format_terminal_approval_details(details, full=full))
 
 
 async def _resolve_terminal_confirm(runtime: _TerminalChatRuntime, approval_id: str | None) -> str:
@@ -1072,6 +1126,9 @@ async def _handle_terminal_approval_choice(provider: Any, text: str) -> CommandR
         return CommandResult(state=state)
     if value in {"d", "detail", "details"}:
         await _show_terminal_details(provider.get(), None)
+        return CommandResult(state=ChatSessionState.APPROVAL_REQUIRED.value)
+    if value in {"f", "full", "detail full", "details full"}:
+        await _show_terminal_details(provider.get(), None, full=True)
         return CommandResult(state=ChatSessionState.APPROVAL_REQUIRED.value)
     _print_chatdome_message("Allow operation? [y/n]  d=details")
     return CommandResult(state=ChatSessionState.APPROVAL_REQUIRED.value)

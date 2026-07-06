@@ -349,7 +349,7 @@ chatdome hello
 | `/help` | Show terminal commands |
 | `/model <profile>` | Switch the model profile for this terminal session |
 | `/model_list` | Show configured model profiles and auth status |
-| `/details` | Show pending approval details |
+| `/details [full]` | Show pending approval details |
 | `/confirm` | Approve a pending command |
 | `/reject` | Reject a pending command or stop a paused task |
 | `/continue` | Continue a paused task |
