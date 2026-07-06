@@ -342,7 +342,7 @@ Run:
 chatdome hello
 ```
 
-`chatdome hello` starts an editable terminal session with command history, slash completion, and protected agent output. Non-TTY input uses plain stdin/stdout. The normal prompt defaults to `› ` and ChatDome replies render as output blocks. Set `CHATDOME_PROMPT` to change or hide the normal input prompt. Use `chatdome hello --quiet` or `CHATDOME_COMPACT=1` for a one-line startup. Approval and pause states switch the prompt to `approve [y/n/d]>` and `continue [y/n]>`.
+`chatdome hello` starts an editable terminal session with command history, slash completion, and protected agent output. Non-TTY input uses plain stdin/stdout. The normal prompt defaults to `› ` and ChatDome replies render as output blocks. Set `CHATDOME_PROMPT` to change or hide the normal input prompt. Use `chatdome hello --quiet` or `CHATDOME_COMPACT=1` for a one-line startup. Approval starts at `approve [y/n/d]>`, switches to `approve [y/n]>` after details, and pause uses `continue [y/n]>`.
 
 | Command | Description |
 |---------|-------------|

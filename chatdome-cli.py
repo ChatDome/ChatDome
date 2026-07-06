@@ -589,8 +589,9 @@ def _build_terminal_command_registry(runtime_provider: Any | None = None) -> Com
     async def details_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
         approval_id, full = _terminal_details_options(invocation.args)
-        await _show_terminal_details(runtime, approval_id, full=full)
-        return CommandResult(state=ChatSessionState.APPROVAL_REQUIRED.value)
+        shown = await _show_terminal_details(runtime, approval_id, full=full)
+        state = ChatSessionState.APPROVAL_DETAILS if shown else ChatSessionState.IDLE
+        return CommandResult(state=state.value)
 
 
     async def confirm_handler(invocation: CommandInvocation) -> CommandResult:
@@ -716,15 +717,32 @@ def _terminal_message_title(first_line: str) -> str:
     return "ChatDome"
 
 
+_TERMINAL_APPROVAL_ACTION = "Allow operation? [y/n]"
+_TERMINAL_APPROVAL_ACTION_WITH_DETAILS = "Allow operation? [y/n]  d=details"
+_TERMINAL_ACTION_LINES = frozenset(
+    {
+        _TERMINAL_APPROVAL_ACTION,
+        _TERMINAL_APPROVAL_ACTION_WITH_DETAILS,
+    }
+)
+
+
 def _format_chatdome_block(text: str) -> str:
     value = str(text or "").rstrip()
     if not value:
         return "ChatDome"
     lines = value.splitlines()
+    action_lines: list[str] = []
+    while lines and lines[-1].strip() in _TERMINAL_ACTION_LINES:
+        action_lines.insert(0, lines.pop().strip())
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
+        return "\n".join(action_lines) if action_lines else "ChatDome"
     title = _terminal_message_title(lines[0])
     bar = _terminal_block_bar()
     body = [f"{bar} {line}" if line else bar for line in lines]
-    return "\n".join([title, *body])
+    return "\n".join([title, *body, *action_lines])
 
 
 def _print_chatdome_message(text: str) -> None:
@@ -736,7 +754,7 @@ def _format_terminal_pending_approval(payload: dict[str, Any]) -> str:
     return "\n".join(
         [
             _status_label("⚠️", "[!]", "Approval required"),
-            "Allow operation? [y/n]  d=details",
+            _TERMINAL_APPROVAL_ACTION_WITH_DETAILS,
         ]
     )
 
@@ -986,7 +1004,7 @@ def _format_terminal_approval_details(details: dict[str, Any], *, full: bool = F
     lines.append("Impact:")
     lines.append(_indent_terminal_block(_compact_terminal_impact(impact, full=full), max_chars=4000))
     lines.append("")
-    lines.append("Allow operation? [y/n]")
+    lines.append(_TERMINAL_APPROVAL_ACTION)
     return "\n".join(lines)
 
 
@@ -1124,7 +1142,7 @@ def _terminal_details_options(args: tuple[str, ...]) -> tuple[str | None, bool]:
     return approval_id, full
 
 
-async def _show_terminal_details(runtime: _TerminalChatRuntime, approval_id: str | None, *, full: bool = False) -> None:
+async def _show_terminal_details(runtime: _TerminalChatRuntime, approval_id: str | None, *, full: bool = False) -> bool:
     _print_chatdome_message(_status_label("🔎", "[details]", "Loading approval details..."))
     details = await runtime.agent.get_pending_approval_details(
         runtime.chat_id,
@@ -1132,6 +1150,7 @@ async def _show_terminal_details(runtime: _TerminalChatRuntime, approval_id: str
         include_llm=True,
     )
     _print_chatdome_message(_format_terminal_approval_details(details, full=full))
+    return bool(details.get("ok"))
 
 
 async def _resolve_terminal_confirm(runtime: _TerminalChatRuntime, approval_id: str | None) -> str:
@@ -1153,7 +1172,7 @@ async def _resolve_terminal_reject(runtime: _TerminalChatRuntime, approval_id: s
     return _print_terminal_agent_result(result)
 
 
-async def _handle_terminal_approval_choice(provider: Any, text: str) -> CommandResult:
+async def _handle_terminal_approval_choice(provider: Any, text: str, *, details_shown: bool = False) -> CommandResult:
     value = str(text or "").strip().lower()
     if value in {"y", "yes"}:
         state = await _resolve_terminal_confirm(provider.get(), None)
@@ -1162,13 +1181,17 @@ async def _handle_terminal_approval_choice(provider: Any, text: str) -> CommandR
         state = await _resolve_terminal_reject(provider.get(), None)
         return CommandResult(state=state)
     if value in {"d", "detail", "details"}:
-        await _show_terminal_details(provider.get(), None)
-        return CommandResult(state=ChatSessionState.APPROVAL_REQUIRED.value)
+        shown = await _show_terminal_details(provider.get(), None)
+        state = ChatSessionState.APPROVAL_DETAILS if shown else ChatSessionState.APPROVAL_REQUIRED
+        return CommandResult(state=state.value)
     if value in {"f", "full", "detail full", "details full"}:
-        await _show_terminal_details(provider.get(), None, full=True)
-        return CommandResult(state=ChatSessionState.APPROVAL_REQUIRED.value)
-    _print_chatdome_message("Allow operation? [y/n]  d=details")
-    return CommandResult(state=ChatSessionState.APPROVAL_REQUIRED.value)
+        shown = await _show_terminal_details(provider.get(), None, full=True)
+        state = ChatSessionState.APPROVAL_DETAILS if shown else ChatSessionState.APPROVAL_REQUIRED
+        return CommandResult(state=state.value)
+    action = _TERMINAL_APPROVAL_ACTION if details_shown else _TERMINAL_APPROVAL_ACTION_WITH_DETAILS
+    _print_chatdome_message(action)
+    state = ChatSessionState.APPROVAL_DETAILS if details_shown else ChatSessionState.APPROVAL_REQUIRED
+    return CommandResult(state=state.value)
 
 
 async def _handle_terminal_continuation_choice(provider: Any, text: str) -> CommandResult:
@@ -1278,6 +1301,8 @@ def _terminal_prompt_for_state(state: ChatSessionState | str) -> str:
     value = ChatSessionState(state)
     if value == ChatSessionState.APPROVAL_REQUIRED:
         return "approve [y/n/d]> "
+    if value == ChatSessionState.APPROVAL_DETAILS:
+        return "approve [y/n]> "
     if value == ChatSessionState.CONTINUATION_REQUIRED:
         return "continue [y/n]> "
     return _terminal_prompt()
@@ -1286,12 +1311,20 @@ def _terminal_prompt_for_state(state: ChatSessionState | str) -> str:
 async def _terminal_chat_loop(args: argparse.Namespace) -> None:
     provider = _TerminalRuntimeProvider(args)
     registry = _build_terminal_command_registry(provider)
+
+    async def approval_handler(text: str) -> CommandResult:
+        return await _handle_terminal_approval_choice(
+            provider,
+            text,
+            details_shown=controller.state == ChatSessionState.APPROVAL_DETAILS,
+        )
+
     controller = ChatSessionController(
         registry,
         message_handler=lambda text: _send_terminal_user_message(provider, text),
         unknown_handler=_handle_unknown_terminal_command,
         stop_handler=provider.stop,
-        approval_handler=lambda text: _handle_terminal_approval_choice(provider, text),
+        approval_handler=approval_handler,
         continuation_handler=lambda text: _handle_terminal_continuation_choice(provider, text),
     )
     view = _create_terminal_chat_view(registry, lambda: controller.status_text)

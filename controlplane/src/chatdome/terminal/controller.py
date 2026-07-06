@@ -16,8 +16,12 @@ class ChatSessionState(str, Enum):
     IDLE = "idle"
     WORKING = "working"
     APPROVAL_REQUIRED = "approval_required"
+    APPROVAL_DETAILS = "approval_details"
     CONTINUATION_REQUIRED = "continuation_required"
     ERROR = "error"
+
+
+APPROVAL_STATES = {ChatSessionState.APPROVAL_REQUIRED, ChatSessionState.APPROVAL_DETAILS}
 
 
 class ChatSessionController:
@@ -49,6 +53,8 @@ class ChatSessionController:
             return "assistant: working..."
         if self.state == ChatSessionState.APPROVAL_REQUIRED:
             return "approval: y=allow n=reject d=details"
+        if self.state == ChatSessionState.APPROVAL_DETAILS:
+            return "approval: y=allow n=reject"
         if self.state == ChatSessionState.CONTINUATION_REQUIRED:
             return "paused: y=continue n=stop"
         if self.state == ChatSessionState.ERROR:
@@ -69,7 +75,7 @@ class ChatSessionController:
             self._apply_result_state(result)
             return result.keep_running
 
-        if self.state == ChatSessionState.APPROVAL_REQUIRED and self._approval_handler is not None:
+        if self.state in APPROVAL_STATES and self._approval_handler is not None:
             result = await self._run_approval_handler(text)
             self._apply_result_state(result)
             return result.keep_running
@@ -113,11 +119,16 @@ class ChatSessionController:
 
     async def _run_approval_handler(self, text: str) -> CommandResult:
         if self._approval_handler is None:
-            return CommandResult(state=ChatSessionState.APPROVAL_REQUIRED.value)
+            return CommandResult(state=self._approval_default_state())
         result = self._approval_handler(text)
         if inspect.isawaitable(result):
             result = await result
-        return self._coerce_result(result, default_state=ChatSessionState.APPROVAL_REQUIRED.value)
+        return self._coerce_result(result, default_state=self._approval_default_state())
+
+    def _approval_default_state(self) -> str:
+        if self.state == ChatSessionState.APPROVAL_DETAILS:
+            return ChatSessionState.APPROVAL_DETAILS.value
+        return ChatSessionState.APPROVAL_REQUIRED.value
 
     async def _run_continuation_handler(self, text: str) -> CommandResult:
         if self._continuation_handler is None:

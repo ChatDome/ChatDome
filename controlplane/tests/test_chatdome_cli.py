@@ -389,7 +389,8 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertNotIn("Command hash:", printed)
         self.assertNotIn("Mutation:", printed)
         self.assertNotIn("Deletion:", printed)
-        self.assertIn("Allow operation? [y/n]", printed)
+        self.assertIn("\nAllow operation? [y/n]", printed)
+        self.assertNotIn("│ Allow operation? [y/n]", printed)
         self.assertNotIn("Approval ID:", printed)
 
     def test_terminal_pending_approval_accepts_yes_no_and_details_choice(self):
@@ -451,18 +452,30 @@ class ChatDomeCLITests(unittest.TestCase):
 
         fake_agent = FakeAgent()
         runtime = self.cli._TerminalChatRuntime(fake_agent, -11)
+        prompts = []
+        values = iter(["task", "d", "y", "task", "n", "/exit"])
+
+        def fake_input(prompt):
+            prompts.append(prompt)
+            return next(values)
+
         with patch.object(self.cli, "_create_terminal_chat_runtime", return_value=runtime):
-            with patch("builtins.input", side_effect=["task", "d", "y", "task", "n", "/exit"]):
+            with patch("builtins.input", side_effect=fake_input):
                 with patch("builtins.print") as output:
                     self.cli.hello(SimpleNamespace(chat_id=-11))
 
         self.assertEqual(fake_agent.messages, [(-11, "task"), (-11, "task")])
         self.assertEqual(fake_agent.detail_requests, [(-11, None, True)])
         self.assertEqual(fake_agent.resume_calls, [(-11, "APPROVE", None), (-11, "REJECT", None)])
+        self.assertEqual(
+            prompts,
+            ["› ", "approve [y/n/d]> ", "approve [y/n]> ", "› ", "approve [y/n/d]> ", "› "],
+        )
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
         self.assertIn("ChatDome · approval", printed)
         self.assertIn("Allow operation? [y/n]  d=details", printed)
         self.assertIn("Approval details", printed)
+        self.assertNotIn("│ Allow operation? [y/n]", printed)
         self.assertIn("approve ok", printed)
         self.assertIn("reject ok", printed)
         self.assertNotIn("Approval ID:", printed)
@@ -658,6 +671,10 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertEqual(
             self.cli._terminal_prompt_for_state(self.cli.ChatSessionState.APPROVAL_REQUIRED),
             "approve [y/n/d]> ",
+        )
+        self.assertEqual(
+            self.cli._terminal_prompt_for_state(self.cli.ChatSessionState.APPROVAL_DETAILS),
+            "approve [y/n]> ",
         )
         self.assertEqual(
             self.cli._terminal_prompt_for_state(self.cli.ChatSessionState.CONTINUATION_REQUIRED),
