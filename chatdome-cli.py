@@ -1146,10 +1146,33 @@ def _create_terminal_chat_view(registry: CommandRegistry, status_provider) -> An
     )
 
 
-def _terminal_start_status() -> str:
+def _terminal_model_name() -> str:
     root, status = _config_root_for_report()
     active = str(root.get("active_ai_profile") or "").strip() if status == "ready" else ""
-    return f"model: {active or 'not configured'}\nsession: local"
+    return active or "not configured"
+
+
+def _terminal_start_status() -> str:
+    return f"model: {_terminal_model_name()}\nsession: local"
+
+
+def _terminal_start_line() -> str:
+    return f"ChatDome terminal · model: {_terminal_model_name()}"
+
+
+def _terminal_compact_start(args: argparse.Namespace) -> bool:
+    env_value = os.environ.get("CHATDOME_COMPACT", "").strip().lower()
+    return bool(getattr(args, "quiet", False)) or env_value in {"1", "true", "yes", "on"}
+
+
+def _print_terminal_start(args: argparse.Namespace) -> None:
+    if _terminal_compact_start(args):
+        print(_terminal_start_line())
+        return
+    print(CHATDOME_LOGO)
+    print("")
+    print(_terminal_start_status())
+    print("")
 
 
 
@@ -1174,10 +1197,7 @@ async def _terminal_chat_loop(args: argparse.Namespace) -> None:
 
 
 def hello(args: argparse.Namespace) -> None:
-    print(CHATDOME_LOGO)
-    print("")
-    print(_terminal_start_status())
-    print("")
+    _print_terminal_start(args)
     try:
         asyncio.run(_terminal_chat_loop(args))
     except KeyboardInterrupt:
@@ -1699,6 +1719,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("health-check").set_defaults(func=health_check)
     p = sub.add_parser("hello")
     p.add_argument("--chat-id", type=int, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--quiet", action="store_true", help="Use compact terminal startup output")
     p.set_defaults(func=hello)
     sub.add_parser("status").set_defaults(func=show_status)
     sub.add_parser("doctor").set_defaults(func=doctor)

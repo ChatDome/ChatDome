@@ -265,6 +265,29 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertIn("____  _   _", printed)
         self.assertIn("chatdome> pong", printed)
 
+    def test_terminal_compact_start_can_be_enabled_by_flag_or_env(self):
+        async def noop_loop(_args):
+            return None
+
+        with patch.object(self.cli, "_terminal_chat_loop", noop_loop):
+            with patch("builtins.print") as output:
+                self.cli.hello(SimpleNamespace(chat_id=-1, quiet=True))
+
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("ChatDome terminal · model: base", printed)
+        self.assertNotIn("____  _   _", printed)
+        self.assertNotIn("session: local", printed)
+
+        with patch.dict("os.environ", {"CHATDOME_COMPACT": "1"}):
+            with patch.object(self.cli, "_terminal_chat_loop", noop_loop):
+                with patch("builtins.print") as output:
+                    self.cli.hello(SimpleNamespace(chat_id=-1))
+
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("ChatDome terminal · model: base", printed)
+        self.assertNotIn("____  _   _", printed)
+
+
     def test_terminal_chat_handles_help_and_clear_commands(self):
         class FakeAgent:
             def __init__(self):
