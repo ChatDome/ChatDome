@@ -74,6 +74,7 @@ HELP_TEXT = """\
 *命令：*
 /help \\- 显示帮助
 /clear \\- 清除对话上下文
+/stop \\- 中止当前任务
 /env \\- 查看当前运行环境摘要（来自 environment\\_profile\\.md）
 /token \\- 查看当前账号的 Token 资源流水与花费汇总
 /cmd\\_echo \\- 开关命令回显模式（显示底层执行的具体步骤）
@@ -125,6 +126,7 @@ class TelegramBot:
         self._alert_analysis_cache_max = 200
         self._approval_detail_tasks: dict[str, asyncio.Task] = {}
         self._round_limit_tasks: dict[int, asyncio.Task] = {}
+        self._message_tasks: dict[int, asyncio.Task] = {}
         self._llm_admin_sessions: dict[tuple[int, int], dict[str, Any]] = {}
         self._llm_admin_confirmations: dict[str, dict[str, Any]] = {}
         # Default policy: plain text output; markdown can be enabled per message.
@@ -189,6 +191,7 @@ class TelegramBot:
         self._app.add_handler(self._command_handler("help", self._handle_help))
         self._app.add_handler(self._command_handler("start", self._handle_help))
         self._app.add_handler(self._command_handler("clear", self._handle_clear))
+        self._app.add_handler(self._command_handler("stop", self._handle_stop))
         self._app.add_handler(self._command_handler("confirm", self._handle_confirm))
         self._app.add_handler(self._command_handler("reject", self._handle_reject))
         self._app.add_handler(self._command_handler("cmd_echo", self._handle_cmd_echo))
@@ -289,6 +292,39 @@ class TelegramBot:
             await update.message.reply_text("✅ 对话已重置。")
         else:
             await update.message.reply_text("ℹ️ 当前没有活跃的对话。")
+
+    def _active_task_for_chat(self, chat_id: int) -> asyncio.Task | None:
+        for tasks in (self._message_tasks, self._round_limit_tasks):
+            task = tasks.get(chat_id)
+            if task is None:
+                continue
+            if task.done():
+                tasks.pop(chat_id, None)
+                continue
+            return task
+        return None
+
+    async def _handle_stop(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /stop command."""
+        if not self._check_auth(update):
+            return
+
+        chat_id = update.effective_chat.id
+        task = self._active_task_for_chat(chat_id)
+        if task is None:
+            await update.message.reply_text("当前没有运行中的任务。")
+            return
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("Task ended while stopping chat_id=%s", chat_id, exc_info=True)
+        await update.message.reply_text("任务已停止。")
 
     async def _handle_cmd_echo(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -410,21 +446,51 @@ class TelegramBot:
             chat_id, user_message[:100],
         )
 
-        # Send "thinking" indicator
+        if self._active_task_for_chat(chat_id) is not None:
+            await update.message.reply_text("任务正在运行。\n发送 /stop 中止。")
+            return
+
         thinking_msg = await update.message.reply_text("⏳")
+        coroutine = self._run_agent_message(
+            message=update.message,
+            chat_id=chat_id,
+            user_message=user_message,
+            thinking_msg=thinking_msg,
+        )
+        if self._app is not None:
+            task = self._app.create_task(coroutine)
+        else:
+            task = asyncio.create_task(coroutine)
 
+        self._message_tasks[chat_id] = task
+
+        def _drop_finished_task(done_task: asyncio.Task) -> None:
+            if self._message_tasks.get(chat_id) is done_task:
+                self._message_tasks.pop(chat_id, None)
+
+        task.add_done_callback(_drop_finished_task)
+
+    async def _run_agent_message(
+        self,
+        message,
+        chat_id: int,
+        user_message: str,
+        thinking_msg,
+    ) -> None:
         try:
-            # Process through agent
             response = await self.agent.handle_message(chat_id, user_message)
-
-            # Delete the thinking message
             try:
                 await thinking_msg.delete()
             except Exception:
-                pass  # Not critical if we can't delete it
-
-            await self._send_agent_result(update.message, response)
-
+                pass
+            await self._send_agent_result(message, response)
+        except asyncio.CancelledError:
+            try:
+                await thinking_msg.delete()
+            except Exception:
+                pass
+            logger.info("Telegram task stopped for chat_id=%s", chat_id)
+            raise
         except Exception as e:
             logger.error("Error handling message: %s", e, exc_info=True)
             error_text = self._format_error_text(
@@ -435,7 +501,7 @@ class TelegramBot:
             try:
                 await thinking_msg.edit_text(error_text)
             except Exception:
-                await update.message.reply_text(error_text)
+                await message.reply_text(error_text)
 
     # ----- Interactive Approval -----
 

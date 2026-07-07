@@ -8,6 +8,7 @@ class TelegramHelpTests(unittest.TestCase):
         self.assertIn("/audit \\[N\\]", HELP_TEXT)
         self.assertIn("/engram \\-", HELP_TEXT)
         self.assertIn("/engram delete <id>", HELP_TEXT)
+        self.assertIn("/stop \\-", HELP_TEXT)
 
 
 if __name__ == "__main__":

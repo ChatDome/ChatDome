@@ -639,7 +639,7 @@ def _build_terminal_command_registry(
     registry.register(CommandDef("/help", "Show commands", "basic", handler=help_handler))
     registry.register(CommandDef("/clear", "Clear this terminal session", "basic", handler=clear_handler))
     registry.register(CommandDef("/exit", "Exit terminal chat", "basic", aliases=("/quit",), handler=exit_handler))
-    registry.register(CommandDef("/stop", "Stop current task", "control", aliases=("/cancel", "/abort"), handler=stop_handler))
+    registry.register(CommandDef("/stop", "Stop current task", "control", handler=stop_handler))
     registry.register(CommandDef("/env", "Show environment summary", "context", handler=env_handler))
     registry.register(CommandDef("/audit", "Show recent command audit events", "context", args_hint="[N]", handler=audit_handler))
     registry.register(CommandDef("/model", "Switch current model profile", "model", aliases=("/llm",), args_hint="<profile>", handler=model_handler, completer=_terminal_model_completion_items))

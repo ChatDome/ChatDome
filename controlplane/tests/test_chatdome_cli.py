@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import nullcontext
 import importlib.util
 import os
 import subprocess
@@ -777,6 +778,8 @@ class ChatDomeCLITests(unittest.TestCase):
             registry = self.cli._build_terminal_command_registry(
                 stop_request_handler=stop_request,
             )
+            self.assertIsNone(registry.parse("/cancel"))
+            self.assertIsNone(registry.parse("/abort"))
             controller = self.cli.ChatSessionController(
                 registry,
                 message_handler=message_handler,
@@ -800,6 +803,97 @@ class ChatDomeCLITests(unittest.TestCase):
             self.assertEqual(controller.state, self.cli.ChatSessionState.IDLE)
             printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
             self.assertIn("Task stopped.", printed)
+
+        asyncio.run(run_case())
+
+    def test_terminal_ctrl_c_cancels_running_background_message(self):
+        class FakeView:
+            def __init__(self):
+                self.inputs = [KeyboardInterrupt(), "/exit"]
+                self.messages = []
+                self.line_breaks = 0
+
+            async def read_line(self, _prompt):
+                value = self.inputs.pop(0)
+                if isinstance(value, BaseException):
+                    raise value
+                return value
+
+            def write_message(self, text):
+                self.messages.append(text)
+
+            def write_line_break(self):
+                self.line_breaks += 1
+
+            def output_context(self):
+                return nullcontext()
+
+        async def run_case():
+            started = asyncio.Event()
+            cancelled = asyncio.Event()
+            never_finish = asyncio.Event()
+
+            async def message_handler(_text):
+                started.set()
+                try:
+                    await never_finish.wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+            registry = self.cli._build_terminal_command_registry()
+            controller = self.cli.ChatSessionController(
+                registry,
+                message_handler=message_handler,
+                background_messages=True,
+            )
+            view = FakeView()
+
+            self.assertTrue(await controller.handle_line("long task"))
+            await asyncio.wait_for(started.wait(), timeout=1)
+
+            app = self.cli.TerminalChatApp(view, controller)
+            await app.run()
+
+            await asyncio.wait_for(cancelled.wait(), timeout=1)
+            self.assertEqual(controller.state, self.cli.ChatSessionState.IDLE)
+            self.assertEqual(view.line_breaks, 1)
+            self.assertEqual(view.messages, ["Task stopped."])
+
+        asyncio.run(run_case())
+
+    def test_terminal_ctrl_c_exits_when_idle(self):
+        class FakeView:
+            def __init__(self):
+                self.messages = []
+                self.line_breaks = 0
+
+            async def read_line(self, _prompt):
+                raise KeyboardInterrupt()
+
+            def write_message(self, text):
+                self.messages.append(text)
+
+            def write_line_break(self):
+                self.line_breaks += 1
+
+            def output_context(self):
+                return nullcontext()
+
+        async def run_case():
+            registry = self.cli._build_terminal_command_registry()
+            controller = self.cli.ChatSessionController(
+                registry,
+                message_handler=lambda _text: None,
+            )
+            view = FakeView()
+
+            app = self.cli.TerminalChatApp(view, controller)
+            await app.run()
+
+            self.assertEqual(view.line_breaks, 1)
+            self.assertEqual(view.messages, [])
+            self.assertEqual(controller.state, self.cli.ChatSessionState.IDLE)
 
         asyncio.run(run_case())
 

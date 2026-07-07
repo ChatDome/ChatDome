@@ -27,7 +27,6 @@ class TerminalChatApp:
             return str(self._prompt())
         return str(self._prompt)
 
-
     async def run(self) -> None:
         """Read input until the controller asks to exit."""
 
@@ -41,6 +40,10 @@ class TerminalChatApp:
                         break
                     except KeyboardInterrupt:
                         self._view.write_line_break()
+                        stopped = await self._controller.cancel_active_message()
+                        if stopped:
+                            self._view.write_message("Task stopped.")
+                            continue
                         break
 
                     keep_running = await self._controller.handle_line(line)
