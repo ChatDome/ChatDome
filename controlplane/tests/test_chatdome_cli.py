@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -747,6 +748,61 @@ class ChatDomeCLITests(unittest.TestCase):
         with patch.dict("os.environ", {"CHATDOME_PROMPT": "chat> "}):
             self.assertEqual(self.cli._terminal_prompt(), "chat> ")
             self.assertEqual(self.cli._terminal_prompt_for_state(self.cli.ChatSessionState.IDLE), "chat> ")
+
+    def test_terminal_stop_cancels_running_background_message(self):
+        async def run_case():
+            started = asyncio.Event()
+            cancelled = asyncio.Event()
+            never_finish = asyncio.Event()
+            busy_inputs = []
+            controller_ref = {}
+
+            async def message_handler(_text):
+                started.set()
+                try:
+                    await never_finish.wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+            async def stop_request():
+                return await controller_ref["controller"].cancel_active_message()
+
+            async def busy_handler(text):
+                busy_inputs.append(text)
+                return self.cli.CommandResult(
+                    state=self.cli.ChatSessionState.WORKING.value,
+                )
+
+            registry = self.cli._build_terminal_command_registry(
+                stop_request_handler=stop_request,
+            )
+            controller = self.cli.ChatSessionController(
+                registry,
+                message_handler=message_handler,
+                busy_handler=busy_handler,
+                background_messages=True,
+            )
+            controller_ref["controller"] = controller
+
+            with patch("builtins.print") as output:
+                self.assertTrue(await controller.handle_line("long task"))
+                await asyncio.wait_for(started.wait(), timeout=1)
+                self.assertEqual(controller.state, self.cli.ChatSessionState.WORKING)
+
+                self.assertTrue(await controller.handle_line("second task"))
+                self.assertTrue(await controller.handle_line("/clear"))
+                self.assertEqual(busy_inputs, ["second task", "/clear"])
+
+                self.assertTrue(await controller.handle_line("/stop"))
+                await asyncio.wait_for(cancelled.wait(), timeout=1)
+
+            self.assertEqual(controller.state, self.cli.ChatSessionState.IDLE)
+            printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+            self.assertIn("Task stopped.", printed)
+
+        asyncio.run(run_case())
+
     def test_terminal_retry_replays_last_failed_message(self):
         class FakeAgent:
             def __init__(self):
@@ -952,6 +1008,8 @@ class ChatDomeCLIHelloTests(unittest.TestCase):
             input="/exit\n",
             capture_output=True,
             check=False,
+            encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

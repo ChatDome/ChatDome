@@ -114,6 +114,22 @@ class CommandSandbox:
     def _command_log_hash(command: str) -> str:
         return CommandAuditTracker.sha256_text(command or "")[:12]
 
+    @staticmethod
+    async def _kill_process(proc: asyncio.subprocess.Process) -> None:
+        if proc.returncode is not None:
+            return
+        if sys.platform != "win32":
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            proc.kill()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=2)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+
     async def _execute(
         self,
         command: str,
@@ -160,14 +176,7 @@ class CommandSandbox:
                     timeout=effective_timeout,
                 )
             except asyncio.TimeoutError:
-                if sys.platform != "win32":
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                else:
-                    proc.kill()
-                await proc.wait()
+                await self._kill_process(proc)
                 logger.warning(
                     "Command timed out after %ds (label=%s, sha256=%s): %s",
                     effective_timeout,
@@ -182,6 +191,15 @@ class CommandSandbox:
                     timed_out=True,
                     command=command,
                 )
+            except asyncio.CancelledError:
+                await self._kill_process(proc)
+                logger.warning(
+                    "Command cancelled (label=%s, sha256=%s): %s",
+                    log_label,
+                    command_hash,
+                    command_excerpt,
+                )
+                raise
 
             stdout = stdout_bytes.decode("utf-8", errors="replace")
             stderr = stderr_bytes.decode("utf-8", errors="replace")

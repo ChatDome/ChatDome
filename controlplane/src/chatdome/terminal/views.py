@@ -25,6 +25,8 @@ class TerminalChatView(Protocol):
 class PlainTerminalChatView:
     """Fallback terminal view for non-TTY and minimal environments."""
 
+    supports_background_input = False
+
     def __init__(
         self,
         *,

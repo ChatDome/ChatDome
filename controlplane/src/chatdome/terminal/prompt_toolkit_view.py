@@ -34,6 +34,8 @@ class PromptToolkitCommandCompleter:
 class PromptToolkitChatView:
     """Terminal view with history, completion, styling, and stdout protection."""
 
+    supports_background_input = True
+
     def __init__(
         self,
         registry: CommandRegistry,

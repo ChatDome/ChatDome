@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import os
 import re
@@ -542,7 +543,10 @@ def _terminal_model_completion_items(arg_text: str) -> list[CompletionItem]:
     return items
 
 
-def _build_terminal_command_registry(runtime_provider: Any | None = None) -> CommandRegistry:
+def _build_terminal_command_registry(
+    runtime_provider: Any | None = None,
+    stop_request_handler: Any | None = None,
+) -> CommandRegistry:
     registry = CommandRegistry()
 
     def require_provider() -> Any:
@@ -562,6 +566,19 @@ def _build_terminal_command_registry(runtime_provider: Any | None = None) -> Com
 
     async def exit_handler(_invocation: CommandInvocation) -> CommandResult:
         return CommandResult(keep_running=False)
+
+    async def stop_handler(_invocation: CommandInvocation) -> CommandResult:
+        stopped = False
+        if stop_request_handler is not None:
+            result = stop_request_handler()
+            if inspect.isawaitable(result):
+                result = await result
+            stopped = bool(result)
+        if stopped:
+            _print_chatdome_message(_status_label("⏹️", "[stop]", "Task stopped."))
+            return CommandResult(state=ChatSessionState.IDLE.value)
+        _print_chatdome_message(_status_label("ℹ️", "[i]", "No running task."))
+        return CommandResult()
 
     async def env_handler(_invocation: CommandInvocation) -> CommandResult:
         _print_chatdome_message(_terminal_environment_summary())
@@ -622,6 +639,7 @@ def _build_terminal_command_registry(runtime_provider: Any | None = None) -> Com
     registry.register(CommandDef("/help", "Show commands", "basic", handler=help_handler))
     registry.register(CommandDef("/clear", "Clear this terminal session", "basic", handler=clear_handler))
     registry.register(CommandDef("/exit", "Exit terminal chat", "basic", aliases=("/quit",), handler=exit_handler))
+    registry.register(CommandDef("/stop", "Stop current task", "control", aliases=("/cancel", "/abort"), handler=stop_handler))
     registry.register(CommandDef("/env", "Show environment summary", "context", handler=env_handler))
     registry.register(CommandDef("/audit", "Show recent command audit events", "context", args_hint="[N]", handler=audit_handler))
     registry.register(CommandDef("/model", "Switch current model profile", "model", aliases=("/llm",), args_hint="<profile>", handler=model_handler, completer=_terminal_model_completion_items))
@@ -1310,7 +1328,15 @@ def _terminal_prompt_for_state(state: ChatSessionState | str) -> str:
 
 async def _terminal_chat_loop(args: argparse.Namespace) -> None:
     provider = _TerminalRuntimeProvider(args)
-    registry = _build_terminal_command_registry(provider)
+    controller_ref: dict[str, ChatSessionController] = {}
+
+    async def stop_request() -> bool:
+        controller = controller_ref.get("controller")
+        if controller is None:
+            return False
+        return await controller.cancel_active_message()
+
+    registry = _build_terminal_command_registry(provider, stop_request_handler=stop_request)
 
     async def approval_handler(text: str) -> CommandResult:
         return await _handle_terminal_approval_choice(
@@ -1319,6 +1345,10 @@ async def _terminal_chat_loop(args: argparse.Namespace) -> None:
             details_shown=controller.state == ChatSessionState.APPROVAL_DETAILS,
         )
 
+    async def busy_handler(_text: str) -> CommandResult:
+        _print_chatdome_message("Task is running.\nRun: /stop")
+        return CommandResult(state=ChatSessionState.WORKING.value)
+
     controller = ChatSessionController(
         registry,
         message_handler=lambda text: _send_terminal_user_message(provider, text),
@@ -1326,8 +1356,11 @@ async def _terminal_chat_loop(args: argparse.Namespace) -> None:
         stop_handler=provider.stop,
         approval_handler=approval_handler,
         continuation_handler=lambda text: _handle_terminal_continuation_choice(provider, text),
+        busy_handler=busy_handler,
     )
+    controller_ref["controller"] = controller
     view = _create_terminal_chat_view(registry, lambda: controller.status_text)
+    controller.set_background_messages(bool(getattr(view, "supports_background_input", False)))
     app = TerminalChatApp(view, controller, prompt=lambda: _terminal_prompt_for_state(controller.state))
     await app.run()
 

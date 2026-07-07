@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -160,6 +161,46 @@ class SandboxLoggingTests(unittest.TestCase):
             self.assertEqual(len(list(audit_dir.glob("audit-*.jsonl"))), 1)
             self.assertEqual(len(list(audit_dir.glob("sentinel-commands-*.jsonl"))), 1)
 
+    def test_cancelled_execute_kills_running_process(self):
+        class FakeProc:
+            def __init__(self):
+                self.pid = 123
+                self.returncode = None
+                self.started = asyncio.Event()
+                self.killed = False
+
+            async def communicate(self):
+                self.started.set()
+                await asyncio.Event().wait()
+
+            async def wait(self):
+                self.returncode = -9
+
+            def kill(self):
+                self.killed = True
+                self.returncode = -9
+
+        async def run_case():
+            fake_proc = FakeProc()
+
+            async def fake_create_subprocess_shell(*_args, **_kwargs):
+                return fake_proc
+
+            sandbox = CommandSandbox(allow_unrestricted_commands=True)
+            with patch(
+                "chatdome.executor.sandbox.asyncio.create_subprocess_shell",
+                fake_create_subprocess_shell,
+            ):
+                with patch("chatdome.executor.sandbox.sys.platform", "win32"):
+                    task = asyncio.create_task(sandbox._execute("sleep forever", timeout=60))
+                    await asyncio.wait_for(fake_proc.started.wait(), timeout=1)
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+
+            self.assertTrue(fake_proc.killed)
+
+        asyncio.run(run_case())
 
 if __name__ == "__main__":
     unittest.main()
