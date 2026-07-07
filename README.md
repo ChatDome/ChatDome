@@ -342,11 +342,12 @@ Run:
 chatdome hello
 ```
 
-`chatdome hello` starts an editable terminal session with command history, slash completion, and protected agent output. Non-TTY input uses plain stdin/stdout. The normal prompt defaults to `› ` and ChatDome replies render as output blocks. Set `CHATDOME_PROMPT` to change or hide the normal input prompt. Use `chatdome hello --quiet` or `CHATDOME_COMPACT=1` for a one-line startup. Approval starts at `approve [y/n/d]>`, switches to `approve [y/n]>` after details, and pause uses `continue [y/n]>`.
+`chatdome hello` starts an editable terminal session with command history, slash completion, and protected agent output. Non-TTY input uses plain stdin/stdout. The normal prompt defaults to `› ` and ChatDome replies render as output blocks. Set `CHATDOME_PROMPT` to change or hide the normal input prompt. Use `chatdome hello --quiet` or `CHATDOME_COMPACT=1` for a one-line startup. Approval starts at `approve [y/n/d]>`, switches to `approve [y/n]>` after details, and pause uses `continue [y/n]>`. Press `Ctrl+C` during a running task to stop that task and keep the CLI open. Press `Ctrl+C` while idle to exit the CLI. See [`docs/task-control.md`](docs/task-control.md) for task-control behavior.
 
 | Command | Description |
 |---------|-------------|
 | `/help` | Show terminal commands |
+| `/stop` | Stop the current task |
 | `/model <profile>` | Switch the model profile for this terminal session |
 | `/model_list` | Show configured model profiles and auth status |
 | `/details [full]` | Show pending approval details |
@@ -363,6 +364,7 @@ chatdome hello
 | `/confirm` | Force-approve and execute the current pending high-risk command |
 | `/reject` | Reject the current pending command |
 | `/clear` | Clear conversation context, start fresh |
+| `/stop` | Stop the current task |
 | `/env` | Show runtime environment summary from `/var/lib/chatdome/environment/profile.md` |
 | `/token` | Show token usage statistics for current chat |
 | `/cmd_echo` | Toggle command echo mode in replies |

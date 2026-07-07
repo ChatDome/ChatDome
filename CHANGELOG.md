@@ -8,6 +8,7 @@ This project uses Conventional Commits for commit messages and keeps release not
 
 ### Added
 
+- Task stop controls are documented for CLI Ctrl+C, CLI /stop, Telegram /stop, and plain stdin/stdout behavior.
 - Open-source contribution, security, conduct, issue, and pull request guidance.
 - Repository maintenance automation and packaging metadata hardening.
 
