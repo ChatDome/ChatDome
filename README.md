@@ -342,7 +342,7 @@ Run:
 chatdome hello
 ```
 
-`chatdome hello` starts an editable terminal session with command history, slash completion, and protected agent output. Non-TTY input uses plain stdin/stdout. The normal prompt defaults to `› ` and ChatDome replies render as output blocks. Set `CHATDOME_PROMPT` to change or hide the normal input prompt. Use `chatdome hello --quiet` or `CHATDOME_COMPACT=1` for a one-line startup. Approval starts at `approve [y/n/d]>`, switches to `approve [y/n]>` after details, and pause uses `continue [y/n]>`. Press `Ctrl+C` during a running task to stop that task and keep the CLI open. Press `Ctrl+C` while idle to exit the CLI. See [`docs/task-control.md`](docs/task-control.md) for task-control behavior.
+`chatdome hello` starts an editable terminal session with command history, slash completion, and protected agent output. Non-TTY input uses plain stdin/stdout. The normal prompt defaults to `› ` and ChatDome replies render as output blocks. Set `CHATDOME_PROMPT` to change or hide the normal input prompt. Use `chatdome hello --quiet` or `CHATDOME_COMPACT=1` for a one-line startup. Approval starts at `approve [y/n/d]>`, switches to `approve [y/n]>` after details, and pause uses `continue [y/n]>`. Press `Ctrl+C` during a running task to stop that task and keep the CLI open. Press `Ctrl+C` while idle to exit the CLI. See `ChatDome-docs/docs/03-module-specs/chatdome-task-control-design-zh.md` for task-control behavior.
 
 | Command | Description |
 |---------|-------------|
