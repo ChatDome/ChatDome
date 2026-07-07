@@ -14,4 +14,5 @@ This project uses Conventional Commits for commit messages and keeps release not
 
 ### Changed
 
+- Runtime file layout documentation now points to ChatDome-docs, and the duplicate code-repository copy is removed.
 - CI coverage and README command references are being aligned with the current public model command surface.

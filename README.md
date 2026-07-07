@@ -132,7 +132,7 @@ sudo env CHATDOME_INSTALL_DIR=/srv/chatdome \
   bash /tmp/chatdome-install.sh
 ```
 
-The installer downloads ChatDome to `/opt/chatdome` by default. It uses `/etc/chatdome/config.yaml` for configuration, `/var/log/chatdome` for logs, `/var/lib/chatdome` for runtime data, and `/run/chatdome` for runtime state. See [`docs/runtime-files.md`](docs/runtime-files.md).
+The installer downloads ChatDome to `/opt/chatdome` by default. It uses `/etc/chatdome/config.yaml` for configuration, `/var/log/chatdome` for logs, `/var/lib/chatdome` for runtime data, and `/run/chatdome` for runtime state. See `ChatDome-docs/docs/02-system-design/chatdome-runtime-files-zh.md`.
 It prompts before installing missing dependencies with the detected package manager (`apt-get`, `dnf`, `yum`, `pacman`, or `zypper`). It registers the systemd service and enables it at boot, but does not start it unless `--start` is passed. After configuration, run `chatdome` and select `Start service`, or run `sudo systemctl start chatdome`.
 
 #### Method B: Local Repository Install

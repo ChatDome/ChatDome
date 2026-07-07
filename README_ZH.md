@@ -136,7 +136,7 @@ sudo env CHATDOME_INSTALL_DIR=/srv/chatdome \
   bash /tmp/chatdome-install.sh
 ```
 
-默认下载到 `/opt/chatdome`。安装后配置位于 `/etc/chatdome/config.yaml`，日志位于 `/var/log/chatdome`，运行数据位于 `/var/lib/chatdome`，运行状态位于 `/run/chatdome`。详见 [`docs/runtime-files.md`](docs/runtime-files.md)。
+默认下载到 `/opt/chatdome`。安装后配置位于 `/etc/chatdome/config.yaml`，日志位于 `/var/log/chatdome`，运行数据位于 `/var/lib/chatdome`，运行状态位于 `/run/chatdome`。详见 `ChatDome-docs/docs/02-system-design/chatdome-runtime-files-zh.md`。
 缺少依赖时，安装脚本会根据包管理器生成安装命令并等待确认，支持 `apt-get`、`dnf`、`yum`、`pacman` 和 `zypper`。安装脚本会注册 systemd 服务并设置开机自启；未传入 `--start` 时不会立即启动服务。完成配置后，运行 `chatdome` 并选择 `Start service`，或执行 `sudo systemctl start chatdome`。
 
 #### 方式 B：本地仓库安装
