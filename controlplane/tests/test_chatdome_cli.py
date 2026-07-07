@@ -388,6 +388,9 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertIn("systemctl restart sshd", printed)
         self.assertIn("Risk: HIGH    Safety: UNSAFE", printed)
         self.assertIn("Flags: modifies system", printed)
+        self.assertIn("\u547d\u4ee4\u89e3\u6790:", printed)
+        self.assertIn("restart", printed)
+        self.assertIn("\u76ee\u6807\u670d\u52a1", printed)
         self.assertNotIn("Command hash:", printed)
         self.assertNotIn("Mutation:", printed)
         self.assertNotIn("Deletion:", printed)
@@ -518,6 +521,9 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertIn("Reason:", printed)
         self.assertIn("clean old temporary files", printed)
         self.assertIn("Removes old temporary files and may delete data if the path is wrong.", printed)
+        self.assertIn("\u547d\u4ee4\u89e3\u6790:", printed)
+        self.assertIn("/tmp/chatdome-old", printed)
+        self.assertIn("\u65e0 -i \u6807\u5fd7", printed)
         self.assertNotIn("Command hash:", printed)
 
 

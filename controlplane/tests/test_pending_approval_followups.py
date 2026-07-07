@@ -10,6 +10,7 @@ from chatdome.agent.core import Agent
 from chatdome.agent.prompts import build_system_prompt, build_tools
 from chatdome.agent.session import AgentSession
 from chatdome.agent.tools import PendingApprovalError, ToolDispatcher
+from chatdome.executor.cmd_parser import parse_shell_command
 from chatdome.llm.client import LLMResponse, ToolCall
 
 

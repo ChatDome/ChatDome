@@ -147,6 +147,44 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         record_usage.assert_called_once()
         bot._record_visible_context.assert_called_once()
 
+    def test_approval_detail_text_groups_command_breakdown(self):
+        details = {
+            "ok": True,
+            "approval_id": "AP-1",
+            "run_id": "RUN-1",
+            "command": "rm /root/show_time.sh",
+            "command_hash": "abcdef1234567890",
+            "reason": "delete old helper",
+            "analysis": {
+                "risk_level": "CRITICAL",
+                "safety_status": "CRITICAL",
+                "mutation_detected": True,
+                "deletion_detected": True,
+                "impact_analysis": "检测到删除操作，目标文件：/root/show_time.sh。",
+                "static_signals": ["命令包含危险操作: rm — 删除文件"],
+                "command_breakdown": {
+                    "tokens": [
+                        {"token": "rm", "role": "命令", "meaning": "删除文件或目录"},
+                        {
+                            "token": "/root/show_time.sh",
+                            "role": "目标文件",
+                            "meaning": "目标文件（将被永久删除）",
+                        },
+                    ],
+                    "warnings": ["无 -i 标志，删除时不会提示确认"],
+                },
+            },
+        }
+
+        text = TelegramBot._format_approval_detail_text(details)
+
+        self.assertIn("命令审批详情", text)
+        self.assertIn("命令解析", text)
+        self.assertIn("/root/show_time.sh", text)
+        self.assertIn("目标文件（将被永久删除）", text)
+        self.assertIn("静态信号", text)
+        self.assertNotIn("Approval ID", text)
+
     async def test_approval_detail_callback_removes_original_buttons(self):
         bot = _bot()
         bot._check_auth = lambda update: True

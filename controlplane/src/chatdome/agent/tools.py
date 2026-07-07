@@ -19,6 +19,7 @@ import httpx
 
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.agent.manual import read_manual_section
+from chatdome.executor.cmd_parser import parse_shell_command
 from chatdome.executor.sandbox import CommandSandbox, CommandResult
 from chatdome.llm.client import LLMClient
 from chatdome.sentinel.alert_controls import format_alert_push_status, parse_alert_mute_until
@@ -38,6 +39,7 @@ class PendingApprovalError(Exception):
         risk_level: str = "HIGH",
         mutation_detected: bool = False,
         deletion_detected: bool = False,
+        command_breakdown: dict[str, Any] | None = None,
     ):
         self.command = command
         self.safety_status = safety_status
@@ -47,6 +49,7 @@ class PendingApprovalError(Exception):
         self.risk_level = risk_level
         self.mutation_detected = mutation_detected
         self.deletion_detected = deletion_detected
+        self.command_breakdown = command_breakdown or {}
         super().__init__(f"Command requires approval: {command}")
 
 
@@ -472,6 +475,7 @@ class ToolDispatcher:
             risk_level=risk_level,
             mutation_detected=mutation_detected,
             deletion_detected=deletion_detected,
+            command_breakdown=analysis.get("command_breakdown", {}),
         )
 
     async def get_command_approval_details(
@@ -526,6 +530,7 @@ class ToolDispatcher:
         static_critical = is_critical_command(command)
         static_write = has_write_intent(command)
         static_delete = self._has_delete_intent(command)
+        command_breakdown = parse_shell_command(command)
 
         if static_critical:
             safety_status = "CRITICAL"
@@ -545,8 +550,10 @@ class ToolDispatcher:
                 "mutation_detected": mutation_detected,
                 "deletion_detected": deletion_detected,
                 "static_critical": static_critical,
+                "command_breakdown": command_breakdown,
             }
         )
+        static_impact_analysis = impact_analysis
         reviewer_mode = "static_only"
         reviewer_status = safety_status
         reviewer_risk_level = risk_level
@@ -573,6 +580,8 @@ class ToolDispatcher:
             )
             deletion_detected = deletion_detected or bool(review.get("deletion_detected", False))
             impact_analysis = str(review.get("impact_analysis", "")).strip() or "LLM analysis unavailable."
+            if self._impact_missing_targets(impact_analysis, command_breakdown):
+                impact_analysis = static_impact_analysis
             safety_status = reviewer_status
             risk_level = reviewer_risk_level
 
@@ -595,11 +604,6 @@ class ToolDispatcher:
             static_signals.append("命中高危命令模式。")
         if static_delete:
             static_signals.append("检测到删除或破坏性意图。")
-        if static_signals:
-            impact_analysis = (
-                f"{impact_analysis}\n\n[静态护栏信号]\n- "
-                + "\n- ".join(static_signals)
-            )
 
         return {
             "safety_status": safety_status,
@@ -607,6 +611,8 @@ class ToolDispatcher:
             "mutation_detected": mutation_detected,
             "deletion_detected": deletion_detected,
             "impact_analysis": impact_analysis,
+            "command_breakdown": command_breakdown,
+            "static_signals": static_signals,
             "reviewer_mode": reviewer_mode,
             "reviewer_status": reviewer_status,
             "reviewer_risk_level": reviewer_risk_level,
@@ -625,16 +631,38 @@ class ToolDispatcher:
 
     @staticmethod
     def _build_initial_impact_summary(analysis: dict[str, Any]) -> str:
-        """Build a short, command-free impact summary for the first approval card."""
+        """Build a short impact summary for the first approval card."""
+        breakdown = analysis.get("command_breakdown") if isinstance(analysis.get("command_breakdown"), dict) else {}
+        targets = [str(item) for item in breakdown.get("targets", []) if str(item or "").strip()]
+        target_text = "、".join(targets[:3])
+        if len(targets) > 3:
+            target_text += " 等"
+        base_cmd = str(breakdown.get("base_cmd") or "").strip()
+
+        if bool(analysis.get("deletion_detected", False)) and target_text:
+            label = "目标文件" if _breakdown_targets_file(breakdown) else "目标路径"
+            return f"检测到删除操作，{label}：{target_text}。此操作不可逆，内容将永久丢失。"
+        if base_cmd == "systemctl" and target_text:
+            return f"检测到服务状态变更，目标服务：{target_text}。执行后会改变服务运行状态。"
         if bool(analysis.get("static_critical", False)):
             return "静态预检命中高危命令模式，可能造成不可逆或高破坏性影响。"
         if bool(analysis.get("deletion_detected", False)):
             return "检测到删除或清理意图，可能导致数据丢失，需要谨慎确认。"
+        if bool(analysis.get("mutation_detected", False)) and target_text:
+            return f"检测到写入或状态变更意图，目标：{target_text}。执行后可能修改系统状态。"
         if bool(analysis.get("mutation_detected", False)):
             return "检测到写入或状态变更意图，执行后可能修改系统文件、配置或服务状态。"
         if not bool(analysis.get("static_is_safe", False)):
             return "未通过只读命令静态校验，需要人工确认后再执行。"
         return "静态预检显示偏只读查询，预计不修改系统状态；仍建议确认执行目的。"
+
+    @staticmethod
+    def _impact_missing_targets(impact_analysis: str, breakdown: dict[str, Any]) -> bool:
+        targets = [str(item) for item in breakdown.get("targets", []) if str(item or "").strip()]
+        if not targets:
+            return False
+        normalized = str(impact_analysis or "")
+        return not any(target in normalized for target in targets[:3])
 
     async def _handle_whois_lookup(self, args: dict[str, Any]) -> str:
         """Look up IP geolocation via ipwho.is (HTTPS)."""
@@ -716,3 +744,10 @@ class ToolDispatcher:
             parts.append("[注意] 输出已截断")
 
         return "\n".join(parts)
+
+
+def _breakdown_targets_file(breakdown: dict[str, Any]) -> bool:
+    for item in breakdown.get("tokens", []) or []:
+        if isinstance(item, dict) and str(item.get("role") or "") == "目标文件":
+            return True
+    return False

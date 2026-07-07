@@ -176,7 +176,7 @@ REVIEWER_SYSTEM_PROMPT = """\
 - 若 deletion_detected=true，risk_level 至少为 HIGH；若存在不可逆大范围删除，应为 CRITICAL。
 - 禁止输出 JSON 以外的任何文本。
 - 输出必须是单行 JSON 对象（不要使用 Markdown 代码块）
-- impact_analysis 不要原样复述命令内容；只给结论
+- impact_analysis 可引用具体目标文件名、路径、服务名或进程名；不要完整复述整条命令
 """
 
 COMPRESSION_PROMPT = """\
