@@ -46,7 +46,6 @@ from chatdome import __version__
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.config import validate_profile_name
 from chatdome.errors import ChatDomeError, user_facing_error_message
-from chatdome.executor.cmd_parser import parse_shell_command
 from chatdome.logger import ChatDomeFormatter, ExcludeSentinelFilter, OriginFilter, _build_file_handler
 from chatdome.llm.profile_admin import (
     CreateCodexProfileRequest,
@@ -1009,55 +1008,11 @@ def _terminal_approval_flags(analysis: dict[str, Any]) -> str:
     return ", ".join(flags)
 
 
-def _split_approval_impact_and_signals(impact: str, analysis: dict[str, Any]) -> tuple[str, list[str]]:
-    text = str(impact or "").strip()
-    signals = _approval_static_signals(analysis)
-    marker = "[静态护栏信号]"
-    if marker in text:
-        before, after = text.split(marker, 1)
-        text = before.strip()
-        signals.extend(_parse_legacy_static_signal_lines(after))
-    return (text or "review required"), _dedupe_text(signals)
-
-
-def _approval_static_signals(analysis: dict[str, Any]) -> list[str]:
-    raw = analysis.get("static_signals") if isinstance(analysis, dict) else None
-    signals: list[str] = []
-    if isinstance(raw, list):
-        signals.extend(str(item).strip() for item in raw if str(item or "").strip())
-    elif isinstance(raw, str) and raw.strip():
-        signals.extend(_parse_legacy_static_signal_lines(raw))
-    static_reason = str((analysis or {}).get("static_reason") or "").strip()
-    if static_reason and not signals:
-        signals.append(static_reason)
-    return _dedupe_text(signals)
-
-
-def _parse_legacy_static_signal_lines(text: str) -> list[str]:
-    signals = []
-    for line in str(text or "").splitlines():
-        value = line.strip().lstrip("-• ").strip()
-        if value:
-            signals.append(value)
-    return signals
-
-
-def _dedupe_text(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        text = str(value or "").strip()
-        if text and text not in seen:
-            seen.add(text)
-            result.append(text)
-    return result
-
-
-def _terminal_command_breakdown(command: str, analysis: dict[str, Any]) -> dict[str, Any]:
+def _terminal_command_breakdown(analysis: dict[str, Any]) -> dict[str, Any]:
     breakdown = analysis.get("command_breakdown") if isinstance(analysis, dict) else None
     if isinstance(breakdown, dict) and breakdown.get("tokens"):
         return breakdown
-    return parse_shell_command(command)
+    return {}
 
 
 def _format_terminal_command_breakdown(breakdown: dict[str, Any]) -> str:
@@ -1070,10 +1025,10 @@ def _format_terminal_command_breakdown(breakdown: dict[str, Any]) -> str:
     lines = ["命令解析:"]
     for item in entries:
         token = str(item.get("token") or "").strip()
-        role = str(item.get("role") or "").strip()
-        meaning = str(item.get("meaning") or role or "命令组成部分").strip()
-        if role and role not in meaning:
-            meaning = f"{role}（{meaning}）"
+        label = str(item.get("label") or item.get("role") or "").strip()
+        meaning = str(item.get("meaning") or label or "命令组成部分").strip()
+        if label and label not in meaning:
+            meaning = f"{label}（{meaning}）"
         padded = token if len(token) > token_width else token.ljust(token_width)
         lines.append(f"  {padded} {arrow} {meaning}")
     for warning in breakdown.get("warnings", []) or []:
@@ -1114,10 +1069,8 @@ def _format_terminal_approval_details(details: dict[str, Any], *, full: bool = F
     reason = str(details.get("reason") or "not provided").strip()
     risk = str(analysis.get("risk_level") or details.get("risk_level") or "unknown").strip()
     safety = str(analysis.get("safety_status") or "unknown").strip()
-    impact, static_signals = _split_approval_impact_and_signals(
-        str(analysis.get("impact_analysis") or "review required"), analysis
-    )
-    breakdown = _terminal_command_breakdown(command, analysis)
+    impact = str(analysis.get("impact_analysis") or "review required").strip()
+    breakdown = _terminal_command_breakdown(analysis)
     flags = _terminal_approval_flags(analysis)
 
     lines = [_status_label("🔎", "[details]", "Approval details")]
@@ -1140,13 +1093,6 @@ def _format_terminal_approval_details(details: dict[str, Any], *, full: bool = F
     lines.append("")
     lines.append("Impact:")
     lines.append(_indent_terminal_block(_compact_terminal_impact(impact, full=full), max_chars=4000))
-    if static_signals:
-        lines.append("")
-        lines.append("静态信号:")
-        for signal in static_signals[:6]:
-            if len(signal) > 260:
-                signal = signal[:257].rstrip() + "..."
-            lines.append(f"  • {signal}")
     lines.append("")
     lines.append(_TERMINAL_APPROVAL_ACTION)
     return "\n".join(lines)

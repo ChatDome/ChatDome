@@ -161,14 +161,14 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
                 "mutation_detected": True,
                 "deletion_detected": True,
                 "impact_analysis": "检测到删除操作，目标文件：/root/show_time.sh。",
-                "static_signals": ["命令包含危险操作: rm — 删除文件"],
                 "command_breakdown": {
                     "tokens": [
-                        {"token": "rm", "role": "命令", "meaning": "删除文件或目录"},
+                        {"token": "rm", "role": "command", "label": "命令", "meaning": "删除文件或目录"},
                         {
                             "token": "/root/show_time.sh",
-                            "role": "目标文件",
-                            "meaning": "目标文件（将被永久删除）",
+                            "role": "target_file",
+                            "label": "目标文件",
+                            "meaning": "将被永久删除",
                         },
                     ],
                     "warnings": ["无 -i 标志，删除时不会提示确认"],
@@ -182,8 +182,32 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("命令解析", text)
         self.assertIn("/root/show_time.sh", text)
         self.assertIn("目标文件（将被永久删除）", text)
-        self.assertIn("静态信号", text)
+        self.assertNotIn("静态信号", text)
         self.assertNotIn("Approval ID", text)
+
+    async def test_approval_request_is_compact(self):
+        bot = _bot()
+        bot._reply_text = AsyncMock()
+        message = object()
+
+        await bot._send_approval_request(
+            message,
+            {
+                "approval_id": "AP-1",
+                "risk_level": "CRITICAL",
+                "command_hash": "abcdef1234567890",
+                "reason": "delete file",
+                "impact_analysis": "will delete /root/show_time.sh",
+            },
+        )
+
+        text = bot._reply_text.await_args.args[1]
+        self.assertIn("待审批", text)
+        self.assertIn("详细命令", text)
+        self.assertNotIn("风险等级", text)
+        self.assertNotIn("审批编号", text)
+        self.assertNotIn("命令指纹", text)
+        self.assertNotIn("show_time.sh", text)
 
     async def test_approval_detail_callback_removes_original_buttons(self):
         bot = _bot()

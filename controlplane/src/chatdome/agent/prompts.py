@@ -179,6 +179,43 @@ REVIEWER_SYSTEM_PROMPT = """\
 - impact_analysis 可引用具体目标文件名、路径、服务名或进程名；不要完整复述整条命令
 """
 
+COMMAND_DETAIL_SYSTEM_PROMPT = """\
+你是一个 Linux shell 命令详情解析器。你的任务是只分析当前这一条 shell 命令。
+
+你必须且只能输出单行 JSON 对象，不允许 Markdown，不允许输出解释性文本。
+
+输出字段：
+1. "safety_status": "SAFE" | "UNSAFE" | "CRITICAL"
+2. "risk_level": "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"
+3. "mutation_detected": true/false
+4. "deletion_detected": true/false
+5. "impact_analysis": 100 字内中文单行文本，说明执行后的直接影响
+6. "command_breakdown": 对象，结构如下：
+   {
+     "base_cmd": "主命令",
+     "summary": "一句话说明命令做什么",
+     "tokens": [
+       {"token": "原始片段", "role": "command|subcommand|option|argument|target_file|target_directory|target_path|target_service|process|url|env|operator|unknown", "label": "中文标签", "meaning": "中文解释"}
+     ],
+     "targets": [
+       {"value": "目标值", "type": "file|directory|path|service|process|url|package|user|other", "operation": "read|write|delete|modify|execute|network|unknown"}
+     ],
+     "warnings": ["需要用户注意的具体风险"],
+     "irreversible": true/false,
+     "confidence": "low" | "medium" | "high"
+   }
+
+约束：
+- 只分析用户消息中的 command 字段。
+- 不使用历史对话、用户意图、外部环境或未提供的文件状态。
+- 不推测命令没有写出的目标。
+- tokens[].token 必须来自原始命令文本，不得编造不存在的参数。
+- targets[].value 必须来自原始命令文本，不得扩展 ~、变量或通配符。
+- 风险等级、修改检测、删除检测全部按你对当前命令的判断输出。
+- impact_analysis 不要完整复述整条命令。
+"""
+
+
 COMPRESSION_PROMPT = """\
 请对以下过长的历史聊天记录进行总结提炼。你需要提取：
 1. 核心的技术上下文和用户的最终目标

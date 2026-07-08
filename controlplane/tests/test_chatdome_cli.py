@@ -402,6 +402,14 @@ class ChatDomeCLITests(unittest.TestCase):
                         "mutation_detected": True,
                         "deletion_detected": False,
                         "impact_analysis": "Restarts SSH service.",
+                        "command_breakdown": {
+                            "tokens": [
+                                {"token": "systemctl", "role": "command", "label": "命令", "meaning": "控制系统服务"},
+                                {"token": "restart", "role": "subcommand", "label": "子命令", "meaning": "重启服务"},
+                                {"token": "sshd", "role": "target_service", "label": "目标服务", "meaning": "将被操作的服务"},
+                            ],
+                            "warnings": ["会改变服务运行状态"],
+                        },
                     },
                 }
 
@@ -479,6 +487,14 @@ class ChatDomeCLITests(unittest.TestCase):
                         "mutation_detected": True,
                         "deletion_detected": False,
                         "impact_analysis": "Restarts SSH service.",
+                        "command_breakdown": {
+                            "tokens": [
+                                {"token": "systemctl", "role": "command", "label": "命令", "meaning": "控制系统服务"},
+                                {"token": "restart", "role": "subcommand", "label": "子命令", "meaning": "重启服务"},
+                                {"token": "sshd", "role": "target_service", "label": "目标服务", "meaning": "将被操作的服务"},
+                            ],
+                            "warnings": ["会改变服务运行状态"],
+                        },
                     },
                 }
 
@@ -536,6 +552,14 @@ class ChatDomeCLITests(unittest.TestCase):
                         "mutation_detected": True,
                         "deletion_detected": True,
                         "impact_analysis": "Removes old temporary files and may delete data if the path is wrong.",
+                        "command_breakdown": {
+                            "tokens": [
+                                {"token": "rm", "role": "command", "label": "命令", "meaning": "删除文件或目录"},
+                                {"token": "-rf", "role": "option", "label": "选项", "meaning": "递归并强制执行"},
+                                {"token": "/tmp/chatdome-old", "role": "target_directory", "label": "目标目录", "meaning": "将被删除的目录"},
+                            ],
+                            "warnings": ["无 -i 标志，删除时不会提示确认"],
+                        },
                     },
                 }
 

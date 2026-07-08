@@ -980,7 +980,6 @@ class Agent:
                             reason=getattr(e, "reason", ""),
                             risk_level=getattr(e, "risk_level", ""),
                             impact_analysis=getattr(e, "impact_analysis", ""),
-                            command_breakdown=getattr(e, "command_breakdown", {}),
                         )
                         for skipped_tc, _, _, _ in tool_call_plans[index + 1:]:
                             skipped_result = (
@@ -1001,7 +1000,6 @@ class Agent:
                             "reason": getattr(e, 'reason', ''),
                             "risk_level": getattr(e, "risk_level", ""),
                             "impact_analysis": getattr(e, "impact_analysis", ""),
-                            "command_breakdown": getattr(e, "command_breakdown", {}),
                             "requires_detail_expansion": True,
                         }
                         self._persist_session(session)

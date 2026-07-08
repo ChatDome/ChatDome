@@ -10,7 +10,6 @@ from chatdome.agent.core import Agent
 from chatdome.agent.prompts import build_system_prompt, build_tools
 from chatdome.agent.session import AgentSession
 from chatdome.agent.tools import PendingApprovalError, ToolDispatcher
-from chatdome.executor.cmd_parser import parse_shell_command
 from chatdome.llm.client import LLMResponse, ToolCall
 
 
@@ -315,18 +314,85 @@ def _pending_session() -> AgentSession:
 
 
 class PendingApprovalFollowupTests(unittest.TestCase):
-    def test_initial_impact_summary_describes_static_precheck(self):
+    def test_initial_impact_summary_is_neutral_before_details(self):
         summary = ToolDispatcher._build_initial_impact_summary(
             {
                 "static_is_safe": False,
                 "mutation_detected": True,
-                "deletion_detected": False,
-                "static_critical": False,
+                "deletion_detected": True,
+                "static_critical": True,
             }
         )
 
-        self.assertIn("状态变更", summary)
-        self.assertNotIn("Static precheck", summary)
+        self.assertIn("查看详情", summary)
+        self.assertNotIn("删除", summary)
+        self.assertNotIn("高危", summary)
+
+    def test_llm_details_do_not_merge_static_guardrail_risk(self):
+        dispatcher = ToolDispatcher(FakeSandbox())
+        llm = FakeLLM(
+            LLMResponse(
+                content=json.dumps(
+                    {
+                        "safety_status": "SAFE",
+                        "risk_level": "LOW",
+                        "mutation_detected": False,
+                        "deletion_detected": False,
+                        "impact_analysis": "LLM 认为该命令风险较低。",
+                        "command_breakdown": {
+                            "base_cmd": "rm",
+                            "summary": "删除指定文件",
+                            "tokens": [
+                                {
+                                    "token": "rm",
+                                    "role": "command",
+                                    "label": "命令",
+                                    "meaning": "删除文件或目录",
+                                },
+                                {
+                                    "token": "/root/show_time.sh",
+                                    "role": "target_file",
+                                    "label": "目标文件",
+                                    "meaning": "命令作用的文件路径",
+                                },
+                            ],
+                            "targets": [
+                                {
+                                    "value": "/root/show_time.sh",
+                                    "type": "file",
+                                    "operation": "delete",
+                                }
+                            ],
+                            "warnings": [],
+                            "irreversible": False,
+                            "confidence": "high",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        )
+
+        analysis = asyncio.run(
+            dispatcher.analyze_command_for_approval(
+                "rm /root/show_time.sh",
+                "用户上下文不应进入详情解析",
+                chat_id=0,
+                include_llm=True,
+                llm=llm,
+            )
+        )
+
+        self.assertEqual(analysis["reviewer_mode"], "llm")
+        self.assertEqual(analysis["safety_status"], "SAFE")
+        self.assertEqual(analysis["risk_level"], "LOW")
+        self.assertFalse(analysis["deletion_detected"])
+        self.assertNotIn("static_signals", analysis)
+        self.assertEqual(analysis["command_breakdown"]["tokens"][1]["label"], "目标文件")
+        self.assertEqual(llm.calls[0]["response_format"], {"type": "json_object"})
+        encoded_messages = json.dumps(llm.calls[0]["messages"], ensure_ascii=False)
+        self.assertIn("rm /root/show_time.sh", encoded_messages)
+        self.assertNotIn("用户上下文不应进入详情解析", encoded_messages)
 
     def test_pending_session_snapshot_preserves_approval_binding(self):
         session = _pending_session()

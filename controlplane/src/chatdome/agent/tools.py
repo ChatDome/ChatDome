@@ -10,6 +10,7 @@ Handles:
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from datetime import datetime
@@ -19,7 +20,6 @@ import httpx
 
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.agent.manual import read_manual_section
-from chatdome.executor.cmd_parser import parse_shell_command
 from chatdome.executor.sandbox import CommandSandbox, CommandResult
 from chatdome.llm.client import LLMClient
 from chatdome.sentinel.alert_controls import format_alert_push_status, parse_alert_mute_until
@@ -608,7 +608,6 @@ class ToolDispatcher:
             risk_level=risk_level,
             mutation_detected=mutation_detected,
             deletion_detected=deletion_detected,
-            command_breakdown=analysis.get("command_breakdown", {}),
         )
 
     async def get_command_approval_details(
@@ -652,7 +651,16 @@ class ToolDispatcher:
         include_llm: bool = False,
         llm: Any = None,
     ) -> dict[str, Any]:
-        """Run static + optional LLM analysis for one command."""
+        """Return static gate data or LLM-only approval details."""
+        if include_llm:
+            return await self._analyze_command_details_with_llm(
+                command=command,
+                chat_id=chat_id,
+                llm=llm,
+            )
+        return self._analyze_command_static_gate(command)
+
+    def _analyze_command_static_gate(self, command: str) -> dict[str, Any]:
         from chatdome.executor.validator import (
             has_write_intent,
             is_critical_command,
@@ -663,7 +671,6 @@ class ToolDispatcher:
         static_critical = is_critical_command(command)
         static_write = has_write_intent(command)
         static_delete = self._has_delete_intent(command)
-        command_breakdown = parse_shell_command(command)
 
         if static_critical:
             safety_status = "CRITICAL"
@@ -675,84 +682,198 @@ class ToolDispatcher:
             safety_status = "SAFE"
             risk_level = "LOW"
 
-        mutation_detected = static_write
-        deletion_detected = static_delete
-        impact_analysis = self._build_initial_impact_summary(
-            {
-                "static_is_safe": static_check.is_safe,
-                "mutation_detected": mutation_detected,
-                "deletion_detected": deletion_detected,
-                "static_critical": static_critical,
-                "command_breakdown": command_breakdown,
-            }
-        )
-        static_impact_analysis = impact_analysis
-        reviewer_mode = "static_only"
-        reviewer_status = safety_status
-        reviewer_risk_level = risk_level
-
-        reviewer_llm = llm if llm is not None else self.llm
-        if include_llm and reviewer_llm:
-            from chatdome.agent.prompts import REVIEWER_SYSTEM_PROMPT
-
-            logger.info("Running deferred AI reviewer for command details: %s", command)
-            review = await reviewer_llm.evaluate_command_safety(
-                command,
-                REVIEWER_SYSTEM_PROMPT,
-                chat_id=chat_id,
-            )
-            reviewer_mode = "llm"
-            reviewer_status = str(review.get("safety_status", "UNSAFE")).strip().upper() or "UNSAFE"
-            if reviewer_status not in {"SAFE", "UNSAFE", "CRITICAL"}:
-                reviewer_status = "UNSAFE"
-            reviewer_risk_level = str(review.get("risk_level", "HIGH")).strip().upper() or "HIGH"
-            if reviewer_risk_level not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
-                reviewer_risk_level = "HIGH"
-            mutation_detected = mutation_detected or bool(
-                review.get("mutation_detected", reviewer_status != "SAFE")
-            )
-            deletion_detected = deletion_detected or bool(review.get("deletion_detected", False))
-            impact_analysis = str(review.get("impact_analysis", "")).strip() or "LLM analysis unavailable."
-            if self._impact_missing_targets(impact_analysis, command_breakdown):
-                impact_analysis = static_impact_analysis
-            safety_status = reviewer_status
-            risk_level = reviewer_risk_level
-
-        if mutation_detected and safety_status == "SAFE":
-            safety_status = "UNSAFE"
-        if deletion_detected and risk_level in {"LOW", "MEDIUM"}:
-            risk_level = "HIGH"
-        if static_critical:
-            safety_status = "CRITICAL"
-            risk_level = "CRITICAL"
-        elif risk_level == "CRITICAL":
-            safety_status = "CRITICAL"
-
-        static_signals: list[str] = []
-        if static_write:
-            static_signals.append("检测到写入或系统状态变更意图。")
-        if not static_check.is_safe and static_check.reason:
-            static_signals.append(str(static_check.reason))
-        if static_critical:
-            static_signals.append("命中高危命令模式。")
-        if static_delete:
-            static_signals.append("检测到删除或破坏性意图。")
-
         return {
             "safety_status": safety_status,
             "risk_level": risk_level,
-            "mutation_detected": mutation_detected,
-            "deletion_detected": deletion_detected,
-            "impact_analysis": impact_analysis,
-            "command_breakdown": command_breakdown,
-            "static_signals": static_signals,
-            "reviewer_mode": reviewer_mode,
-            "reviewer_status": reviewer_status,
-            "reviewer_risk_level": reviewer_risk_level,
+            "mutation_detected": static_write,
+            "deletion_detected": static_delete,
+            "impact_analysis": self._build_initial_impact_summary({}),
+            "reviewer_mode": "static_gate",
+            "reviewer_status": safety_status,
+            "reviewer_risk_level": risk_level,
             "static_is_safe": static_check.is_safe,
             "static_reason": static_check.reason,
             "static_write_detected": static_write,
             "static_critical": static_critical,
+        }
+
+    async def _analyze_command_details_with_llm(
+        self,
+        command: str,
+        chat_id: int = 0,
+        llm: Any = None,
+    ) -> dict[str, Any]:
+        reviewer_llm = llm if llm is not None else self.llm
+        if reviewer_llm is None:
+            return self._llm_detail_fallback("LLM 未就绪。")
+
+        from chatdome.agent.prompts import COMMAND_DETAIL_SYSTEM_PROMPT
+
+        command_payload = json.dumps({"command": command, "shell": "bash"}, ensure_ascii=False)
+        messages = [
+            {"role": "system", "content": COMMAND_DETAIL_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": "只分析以下 JSON 中的 command 字段。\n" + command_payload,
+            },
+        ]
+
+        try:
+            kwargs: dict[str, Any] = {
+                "messages": messages,
+                "response_format": {"type": "json_object"},
+            }
+            try:
+                params = inspect.signature(reviewer_llm.chat_completion).parameters
+            except (TypeError, ValueError):
+                params = {}
+            if "temperature" in params:
+                kwargs["temperature"] = 0.0
+
+            response = await reviewer_llm.chat_completion(**kwargs)
+            parsed = LLMClient.parse_json_object(response.content or "{}")
+            if chat_id > 0:
+                try:
+                    from chatdome.agent.tracker import TokenTracker
+
+                    TokenTracker.record_usage(
+                        chat_id=chat_id,
+                        model=getattr(reviewer_llm, "model", "unknown"),
+                        action="command_detail",
+                        prompt_tokens=getattr(response, "prompt_tokens", 0),
+                        completion_tokens=getattr(response, "completion_tokens", 0),
+                        total_tokens=getattr(response, "total_tokens", 0),
+                    )
+                except Exception:
+                    logger.debug("Failed to record command detail token usage", exc_info=True)
+            return self._normalize_llm_command_details(parsed, command)
+        except Exception as exc:
+            logger.error("Error loading LLM command details: %s", exc)
+            return self._llm_detail_fallback("LLM 解析失败。请直接检查原始命令。")
+
+    @classmethod
+    def _normalize_llm_command_details(cls, payload: dict[str, Any], command: str) -> dict[str, Any]:
+        safety_status = str(payload.get("safety_status", "UNSAFE")).strip().upper()
+        if safety_status not in {"SAFE", "UNSAFE", "CRITICAL"}:
+            safety_status = "UNSAFE"
+
+        risk_level = str(payload.get("risk_level", "HIGH")).strip().upper()
+        if risk_level not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+            risk_level = "HIGH"
+
+        impact_analysis = " ".join(str(payload.get("impact_analysis") or "LLM 未返回影响说明。").split())
+        breakdown = cls._normalize_llm_command_breakdown(payload.get("command_breakdown"), command)
+
+        return {
+            "safety_status": safety_status,
+            "risk_level": risk_level,
+            "mutation_detected": bool(payload.get("mutation_detected", False)),
+            "deletion_detected": bool(payload.get("deletion_detected", False)),
+            "impact_analysis": impact_analysis,
+            "command_breakdown": breakdown,
+            "reviewer_mode": "llm",
+            "reviewer_status": safety_status,
+            "reviewer_risk_level": risk_level,
+        }
+
+    @classmethod
+    def _normalize_llm_command_breakdown(cls, raw: Any, command: str) -> dict[str, Any]:
+        if not isinstance(raw, dict):
+            return cls._minimal_command_breakdown("命令解析不可用")
+
+        command_text = str(command or "")
+        allowed_roles = {
+            "command",
+            "subcommand",
+            "option",
+            "argument",
+            "target_file",
+            "target_directory",
+            "target_path",
+            "target_service",
+            "process",
+            "url",
+            "env",
+            "operator",
+            "unknown",
+        }
+        allowed_target_types = {"file", "directory", "path", "service", "process", "url", "package", "user", "other"}
+        allowed_operations = {"read", "write", "delete", "modify", "execute", "network", "unknown"}
+
+        tokens: list[dict[str, str]] = []
+        for item in raw.get("tokens", []) or []:
+            if not isinstance(item, dict):
+                continue
+            token = str(item.get("token") or "").strip()
+            if not token or token not in command_text:
+                continue
+            role = str(item.get("role") or "unknown").strip()
+            if role not in allowed_roles:
+                role = "unknown"
+            label = str(item.get("label") or role).strip()
+            meaning = " ".join(str(item.get("meaning") or label or "命令组成部分").split())
+            tokens.append({"token": token, "role": role, "label": label, "meaning": meaning})
+
+        targets: list[dict[str, str]] = []
+        for item in raw.get("targets", []) or []:
+            if isinstance(item, str):
+                item = {"value": item}
+            if not isinstance(item, dict):
+                continue
+            value = str(item.get("value") or "").strip()
+            if not value or value not in command_text:
+                continue
+            target_type = str(item.get("type") or "other").strip()
+            if target_type not in allowed_target_types:
+                target_type = "other"
+            operation = str(item.get("operation") or "unknown").strip()
+            if operation not in allowed_operations:
+                operation = "unknown"
+            targets.append({"value": value, "type": target_type, "operation": operation})
+
+        warnings = [
+            " ".join(str(item).split())
+            for item in raw.get("warnings", []) or []
+            if " ".join(str(item).split())
+        ][:8]
+        confidence = str(raw.get("confidence") or "medium").strip().lower()
+        if confidence not in {"low", "medium", "high"}:
+            confidence = "medium"
+
+        return {
+            "base_cmd": str(raw.get("base_cmd") or "").strip(),
+            "summary": " ".join(str(raw.get("summary") or "").split()),
+            "tokens": tokens,
+            "targets": targets,
+            "warnings": warnings,
+            "irreversible": bool(raw.get("irreversible", False)),
+            "confidence": confidence,
+        }
+
+    @staticmethod
+    def _minimal_command_breakdown(summary: str) -> dict[str, Any]:
+        return {
+            "base_cmd": "",
+            "summary": summary,
+            "tokens": [],
+            "targets": [],
+            "warnings": [],
+            "irreversible": False,
+            "confidence": "low",
+        }
+
+    @classmethod
+    def _llm_detail_fallback(cls, message: str) -> dict[str, Any]:
+        return {
+            "safety_status": "UNSAFE",
+            "risk_level": "HIGH",
+            "mutation_detected": True,
+            "deletion_detected": False,
+            "impact_analysis": message,
+            "command_breakdown": cls._minimal_command_breakdown(message),
+            "reviewer_mode": "llm_error",
+            "reviewer_status": "UNSAFE",
+            "reviewer_risk_level": "HIGH",
         }
 
     @staticmethod
@@ -764,38 +885,8 @@ class ToolDispatcher:
 
     @staticmethod
     def _build_initial_impact_summary(analysis: dict[str, Any]) -> str:
-        """Build a short impact summary for the first approval card."""
-        breakdown = analysis.get("command_breakdown") if isinstance(analysis.get("command_breakdown"), dict) else {}
-        targets = [str(item) for item in breakdown.get("targets", []) if str(item or "").strip()]
-        target_text = "、".join(targets[:3])
-        if len(targets) > 3:
-            target_text += " 等"
-        base_cmd = str(breakdown.get("base_cmd") or "").strip()
-
-        if bool(analysis.get("deletion_detected", False)) and target_text:
-            label = "目标文件" if _breakdown_targets_file(breakdown) else "目标路径"
-            return f"检测到删除操作，{label}：{target_text}。此操作不可逆，内容将永久丢失。"
-        if base_cmd == "systemctl" and target_text:
-            return f"检测到服务状态变更，目标服务：{target_text}。执行后会改变服务运行状态。"
-        if bool(analysis.get("static_critical", False)):
-            return "静态预检命中高危命令模式，可能造成不可逆或高破坏性影响。"
-        if bool(analysis.get("deletion_detected", False)):
-            return "检测到删除或清理意图，可能导致数据丢失，需要谨慎确认。"
-        if bool(analysis.get("mutation_detected", False)) and target_text:
-            return f"检测到写入或状态变更意图，目标：{target_text}。执行后可能修改系统状态。"
-        if bool(analysis.get("mutation_detected", False)):
-            return "检测到写入或状态变更意图，执行后可能修改系统文件、配置或服务状态。"
-        if not bool(analysis.get("static_is_safe", False)):
-            return "未通过只读命令静态校验，需要人工确认后再执行。"
-        return "静态预检显示偏只读查询，预计不修改系统状态；仍建议确认执行目的。"
-
-    @staticmethod
-    def _impact_missing_targets(impact_analysis: str, breakdown: dict[str, Any]) -> bool:
-        targets = [str(item) for item in breakdown.get("targets", []) if str(item or "").strip()]
-        if not targets:
-            return False
-        normalized = str(impact_analysis or "")
-        return not any(target in normalized for target in targets[:3])
+        """Return the neutral first-card summary used before details are opened."""
+        return "待确认操作。查看详情后决定是否执行。"
 
     async def _handle_whois_lookup(self, args: dict[str, Any]) -> str:
         """Look up IP geolocation via ipwho.is (HTTPS)."""
@@ -957,10 +1048,3 @@ class ToolDispatcher:
             parts.append("[注意] 输出已截断")
 
         return "\n".join(parts)
-
-
-def _breakdown_targets_file(breakdown: dict[str, Any]) -> bool:
-    for item in breakdown.get("tokens", []) or []:
-        if isinstance(item, dict) and str(item.get("role") or "") == "目标文件":
-            return True
-    return False

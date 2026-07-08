@@ -507,24 +507,7 @@ class TelegramBot:
 
     async def _send_approval_request(self, message, data: dict) -> None:
         approval_id = str((data or {}).get("approval_id") or "").strip()
-        risk_level = str((data or {}).get("risk_level") or "unknown").strip()
-        command_hash = str((data or {}).get("command_hash") or "").strip()
-        hash_line = f"\n命令指纹: {command_hash[:12]}" if command_hash else ""
-        approval_line = f"审批编号: {approval_id}\n" if approval_id else ""
-        analysis = (data or {}).get("analysis")
-        analysis = analysis if isinstance(analysis, dict) else {}
-        purpose = self._compact_approval_text((data or {}).get("reason"), "未提供")
-        impact = self._compact_approval_text(
-            (data or {}).get("impact_analysis") or analysis.get("impact_analysis"),
-            "点击“详细命令”查看完整影响分析。",
-        )
-        text = (
-            "⚠️ 待审批\n"
-            f"{approval_line}"
-            f"风险等级: {risk_level}{hash_line}\n"
-            f"操作目的: {purpose}\n"
-            f"影响说明: {impact}"
-        )
+        text = "⚠️ 待审批\n是否允许本次操作？\n点击“详细命令”查看解析。"
         if approval_id:
             approve_data = f"approval:approve:{approval_id}"
             approve_task_data = f"approval:approve_task:{approval_id}"
@@ -697,9 +680,7 @@ class TelegramBot:
     def _format_approval_detail_text(cls, details: dict) -> str:
         analysis = details.get("analysis") if isinstance(details.get("analysis"), dict) else {}
         command = str(details.get("command") or "").strip()
-        impact, static_signals = cls._split_approval_impact_and_signals(
-            str(analysis.get("impact_analysis") or "review required"), analysis
-        )
+        impact = str(analysis.get("impact_analysis") or "review required").strip()
         breakdown = analysis.get("command_breakdown") if isinstance(analysis.get("command_breakdown"), dict) else {}
         risk = str(analysis.get("risk_level") or details.get("risk_level") or "HIGH")
         safety = str(analysis.get("safety_status") or "UNSAFE")
@@ -713,9 +694,6 @@ class TelegramBot:
         if flags:
             lines.append(f"标记: {flags}")
         lines.extend(["", "💥 影响说明", impact])
-        if static_signals:
-            lines.extend(["", "🔬 静态信号"])
-            lines.extend(f"• {signal}" for signal in static_signals[:6])
         return "\n".join(lines)
 
     @staticmethod
@@ -728,10 +706,10 @@ class TelegramBot:
         for index, item in enumerate(entries):
             prefix = "└" if index == len(entries) - 1 and not warnings else "├"
             token = str(item.get("token") or "").strip()
-            role = str(item.get("role") or "").strip()
-            meaning = str(item.get("meaning") or role or "命令组成部分").strip()
-            if role and role not in meaning:
-                meaning = f"{role}（{meaning}）"
+            label = str(item.get("label") or item.get("role") or "").strip()
+            meaning = str(item.get("meaning") or label or "命令组成部分").strip()
+            if label and label not in meaning:
+                meaning = f"{label}（{meaning}）"
             lines.append(f"{prefix} {token} → {meaning}")
         for warning in warnings:
             text = str(warning or "").strip()
@@ -747,45 +725,6 @@ class TelegramBot:
         if bool((analysis or {}).get("deletion_detected", False)):
             flags.append("删除文件")
         return " · ".join(flags)
-
-    @classmethod
-    def _split_approval_impact_and_signals(cls, impact: str, analysis: dict) -> tuple[str, list[str]]:
-        text = str(impact or "").strip()
-        signals = cls._approval_static_signals(analysis)
-        marker = "[静态护栏信号]"
-        if marker in text:
-            before, after = text.split(marker, 1)
-            text = before.strip()
-            signals.extend(cls._parse_static_signal_lines(after))
-        return (text or "review required"), cls._dedupe_text(signals)
-
-    @classmethod
-    def _approval_static_signals(cls, analysis: dict) -> list[str]:
-        raw = (analysis or {}).get("static_signals")
-        if isinstance(raw, list):
-            return cls._dedupe_text([str(item).strip() for item in raw if str(item or "").strip()])
-        if isinstance(raw, str) and raw.strip():
-            return cls._parse_static_signal_lines(raw)
-        reason = str((analysis or {}).get("static_reason") or "").strip()
-        return [reason] if reason else []
-
-    @staticmethod
-    def _parse_static_signal_lines(text: str) -> list[str]:
-        return [
-            line.strip().lstrip("-• ").strip()
-            for line in str(text or "").splitlines()
-            if line.strip().lstrip("-• ").strip()
-        ]
-
-    @staticmethod
-    def _dedupe_text(values: list[str]) -> list[str]:
-        seen: set[str] = set()
-        result: list[str] = []
-        for value in values:
-            if value and value not in seen:
-                seen.add(value)
-                result.append(value)
-        return result
 
     async def _send_round_limit_prompt(self, message, data: dict[str, Any] | None = None) -> None:
         """Ask user whether to continue after reaching one execution window."""
