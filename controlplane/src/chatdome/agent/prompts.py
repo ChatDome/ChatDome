@@ -386,8 +386,9 @@ def build_tools(
             "function": {
                 "name": "add_user_context",
                 "description": (
-                    "当用户明确告知某个 Sentinel 告警对应的系统变更是其本人操作时使用。"
+                    "当用户明确告知某个 Sentinel 告警对应的是本人操作或可信环境时使用。"
                     "将用户提供的信息写入上下文记录单，后续巡检将自动静默匹配的告警。"
+                    "稳定的 IP/VPN/跳板/端口用途等事实会同步写入 Engram；不要为同一事实重复调用 save_engram。"
                     "仅在用户主动确认/声明时调用，禁止自行推测。"
                 ),
                 "parameters": {

@@ -26,6 +26,59 @@ from chatdome.sentinel.alert_controls import format_alert_push_status, parse_ale
 
 logger = logging.getLogger(__name__)
 
+_DURABLE_USER_CONTEXT_KEYWORDS = (
+    "vpn",
+    "节点",
+    "跳板",
+    "堡垒",
+    "代理",
+    "内网",
+    "办公",
+    "公司",
+    "家里",
+    "固定",
+    "长期",
+    "常驻",
+    "网关",
+    "负载均衡",
+    "反代",
+    "监控",
+    "备份",
+    "可信",
+)
+_EPHEMERAL_USER_CONTEXT_KEYWORDS = (
+    "刚才",
+    "刚刚",
+    "临时",
+    "今天",
+    "本次",
+    "这次",
+    "手动重启",
+    "重启",
+    "停止",
+    "启动",
+    "部署",
+    "升级",
+    "测试",
+    "排查",
+    "维护",
+)
+_STRONG_IDENTITY_KEYWORDS = (
+    "vpn",
+    "节点",
+    "跳板",
+    "堡垒",
+    "内网",
+    "固定",
+    "可信",
+)
+_TOPOLOGY_CONTEXT_CHECKS = {
+    "ssh_success_login",
+    "ssh_bruteforce",
+    "active_connections",
+    "open_ports",
+}
+
 
 class PendingApprovalError(Exception):
     """Raised when a tool call requires user confirmation before execution."""
@@ -260,10 +313,13 @@ class ToolDispatcher:
     def _handle_save_engram(self, args: dict[str, Any]) -> str:
         if not self.engram_store:
             return "❌ EngramStore 未初始化，保存失败。"
-        category = args.get("category", "")
-        fact = args.get("fact", "")
-        source_context = args.get("source_context", "")
+        category = str(args.get("category", "")).strip()
+        fact = str(args.get("fact", "")).strip()
+        source_context = str(args.get("source_context", "")).strip()
         supersedes_id = args.get("supersedes_id")
+
+        if not category or not fact:
+            return "参数错误: category 和 fact 是必填字段。"
 
         if supersedes_id:
             try:
@@ -271,11 +327,14 @@ class ToolDispatcher:
                 return f"🧠 已更新 Engram 记录 (覆盖了 {supersedes_id})：[{category}] {fact} (记录 ID: {engram.id})"
             except ValueError as e:
                 return f"❌ 更新失败：{e}"
-                
+
+        existing = self._find_existing_engram(category, fact)
+        if existing:
+            return f"🧠 Engram 已存在：[{category}] {fact} (记录 ID: {existing.id})"
+
         conflicts = self.engram_store.find_conflicts(category, fact)
         if conflicts:
             c = conflicts[0]
-            # 返回明确的冲突错误给 LLM，要求 LLM 追问用户
             import datetime
             time_str = datetime.datetime.fromtimestamp(c.created_at).strftime('%Y-%m-%d %H:%M:%S')
             return (
@@ -285,9 +344,18 @@ class ToolDispatcher:
                 f"请立即向用户指出矛盾并确认：是否要更新为新的事实？\n"
                 f"如果用户确认更新，请带上 supersedes_id=\"{c.id}\" 再次调用 save_engram 进行覆盖。"
             )
-            
+
         engram = self.engram_store.add(category, fact, source_context)
         return f"🧠 已录入 Engram：[{category}] {fact} (记录 ID: {engram.id})"
+
+    def _find_existing_engram(self, category: str, fact: str) -> Any | None:
+        if not self.engram_store:
+            return None
+        normalized = " ".join(str(fact or "").split())
+        for engram in self.engram_store.list(category=category):
+            if " ".join(str(engram.fact or "").split()) == normalized:
+                return engram
+        return None
 
     def _handle_recall_engrams(self, args: dict[str, Any]) -> str:
         if not self.engram_store:
@@ -704,19 +772,64 @@ class ToolDispatcher:
         """Handle adding user context overrides to prevent Sentinel false alarms."""
         if not self.user_context_ledger:
             return "内部错误: 暂不支持用户上下文功能，UserContextLedger 未初始化。"
-        
-        check_id = str(args.get("check_id", ""))
-        pattern = str(args.get("pattern", ""))
-        summary = str(args.get("summary", ""))
+
+        check_id = str(args.get("check_id", "")).strip()
+        pattern = str(args.get("pattern", "")).strip()
+        summary = str(args.get("summary", "")).strip()
 
         if not check_id or not summary:
             return "参数错误: check_id 和 summary 是必填字段。"
 
         try:
             self.user_context_ledger.add_context(check_id, pattern, summary)
-            return f"成功: 已将用户上下文 (check_id={check_id}, pattern='{pattern}') 写入 ledger，后续匹配时将自动静默。\n摘要: {summary}"
+            lines = [
+                f"成功: 已将用户上下文 (check_id={check_id}, pattern='{pattern}') 写入 ledger，后续匹配时将自动静默。",
+                f"摘要: {summary}",
+            ]
+            engram_args = self._build_engram_from_user_context(check_id, pattern, summary)
+            if engram_args:
+                lines.append("Engram 同步: " + self._handle_save_engram(engram_args))
+            return "\n".join(lines)
         except Exception as e:
             return f"写入用户上下文失败: {e}"
+
+    def _build_engram_from_user_context(
+        self,
+        check_id: str,
+        pattern: str,
+        summary: str,
+    ) -> dict[str, str] | None:
+        if not self.engram_store:
+            return None
+        normalized_summary = " ".join(summary.split()).strip()
+        if not self._is_durable_user_context(check_id, pattern, normalized_summary):
+            return None
+
+        fact = normalized_summary
+        if fact.startswith("用户确认"):
+            fact = fact.replace("用户确认", "", 1).strip()
+        fact = fact.replace("是其", "是用户的", 1)
+        if pattern and pattern not in fact:
+            fact = f"{pattern}: {fact}"
+
+        category = "topology" if check_id in _TOPOLOGY_CONTEXT_CHECKS else "environment"
+        return {
+            "category": category,
+            "fact": fact,
+            "source_context": (
+                "用户通过 Sentinel 告警确认: "
+                f"check_id={check_id}, pattern={pattern or 'all'}, summary={normalized_summary}"
+            ),
+        }
+
+    def _is_durable_user_context(self, check_id: str, pattern: str, summary: str) -> bool:
+        text = f"{check_id} {pattern} {summary}".lower()
+        has_durable_signal = any(keyword.lower() in text for keyword in _DURABLE_USER_CONTEXT_KEYWORDS)
+        if not has_durable_signal:
+            return False
+        has_ephemeral_signal = any(keyword.lower() in text for keyword in _EPHEMERAL_USER_CONTEXT_KEYWORDS)
+        has_strong_identity = any(keyword.lower() in text for keyword in _STRONG_IDENTITY_KEYWORDS)
+        return not has_ephemeral_signal or has_strong_identity
 
     # ----- Formatting -----
 

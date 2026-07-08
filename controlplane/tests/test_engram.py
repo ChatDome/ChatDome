@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import tempfile
@@ -5,6 +6,8 @@ import unittest
 from pathlib import Path
 
 from chatdome.agent.engram import EngramStore
+from chatdome.agent.tools import ToolDispatcher
+from chatdome.sentinel.user_context import UserContextLedger
 
 
 class TestEngramStore(unittest.TestCase):
@@ -79,6 +82,63 @@ class TestEngramStore(unittest.TestCase):
         self.store.add("environment", "python 版本是 3.10", "test")
         conflicts3 = self.store.find_conflicts("environment", "node 版本是 18")
         self.assertEqual(len(conflicts3), 0, "Should not detect conflict between different software versions")
+
+    def test_sentinel_user_context_syncs_durable_vpn_source_to_engram(self):
+        asyncio.run(self._run_sentinel_user_context_syncs_durable_vpn_source_to_engram())
+
+    async def _run_sentinel_user_context_syncs_durable_vpn_source_to_engram(self):
+        ledger = UserContextLedger(Path(self.temp_dir.name) / "user_context.json")
+        dispatcher = ToolDispatcher(
+            object(),
+            user_context_ledger=ledger,
+            engram_store=self.store,
+        )
+        arguments = json.dumps(
+            {
+                "check_id": "ssh_success_login",
+                "pattern": "45.77.156.221",
+                "summary": "用户确认 45.77.156.221 是其 VPN 节点 IP，通过该 IP SSH 登录属于本人操作",
+            },
+            ensure_ascii=False,
+        )
+
+        first_result = await dispatcher.dispatch("add_user_context", arguments)
+        second_result = await dispatcher.dispatch("add_user_context", arguments)
+
+        self.assertIn("Engram 同步", first_result)
+        self.assertIn("已录入 Engram", first_result)
+        self.assertIn("Engram 已存在", second_result)
+        self.assertEqual(len(ledger.records), 2)
+        engrams = self.store.list(category="topology")
+        self.assertEqual(len(engrams), 1)
+        self.assertIn("45.77.156.221 是用户的 VPN 节点 IP", engrams[0].fact)
+        self.assertIn("ssh_success_login", engrams[0].source_context)
+
+    def test_transient_sentinel_user_context_does_not_sync_to_engram(self):
+        asyncio.run(self._run_transient_sentinel_user_context_does_not_sync_to_engram())
+
+    async def _run_transient_sentinel_user_context_does_not_sync_to_engram(self):
+        ledger = UserContextLedger(Path(self.temp_dir.name) / "user_context.json")
+        dispatcher = ToolDispatcher(
+            object(),
+            user_context_ledger=ledger,
+            engram_store=self.store,
+        )
+        result = await dispatcher.dispatch(
+            "add_user_context",
+            json.dumps(
+                {
+                    "check_id": "open_ports",
+                    "pattern": "Xray",
+                    "summary": "用户确认手动停止了 Xray 代理服务，端口变化属正常操作",
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        self.assertIn("写入 ledger", result)
+        self.assertNotIn("Engram 同步", result)
+        self.assertEqual(self.store.list(), [])
 
 
 if __name__ == '__main__':
