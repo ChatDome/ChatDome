@@ -33,6 +33,11 @@ _TELEGRAM_BOT_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
 _OPENAI_STYLE_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b")
 _SESSION_SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9_.:/@-]{2,}|[\u4e00-\u9fff]{2,}")
 
+_TOOL_RESULT_SNIPPET_CHARS = 500
+_TOOL_ARGUMENT_SNIPPET_CHARS = 600
+_MEMORY_MERGE_THRESHOLD_CHARS = 1500
+_MEMORY_UPDATE_MERGE_THRESHOLD = 2
+
 
 def redact_sensitive_text(text: str) -> str:
     """Redact secrets before conversation summaries are persisted."""
@@ -56,6 +61,114 @@ def _compact_context_value(value: Any, max_chars: int = 240) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 1].rstrip() + "…"
+
+
+def _parse_tool_arguments(arguments: Any) -> Any:
+    if isinstance(arguments, (dict, list)):
+        return arguments
+    if arguments in (None, ""):
+        return {}
+    text = str(arguments).strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return text
+
+
+def _format_tool_argument_value(
+    value: Any,
+    max_chars: int = _TOOL_ARGUMENT_SNIPPET_CHARS,
+) -> str:
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    elif value is None:
+        text = ""
+    else:
+        text = str(value)
+    text = " ".join(redact_sensitive_text(text).split()).replace('"', "'")
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 12].rstrip() + "...(已截断)"
+
+
+def _format_tool_arguments(arguments: Any) -> str:
+    parsed = _parse_tool_arguments(arguments)
+    if isinstance(parsed, dict):
+        parts = []
+        for key, value in parsed.items():
+            key_text = _compact_context_value(key, 80)
+            if not key_text:
+                continue
+            value_text = _format_tool_argument_value(value)
+            if isinstance(value, (dict, list)):
+                parts.append(f"{key_text}={value_text}")
+            else:
+                parts.append(f'{key_text}="{value_text}"')
+        return "; ".join(parts) if parts else "{}"
+    return _format_tool_argument_value(parsed)
+
+
+def _tool_call_id(tool_call: Any) -> str:
+    if not isinstance(tool_call, dict):
+        return ""
+    return str(tool_call.get("call_id") or tool_call.get("id") or "")
+
+
+def _tool_call_function(tool_call: Any) -> tuple[str, Any]:
+    if not isinstance(tool_call, dict):
+        return "unknown_tool", {}
+    function = tool_call.get("function")
+    if not isinstance(function, dict):
+        function = {}
+    name = function.get("name") or tool_call.get("name") or "unknown_tool"
+    arguments = function.get("arguments", tool_call.get("arguments", {}))
+    return str(name), arguments
+
+
+def _format_tool_call_for_compression(tool_call: Any) -> str:
+    name, arguments = _tool_call_function(tool_call)
+    return f"AI 调用工具: {redact_sensitive_text(name)}\n  参数: {_format_tool_arguments(arguments)}"
+
+
+def _format_tool_result_for_compression(
+    message: dict[str, Any],
+    tool_names: dict[str, str],
+) -> str:
+    call_id = str(message.get("tool_call_id") or "")
+    tool_label = tool_names.get(call_id) or call_id or "unknown_tool"
+    content = _truncate_context_text(message.get("content", ""), _TOOL_RESULT_SNIPPET_CHARS)
+    if not content:
+        content = "(empty)"
+    return f"工具结果: {tool_label}\n  结果: {content}"
+
+
+def _format_compression_history(messages: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    tool_names: dict[str, str] = {}
+
+    for msg in messages:
+        role = msg.get("role", "unknown")
+        if role == "user":
+            lines.append(f"User: {msg.get('content')}")
+        elif role == "assistant":
+            if msg.get("content"):
+                lines.append(f"AI: {msg.get('content')}")
+            tool_calls = msg.get("tool_calls") or []
+            if isinstance(tool_calls, dict):
+                tool_calls = [tool_calls]
+            if isinstance(tool_calls, list):
+                for tool_call in tool_calls:
+                    call_id = _tool_call_id(tool_call)
+                    name, _arguments = _tool_call_function(tool_call)
+                    if call_id:
+                        tool_names[call_id] = name
+                    lines.append(_format_tool_call_for_compression(tool_call))
+        elif role == "tool":
+            lines.append(_format_tool_result_for_compression(msg, tool_names))
+
+    return "\n".join(lines)
 
 
 def _extract_search_terms(query: str) -> list[str]:
@@ -431,23 +544,74 @@ class AgentSession:
         except Exception as e:
             logger.error("Failed to write raw log: %s", e)
 
+    async def _build_memory_summary(
+        self,
+        llm_client,
+        existing_summary: str,
+        summary: str,
+    ) -> str:
+        if not existing_summary:
+            return summary
+
+        appended_summary = existing_summary + "\n\n[UPDATE]\n" + summary
+        if (
+            len(existing_summary) <= _MEMORY_MERGE_THRESHOLD_CHARS
+            and existing_summary.count("[UPDATE]") < _MEMORY_UPDATE_MERGE_THRESHOLD
+        ):
+            return appended_summary
+
+        from chatdome.agent.prompts import MEMORY_MERGE_PROMPT
+
+        prompt = (
+            MEMORY_MERGE_PROMPT
+            + "\n\n旧摘要:\n"
+            + existing_summary
+            + "\n\n新摘要:\n"
+            + summary
+        )
+        try:
+            merge_response = await llm_client.chat_completion(
+                [{"role": "user", "content": redact_sensitive_text(prompt)}]
+            )
+            merged = redact_sensitive_text(merge_response.content or "").strip()
+            if merged:
+                return merged
+        except Exception as e:
+            logger.warning("Failed to merge Memory Vault summary: %s", e)
+        return appended_summary
+
+    def _format_compression_log(self, summary: str, compressed_messages: int) -> str:
+        safe_summary = redact_sensitive_text(summary).strip() or "(empty summary)"
+        indented_summary = "\n".join(
+            f"  {line}" if line else ""
+            for line in safe_summary.splitlines()
+        )
+        return (
+            "=== Context Compressed ===\n"
+            f"Chat ID : {self.chat_id}\n"
+            f"Messages: {compressed_messages} compressed\n"
+            "Summary :\n"
+            f"{indented_summary}\n"
+            "=========================================="
+        )
+
     async def summarize_and_trim_history(self, llm_client, max_tokens: int) -> None:
-        """
-        AI Context Compression. If tokens exceed max_tokens, summarize the oldest valid block,
-        save to long-term memory vault, and inject into context as a system string.
-        """
-        if self.estimate_tokens() <= max_tokens:
+        """Compress the oldest valid block when estimated context exceeds the limit."""
+        estimated_tokens = self.estimate_tokens()
+        if estimated_tokens <= max_tokens:
             return
-            
+
         from chatdome.agent.prompts import COMPRESSION_PROMPT
-        
-        # Don't try to compress if there are very few messages
+
         if len(self.messages) <= 3:
             return
-            
-        logger.info("Token limit reached (%d > %d), compressing history...", self.estimate_tokens(), max_tokens)
-        
-        # Safe cut point
+
+        logger.info(
+            "Context window limit reached (%d estimated tokens > %d), compressing history...",
+            estimated_tokens,
+            max_tokens,
+        )
+
         cut_idx = len(self.messages) - 2
         while cut_idx > 1:
             if self.messages[cut_idx].get("role") == "tool":
@@ -456,44 +620,27 @@ class AgentSession:
                 cut_idx -= 1
             else:
                 break
-                
+
         if cut_idx <= 2:
-            self.messages.pop(1)  # Fallback
+            self.messages.pop(1)
             return
-            
+
         messages_to_compress = self.messages[1:cut_idx]
-        history_text = ""
-        for msg in messages_to_compress:
-            role = msg.get("role", "unknown")
-            if role == "user":
-                history_text += f"\nUser: {msg.get('content')}"
-            elif role == "assistant":
-                if msg.get("content"):
-                    history_text += f"\nAI: {msg.get('content')}"
-                if msg.get("tool_calls"):
-                    history_text += f"\nAI Tool Executed: {msg.get('tool_calls')}"
-            elif role == "tool":
-                content = str(msg.get("content", ""))[:500] 
-                history_text += f"\nTool Result Snippet: {content}..."
-                
+        history_text = _format_compression_history(messages_to_compress)
         prompt = COMPRESSION_PROMPT + f"\n\n{redact_sensitive_text(history_text)}"
-        
+
         try:
             summary_response = await llm_client.chat_completion([{"role": "user", "content": prompt}])
             summary = redact_sensitive_text(summary_response.content or "")
-            
-            # Formulate the payload memory
+
             summarized_msg = {
                 "role": "system",
-                "content": f"[System Context: The following is a summary of earlier conversation turns]\n{summary}"
+                "content": f"[System Context: The following is a summary of earlier conversation turns]\n{summary}",
             }
-            
-            # Apply to memory list
+
             self.messages = [self.messages[0], summarized_msg] + self.messages[cut_idx:]
-            
-            # Dump to memory vault
+
             memory_file = memory_file_path(self.chat_id)
-            # Merge if exists
             existing_summary = ""
             if memory_file.exists():
                 try:
@@ -502,16 +649,16 @@ class AgentSession:
                         existing_summary = redact_sensitive_text(data.get("summary", ""))
                 except Exception:
                     pass
-            
-            new_summary = existing_summary + "\n\n[UPDATE]\n" + summary if existing_summary else summary
-                
+
+            new_summary = await self._build_memory_summary(llm_client, existing_summary, summary)
+
             memory_file.parent.mkdir(parents=True, exist_ok=True)
             with open(memory_file, "w", encoding="utf-8") as f:
                 json.dump({"summary": new_summary, "last_updated": time.time()}, f, ensure_ascii=False, indent=2)
-                
-            self.append_raw_log(f"--- Context Compressed ---\n{summary}\n-------------------------")
+
+            self.append_raw_log(self._format_compression_log(summary, len(messages_to_compress)))
             logger.info("Context compressed successfully to Vault.")
-            
+
         except Exception as e:
             logger.error("Failed to compress context: %s. Falling back to simple trim.", e)
             self.messages.pop(1)

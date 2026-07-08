@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -7,18 +8,19 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from chatdome.agent.session import AgentSession, SessionManager, redact_sensitive_text
-from chatdome.agent.prompts import COMPRESSION_PROMPT
+from chatdome.agent.prompts import COMPRESSION_PROMPT, MEMORY_MERGE_PROMPT
 from chatdome.agent.tools import ToolDispatcher
 
 
 class FakeCompressionLLM:
-    def __init__(self, content: str):
-        self.content = content
+    def __init__(self, content):
+        self.contents = list(content) if isinstance(content, list) else [content]
         self.prompts: list[str] = []
 
     async def chat_completion(self, messages):
         self.prompts.append(messages[0]["content"])
-        return SimpleNamespace(content=self.content)
+        index = min(len(self.prompts) - 1, len(self.contents) - 1)
+        return SimpleNamespace(content=self.contents[index])
 
 
 def test_redact_sensitive_text_removes_common_secret_shapes():
@@ -74,11 +76,102 @@ def test_compression_prompt_and_persisted_summary_are_redacted():
 
     assert "敏感值" in COMPRESSION_PROMPT
     assert "[REDACTED]" in COMPRESSION_PROMPT
+    assert "=== Context Compressed ===" in compression_log
+    assert "Chat ID : 123" in compression_log
+    assert "Summary :" in compression_log
     for text in [prompt, memory, compression_log, session_summary]:
         assert raw_bot_token not in text
         assert raw_api_key not in text
         assert raw_summary_key not in text
         assert "[REDACTED]" in text
+
+
+def test_compression_formats_tool_calls_without_python_repr(caplog):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        memory_path = root / "memory" / "123.json"
+        compression_path = root / "compression" / "123.log"
+        session = AgentSession(chat_id=123)
+        session.messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "查看监听端口"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "run_shell_command",
+                            "arguments": json.dumps(
+                                {"command": "ss -tulnp", "reason": "检查监听端口"},
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "tcp LISTEN 0 128 0.0.0.0:8080"},
+            {"role": "assistant", "content": "8080 正在监听。"},
+            {"role": "user", "content": "继续分析"},
+            {"role": "assistant", "content": "继续分析中。"},
+        ]
+        llm = FakeCompressionLLM("摘要：8080 正在监听。")
+
+        with patch("chatdome.agent.session.memory_file_path", return_value=memory_path), patch(
+            "chatdome.agent.session.compression_log_path",
+            return_value=compression_path,
+        ), caplog.at_level(logging.INFO, logger="chatdome.agent.session"):
+            asyncio.run(session.summarize_and_trim_history(llm, max_tokens=1))
+
+    prompt = llm.prompts[0]
+    assert "AI 调用工具: run_shell_command" in prompt
+    assert 'command="ss -tulnp"' in prompt
+    assert 'reason="检查监听端口"' in prompt
+    assert "工具结果: run_shell_command" in prompt
+    assert "0.0.0.0:8080" in prompt
+    assert "AI Tool Executed" not in prompt
+    assert "[{'id'" not in prompt
+    assert "Context window limit reached" in caplog.text
+    assert "Token limit reached" not in caplog.text
+
+
+def test_existing_memory_summary_is_merged_after_repeated_updates():
+    existing_summary = "旧摘要 A\n\n[UPDATE]\n旧摘要 B\n\n[UPDATE]\n旧摘要 C"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        memory_path = root / "memory" / "123.json"
+        compression_path = root / "compression" / "123.log"
+        memory_path.parent.mkdir(parents=True, exist_ok=True)
+        memory_path.write_text(
+            json.dumps({"summary": existing_summary, "last_updated": 1}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        session = AgentSession(chat_id=123)
+        session.messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "排查 8080"},
+            {"role": "assistant", "content": "旧分析"},
+            {"role": "user", "content": "继续"},
+            {"role": "assistant", "content": "继续分析"},
+        ]
+        llm = FakeCompressionLLM(["新摘要：8080 已确认是内部服务。", "合并摘要：8080 是内部服务。"])
+
+        with patch("chatdome.agent.session.memory_file_path", return_value=memory_path), patch(
+            "chatdome.agent.session.compression_log_path",
+            return_value=compression_path,
+        ):
+            asyncio.run(session.summarize_and_trim_history(llm, max_tokens=1))
+
+        memory = json.loads(memory_path.read_text(encoding="utf-8"))["summary"]
+
+    assert len(llm.prompts) == 2
+    assert MEMORY_MERGE_PROMPT.splitlines()[0] in llm.prompts[1]
+    assert "旧摘要 A" in llm.prompts[1]
+    assert "新摘要：8080 已确认是内部服务。" in llm.prompts[1]
+    assert memory == "合并摘要：8080 是内部服务。"
 
 def test_visible_context_uses_messages_and_pending_followups():
     session = AgentSession(chat_id=123)
