@@ -206,6 +206,89 @@ def test_visible_context_uses_messages_and_pending_followups():
     assert "AP-1" in pending.pending_followups[-1]["content"]
 
 
+def test_visible_context_defers_and_flushes_while_agent_runs():
+    session = AgentSession(chat_id=123)
+    session.add_system_message("system")
+    session.agent_running = True
+
+    added = session.add_visible_context(
+        event_type="sentinel_alert_push",
+        user_action="收到 Sentinel 告警推送",
+        assistant_summary="SSH 成功登录告警。",
+        refs={"check_id": "ssh_success_login", "IP": "114.246.239.99"},
+    )
+
+    assert added is False
+    assert len(session.messages) == 1
+    assert session.deferred_visible_context_count() == 1
+
+    session.agent_running = False
+    flushed = session.flush_deferred_visible_contexts()
+
+    assert flushed == 1
+    assert session.deferred_visible_context_count() == 0
+    assert [msg["role"] for msg in session.messages] == ["system", "user", "assistant"]
+    assert "sentinel_alert_push" in session.messages[-2]["content"]
+    assert "114.246.239.99" in session.messages[-1]["content"]
+
+
+def test_deferred_visible_context_queue_is_bounded(caplog):
+    session = AgentSession(chat_id=123)
+    session.agent_running = True
+
+    with caplog.at_level(logging.WARNING, logger="chatdome.agent.session"):
+        for index in range(6):
+            session.add_visible_context(
+                event_type=f"event_{index}",
+                user_action="收到 Sentinel 告警推送",
+                assistant_summary=f"summary {index}",
+            )
+
+    assert session.deferred_visible_context_count() == 5
+    assert "Deferred visible context queue full" in caplog.text
+
+
+def test_deferred_visible_context_waits_until_round_limit_resolves():
+    session = AgentSession(chat_id=123)
+    session.add_system_message("system")
+    session.agent_running = True
+    session.add_visible_context(
+        event_type="sentinel_alert_push",
+        user_action="收到 Sentinel 告警推送",
+        assistant_summary="open_ports 告警。",
+    )
+    session.agent_running = False
+    session.pending_round_limit = True
+
+    assert session.flush_deferred_visible_contexts() == 0
+    assert session.deferred_visible_context_count() == 1
+    assert len(session.messages) == 1
+
+    session.clear_pending_round_limit()
+
+    assert session.flush_deferred_visible_contexts() == 1
+    assert session.deferred_visible_context_count() == 0
+    assert [msg["role"] for msg in session.messages] == ["system", "user", "assistant"]
+
+
+def test_visible_context_runtime_guard_is_not_serialized():
+    session = AgentSession(chat_id=123)
+    session.agent_running = True
+    session.add_visible_context(
+        event_type="sentinel_alert_push",
+        user_action="收到 Sentinel 告警推送",
+        assistant_summary="SSH 成功登录告警。",
+    )
+
+    payload = session.to_snapshot()
+    restored = AgentSession.from_snapshot(payload)
+
+    assert "agent_running" not in payload
+    assert "_deferred_visible_contexts" not in payload
+    assert restored.agent_running is False
+    assert restored.deferred_visible_context_count() == 0
+
+
 def test_search_session_history_tool_reads_existing_messages():
     with tempfile.TemporaryDirectory() as tmp:
         with patch.dict(os.environ, {"CHATDOME_DATA_DIR": tmp}, clear=False):

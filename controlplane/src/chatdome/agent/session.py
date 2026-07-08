@@ -37,6 +37,7 @@ _TOOL_RESULT_SNIPPET_CHARS = 500
 _TOOL_ARGUMENT_SNIPPET_CHARS = 600
 _MEMORY_MERGE_THRESHOLD_CHARS = 1500
 _MEMORY_UPDATE_MERGE_THRESHOLD = 2
+_DEFERRED_VISIBLE_CONTEXT_LIMIT = 5
 
 
 def redact_sensitive_text(text: str) -> str:
@@ -282,6 +283,8 @@ class AgentSession:
     
     # UI Mode
     command_echo: bool = False
+    agent_running: bool = False
+    _deferred_visible_contexts: list[dict[str, Any]] = field(default_factory=list)
 
     def to_snapshot(self) -> dict[str, Any]:
         """Serialize this session to a JSON-safe payload."""
@@ -390,7 +393,7 @@ class AgentSession:
         })
         self.last_active = time.time()
 
-    def add_visible_context(
+    def _build_visible_context_messages(
         self,
         *,
         event_type: str,
@@ -398,8 +401,7 @@ class AgentSession:
         assistant_summary: str,
         refs: dict[str, Any] | None = None,
         max_summary_chars: int = 3500,
-    ) -> bool:
-        """Persist a Telegram-visible interaction as conversation context."""
+    ) -> tuple[str, str]:
         event_label = _compact_context_value(event_type, 80) or "visible_event"
         action = _compact_context_value(user_action, 300) or "用户查看了 Telegram 可见结果"
         user_content = (
@@ -426,6 +428,59 @@ class AgentSession:
         if summary:
             lines.extend(["结果摘要:", summary])
         assistant_content = "\n".join(lines)
+        return user_content, assistant_content
+
+    def _defer_visible_context(
+        self,
+        *,
+        event_type: str,
+        user_action: str,
+        assistant_summary: str,
+        refs: dict[str, Any] | None,
+        max_summary_chars: int,
+    ) -> bool:
+        if len(self._deferred_visible_contexts) >= _DEFERRED_VISIBLE_CONTEXT_LIMIT:
+            logger.warning("Deferred visible context queue full, dropping event: %s", event_type)
+            self.last_active = time.time()
+            return False
+        self._deferred_visible_contexts.append(
+            {
+                "event_type": event_type,
+                "user_action": user_action,
+                "assistant_summary": assistant_summary,
+                "refs": dict(refs or {}),
+                "max_summary_chars": max_summary_chars,
+            }
+        )
+        self.last_active = time.time()
+        return False
+
+    def add_visible_context(
+        self,
+        *,
+        event_type: str,
+        user_action: str,
+        assistant_summary: str,
+        refs: dict[str, Any] | None = None,
+        max_summary_chars: int = 3500,
+    ) -> bool:
+        """Persist a Telegram-visible interaction as conversation context."""
+        if self.agent_running:
+            return self._defer_visible_context(
+                event_type=event_type,
+                user_action=user_action,
+                assistant_summary=assistant_summary,
+                refs=refs,
+                max_summary_chars=max_summary_chars,
+            )
+
+        user_content, assistant_content = self._build_visible_context_messages(
+            event_type=event_type,
+            user_action=user_action,
+            assistant_summary=assistant_summary,
+            refs=refs,
+            max_summary_chars=max_summary_chars,
+        )
 
         if self.pending_approval:
             self.add_pending_followup("user", user_content)
@@ -439,6 +494,25 @@ class AgentSession:
         self.messages.append({"role": "assistant", "content": assistant_content})
         self.last_active = time.time()
         return True
+
+    def flush_deferred_visible_contexts(self) -> int:
+        """Replay deferred visible context entries after the active agent run ends."""
+        if self.agent_running or self.pending_round_limit:
+            return 0
+
+        flushed = 0
+        while self._deferred_visible_contexts:
+            entry = self._deferred_visible_contexts.pop(0)
+            if self.add_visible_context(**entry):
+                flushed += 1
+            else:
+                self._deferred_visible_contexts.insert(0, entry)
+                break
+        return flushed
+
+    def deferred_visible_context_count(self) -> int:
+        """Return the number of queued Telegram-visible context entries."""
+        return len(self._deferred_visible_contexts)
 
     def repair_missing_tool_outputs(self) -> int:
         """Add fail-safe outputs for legacy assistant tool calls missing results."""
@@ -680,6 +754,8 @@ class AgentSession:
         if system_msg:
             self.messages.append(system_msg)
         self.round_count = 0
+        self.agent_running = False
+        self._deferred_visible_contexts.clear()
         self.clear_pending_state()
         self.clear_pending_round_limit()
         self.last_active = time.time()

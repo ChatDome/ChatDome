@@ -413,6 +413,82 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         self.assertFalse(details["ok"])
         self.assertIsNone(session.pending_analysis)
 
+    def test_visible_context_during_compression_is_not_sent_to_react_loop(self):
+        class InjectingLLM:
+            model = "fake-model"
+
+            def __init__(self, session):
+                self.session = session
+                self.calls = []
+
+            async def chat_completion(self, messages, tools=None, response_format=None):
+                self.calls.append(
+                    {
+                        "messages": list(messages),
+                        "tools": tools,
+                        "response_format": response_format,
+                    }
+                )
+                if len(self.calls) == 1:
+                    self.session.add_visible_context(
+                        event_type="sentinel_alert_push",
+                        user_action="收到 Sentinel 告警推送",
+                        assistant_summary="SSH 成功登录告警。",
+                        refs={"check_id": "ssh_success_login", "IP": "114.246.239.99"},
+                    )
+                    await asyncio.sleep(0)
+                    return SimpleNamespace(content="压缩摘要：旧上下文。")
+                return LLMResponse(content="final answer", prompt_tokens=1, completion_tokens=1, total_tokens=2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_path = root / "memory" / "123.json"
+            compression_path = root / "compression" / "123.log"
+            session = AgentSession(chat_id=123)
+            session.messages = [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "旧问题"},
+                {"role": "assistant", "content": "旧回答"},
+                {"role": "user", "content": "继续分析"},
+                {"role": "assistant", "content": "继续分析结果"},
+            ]
+            llm = InjectingLLM(session)
+            agent = object.__new__(Agent)
+            agent.llm = llm
+            agent.config = SimpleNamespace(model="fake-model", max_history_tokens=1, max_rounds_per_turn=10)
+            agent.tools = []
+            agent.session_manager = FakeSessionManager(session)
+            agent.tool_dispatcher = CountingToolDispatcher()
+            agent._persist_session = lambda saved_session: agent.session_manager.save_session(saved_session)
+
+            async def fake_snapshot():
+                return SimpleNamespace(client=llm)
+
+            agent.get_active_llm_snapshot = fake_snapshot
+
+            with patch("chatdome.agent.session.memory_file_path", return_value=memory_path), patch(
+                "chatdome.agent.session.compression_log_path",
+                return_value=compression_path,
+            ), patch("chatdome.agent.tracker.TokenTracker.record_usage"):
+                response = asyncio.run(agent.handle_message(123, "hello"))
+
+        self.assertEqual(response.kind, "reply")
+        self.assertEqual(response.content, "final answer")
+        self.assertEqual(len(llm.calls), 2)
+        react_messages = llm.calls[1]["messages"]
+        encoded_react_messages = json.dumps(react_messages, ensure_ascii=False)
+        self.assertNotIn("sentinel_alert_push", encoded_react_messages)
+        self.assertNotIn("114.246.239.99", encoded_react_messages)
+        self.assertFalse(session.agent_running)
+        self.assertEqual(session.deferred_visible_context_count(), 0)
+        final_index = next(i for i, msg in enumerate(session.messages) if msg.get("content") == "final answer")
+        visible_index = next(
+            i
+            for i, msg in enumerate(session.messages)
+            if "[Telegram 用户可见事件]" in str(msg.get("content", ""))
+        )
+        self.assertLess(final_index, visible_index)
+
     def test_round_limit_reports_llm_rounds_not_tool_results(self):
         session = AgentSession(chat_id=123)
         session.add_user_message("run a multi-step investigation")

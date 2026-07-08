@@ -137,6 +137,25 @@ class Agent:
         except Exception as e:
             logger.warning("Session persistence failed for chat_id=%s: %s", getattr(session, "chat_id", "?"), e)
 
+    async def _run_session_task_scope(self, chat_id: int, session: Any, runner: Any) -> Any:
+        """Guard a live agent task against concurrent visible-context writes."""
+        was_running = bool(getattr(session, "agent_running", False))
+        session.agent_running = True
+        try:
+            return await runner()
+        finally:
+            if was_running:
+                session.agent_running = True
+            else:
+                session.agent_running = False
+                flushed = session.flush_deferred_visible_contexts()
+                if flushed:
+                    logger.info("Flushed %d deferred visible contexts for chat_id=%d", flushed, chat_id)
+                retained = session.deferred_visible_context_count()
+                if retained:
+                    logger.info("Retained %d deferred visible contexts for chat_id=%d", retained, chat_id)
+                self._persist_session(session)
+
     @staticmethod
     def _new_approval_id() -> str:
         """Generate a short user-facing approval identifier."""
@@ -318,43 +337,47 @@ class Agent:
 
         session.add_user_message(user_message)
 
-        # Trim or compress history if needed using the Local Memory Vault
-        try:
-            snapshot = await self.get_active_llm_snapshot()
-        except Exception as e:
-            return AgentResult.reply(await self._llm_unavailable_message(e))
+        async def run_task() -> AgentResult:
+            try:
+                snapshot = await self.get_active_llm_snapshot()
+            except Exception as e:
+                return AgentResult.reply(await self._llm_unavailable_message(e))
 
-        await session.summarize_and_trim_history(snapshot.client, self.config.max_history_tokens)
-        self._persist_session(session)
+            await session.summarize_and_trim_history(snapshot.client, self.config.max_history_tokens)
+            self._persist_session(session)
+            return await self._run_loop_compat(chat_id, session, snapshot)
 
-        return await self._run_loop_compat(chat_id, session, snapshot)
+        return await self._run_session_task_scope(chat_id, session, run_task)
 
     async def resolve_round_limit(self, chat_id: int, action: str) -> AgentResult:
         """Resolve a round-limit confirmation by continuing or abandoning the task."""
         session = self.session_manager.get_or_create(chat_id)
         if not session.pending_round_limit:
-            return AgentResult.reply("\u2139\ufe0f \u5f53\u524d\u6ca1\u6709\u7b49\u5f85\u7ee7\u7eed\u6267\u884c\u7684\u4efb\u52a1\u3002")
+            return AgentResult.reply("ℹ️ 当前没有等待继续执行的任务。")
 
-        normalized_action = (action or "").strip().upper()
-        if normalized_action == "CONTINUE":
+        async def resolve_task() -> AgentResult:
+            normalized_action = (action or "").strip().upper()
+            if normalized_action == "CONTINUE":
+                reached = session.pending_round_count
+                session.clear_pending_round_limit()
+                self._persist_session(session)
+                logger.info("User chose to continue task after %d rounds (chat_id=%d)", reached, chat_id)
+                try:
+                    snapshot = await self.get_active_llm_snapshot()
+                except Exception as e:
+                    return AgentResult.reply(await self._llm_unavailable_message(e))
+                return await self._run_loop_compat(chat_id, session, snapshot)
+
             reached = session.pending_round_count
+            session.task_auto_approve = False
             session.clear_pending_round_limit()
+            final_text = f"已放弃当前任务（累计执行 {reached} 轮）。如需继续，请发送新的指令。"
+            session.add_assistant_message(final_text)
             self._persist_session(session)
-            logger.info("User chose to continue task after %d rounds (chat_id=%d)", reached, chat_id)
-            try:
-                snapshot = await self.get_active_llm_snapshot()
-            except Exception as e:
-                return AgentResult.reply(await self._llm_unavailable_message(e))
-            return await self._run_loop_compat(chat_id, session, snapshot)
+            logger.info("User abandoned task after %d rounds (chat_id=%d)", reached, chat_id)
+            return AgentResult.reply(final_text)
 
-        reached = session.pending_round_count
-        session.task_auto_approve = False
-        session.clear_pending_round_limit()
-        final_text = f"\u5df2\u653e\u5f03\u5f53\u524d\u4efb\u52a1\uff08\u7d2f\u8ba1\u6267\u884c {reached} \u8f6e\uff09\u3002\u5982\u9700\u7ee7\u7eed\uff0c\u8bf7\u53d1\u9001\u65b0\u7684\u6307\u4ee4\u3002"
-        session.add_assistant_message(final_text)
-        self._persist_session(session)
-        logger.info("User abandoned task after %d rounds (chat_id=%d)", reached, chat_id)
-        return AgentResult.reply(final_text)
+        return await self._run_session_task_scope(chat_id, session, resolve_task)
 
     async def resume_session(
         self,
@@ -384,111 +407,114 @@ class Agent:
                 ),
             )
 
-        normalized_action = (action or "").strip().upper()
-        if normalized_action not in {"APPROVE", "APPROVE_TASK", "REJECT"}:
-            normalized_action = "REJECT"
-        followup_summary = self._summarize_pending_followups(session)
-        if normalized_action == "APPROVE_TASK":
-            session.task_auto_approve = True
+        async def resume_task() -> tuple[str, AgentResult]:
+            normalized_action = (action or "").strip().upper()
+            if normalized_action not in {"APPROVE", "APPROVE_TASK", "REJECT"}:
+                normalized_action = "REJECT"
+            followup_summary = self._summarize_pending_followups(session)
+            if normalized_action == "APPROVE_TASK":
+                session.task_auto_approve = True
 
-        current_command_hash = self._command_hash(command)
-        if normalized_action in {"APPROVE", "APPROVE_TASK"} and pending_command_hash != current_command_hash:
-            logger.warning(
-                "Pending approval command hash mismatch: approval_id=%s expected=%s actual=%s",
-                pending_approval_id,
-                pending_command_hash,
-                current_command_hash,
-            )
-            CommandAuditTracker.record_event(
-                "command_approval_hash_mismatch",
-                chat_id=chat_id,
-                approval_id=pending_approval_id,
-                run_id=pending_run_id,
-                tool_call_id=tool_call_id,
-                command=command,
-                expected_command_hash=pending_command_hash,
-                actual_command_hash=current_command_hash,
-                approval_action=normalized_action,
-            )
-            session.task_auto_approve = False
+            current_command_hash = self._command_hash(command)
+            if normalized_action in {"APPROVE", "APPROVE_TASK"} and pending_command_hash != current_command_hash:
+                logger.warning(
+                    "Pending approval command hash mismatch: approval_id=%s expected=%s actual=%s",
+                    pending_approval_id,
+                    pending_command_hash,
+                    current_command_hash,
+                )
+                CommandAuditTracker.record_event(
+                    "command_approval_hash_mismatch",
+                    chat_id=chat_id,
+                    approval_id=pending_approval_id,
+                    run_id=pending_run_id,
+                    tool_call_id=tool_call_id,
+                    command=command,
+                    expected_command_hash=pending_command_hash,
+                    actual_command_hash=current_command_hash,
+                    approval_action=normalized_action,
+                )
+                session.task_auto_approve = False
+                session.clear_pending_state()
+                tool_result_for_llm = (
+                    "审批恢复失败：待执行命令的哈希与审批单不一致。"
+                    "系统已按 fail-safe 策略拒绝执行该命令。"
+                )
+                session.add_tool_result(tool_call_id, tool_result_for_llm)
+                self._persist_session(session)
+                try:
+                    snapshot = await self.get_active_llm_snapshot()
+                except Exception as e:
+                    return "命令校验失败，已拒绝执行。", AgentResult.reply(await self._llm_unavailable_message(e))
+                final_answer = await self._run_loop_compat(chat_id, session, snapshot)
+                return "命令校验失败，已拒绝执行。", final_answer
+
+            # Clear pending state before continuing the normal loop.
             session.clear_pending_state()
-            tool_result_for_llm = (
-                "审批恢复失败：待执行命令的哈希与审批单不一致。"
-                "系统已按 fail-safe 策略拒绝执行该命令。"
-            )
-            session.add_tool_result(tool_call_id, tool_result_for_llm)
             self._persist_session(session)
+
+            if normalized_action == "REJECT":
+                session.task_auto_approve = False
+                logger.info("User rejected command: %s", command)
+                CommandAuditTracker.record_event(
+                    "command_rejected",
+                    chat_id=chat_id,
+                    approval_id=pending_approval_id,
+                    run_id=pending_run_id,
+                    tool_call_id=tool_call_id,
+                    command=command,
+                    command_hash=pending_command_hash,
+                    approval_action="REJECT",
+                )
+                tool_result_for_llm = "由于存在安全风险，用户已拒绝执行该命令。请提供其他解决方案或向用户解释。"
+                if followup_summary:
+                    tool_result_for_llm += (
+                        "\n\n[审批等待阶段的补充对话]\n"
+                        f"{followup_summary}"
+                    )
+                session.add_tool_result(tool_call_id, tool_result_for_llm)
+                raw_result = "用户已拒绝执行该命令。"
+            else:
+                logger.info("User approved command: %s", command)
+                CommandAuditTracker.record_event(
+                    "command_approved",
+                    chat_id=chat_id,
+                    approval_id=pending_approval_id,
+                    run_id=pending_run_id,
+                    tool_call_id=tool_call_id,
+                    command=command,
+                    command_hash=pending_command_hash,
+                    approval_action=normalized_action,
+                )
+                try:
+                    # Bypass Reviewer, go straight to sandbox
+                    res = await self.tool_dispatcher.sandbox.execute_shell_command(
+                        command,
+                        "User Approved",
+                        chat_id=chat_id,
+                        tool_call_id=tool_call_id,
+                    )
+                    raw_result = self.tool_dispatcher._format_command_result(res)
+                except Exception as e:
+                    raw_result = f"执行过程中发生异常: {e}"
+
+                tool_result_for_llm = raw_result
+                if followup_summary:
+                    tool_result_for_llm += (
+                        "\n\n[审批等待阶段的补充对话]\n"
+                        f"{followup_summary}"
+                    )
+                session.add_tool_result(tool_call_id, tool_result_for_llm)
+            self._persist_session(session)
+
             try:
                 snapshot = await self.get_active_llm_snapshot()
             except Exception as e:
-                return "命令校验失败，已拒绝执行。", AgentResult.reply(await self._llm_unavailable_message(e))
+                return raw_result, AgentResult.reply(await self._llm_unavailable_message(e))
             final_answer = await self._run_loop_compat(chat_id, session, snapshot)
-            return "命令校验失败，已拒绝执行。", final_answer
+            return raw_result, final_answer
 
-        # Clear pending state before continuing the normal loop.
-        session.clear_pending_state()
-        self._persist_session(session)
-
-        if normalized_action == "REJECT":
-            session.task_auto_approve = False
-            logger.info("User rejected command: %s", command)
-            CommandAuditTracker.record_event(
-                "command_rejected",
-                chat_id=chat_id,
-                approval_id=pending_approval_id,
-                run_id=pending_run_id,
-                tool_call_id=tool_call_id,
-                command=command,
-                command_hash=pending_command_hash,
-                approval_action="REJECT",
-            )
-            tool_result_for_llm = "由于存在安全风险，用户已拒绝执行该命令。请提供其他解决方案或向用户解释。"
-            if followup_summary:
-                tool_result_for_llm += (
-                    "\n\n[审批等待阶段的补充对话]\n"
-                    f"{followup_summary}"
-                )
-            session.add_tool_result(tool_call_id, tool_result_for_llm)
-            raw_result = "用户已拒绝执行该命令。"
-        else:
-            logger.info("User approved command: %s", command)
-            CommandAuditTracker.record_event(
-                "command_approved",
-                chat_id=chat_id,
-                approval_id=pending_approval_id,
-                run_id=pending_run_id,
-                tool_call_id=tool_call_id,
-                command=command,
-                command_hash=pending_command_hash,
-                approval_action=normalized_action,
-            )
-            try:
-                # Bypass Reviewer, go straight to sandbox
-                res = await self.tool_dispatcher.sandbox.execute_shell_command(
-                    command,
-                    "User Approved",
-                    chat_id=chat_id,
-                    tool_call_id=tool_call_id,
-                )
-                raw_result = self.tool_dispatcher._format_command_result(res)
-            except Exception as e:
-                raw_result = f"执行过程中发生异常: {e}"
-
-            tool_result_for_llm = raw_result
-            if followup_summary:
-                tool_result_for_llm += (
-                    "\n\n[审批等待阶段的补充对话]\n"
-                    f"{followup_summary}"
-                )
-            session.add_tool_result(tool_call_id, tool_result_for_llm)
-        self._persist_session(session)
-
-        try:
-            snapshot = await self.get_active_llm_snapshot()
-        except Exception as e:
-            return raw_result, AgentResult.reply(await self._llm_unavailable_message(e))
-        final_answer = await self._run_loop_compat(chat_id, session, snapshot)
-        return raw_result, final_answer
+        return await self._run_session_task_scope(chat_id, session, resume_task)
 
     async def get_pending_approval_details(
         self,
@@ -805,7 +831,7 @@ class Agent:
 
             try:
                 response = await llm.chat_completion(
-                    messages=session.messages,
+                    messages=list(session.messages),
                     tools=self.tools,
                 )
             except Exception as e:
