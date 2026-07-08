@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import nullcontext
 import importlib.util
+import json
 import logging
 import os
 import subprocess
@@ -1012,12 +1013,23 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertIn("/model_list", fake_out.text)
 
     def test_terminal_model_commands_list_and_switch(self):
+        data = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        data["chatdome"]["ai_profiles"]["other"] = {
+            "provider": "openai",
+            "api_mode": "openai_api",
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-4o-mini",
+            "api_key": "sk-other",
+        }
+        self.config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
         class FakeManager:
             def __init__(self):
-                self.switched = []
+                self.active = "base"
+                self.reloaded = []
 
             def get_active_profile_name(self):
-                return "base"
+                return self.active
 
             def list_profiles(self):
                 return [
@@ -1029,7 +1041,7 @@ class ChatDomeCLITests(unittest.TestCase):
                         base_url="https://api.openai.com/v1",
                         key_ref="configured fp=12345678",
                         status="ready",
-                        active=True,
+                        active=self.active == "base",
                     ),
                     SimpleNamespace(
                         name="other",
@@ -1039,20 +1051,13 @@ class ChatDomeCLITests(unittest.TestCase):
                         base_url="https://api.openai.com/v1",
                         key_ref="configured fp=87654321",
                         status="ready",
-                        active=False,
+                        active=self.active == "other",
                     ),
                 ]
 
-            async def switch_profile(self, profile_name):
-                self.switched.append(profile_name)
-                return SimpleNamespace(
-                    profile_name=profile_name,
-                    profile=SimpleNamespace(
-                        provider="openai",
-                        api_mode="openai_api",
-                        model="gpt-4o-mini",
-                    ),
-                )
+            async def reload_profiles(self, profiles, active_profile):
+                self.reloaded.append((profiles, active_profile))
+                self.active = active_profile
 
         class FakeAgent:
             def __init__(self):
@@ -1066,11 +1071,17 @@ class ChatDomeCLITests(unittest.TestCase):
             asyncio.run(self.cli._handle_terminal_command(runtime, "/model other"))
             asyncio.run(self.cli._handle_terminal_command(runtime, "/llm_list"))
 
-        self.assertEqual(fake_agent.llm_manager.switched, ["other"])
+        written = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(written["chatdome"]["active_ai_profile"], "other")
+        reload_payload = json.loads(self.reload_request_path.read_text(encoding="utf-8"))
+        self.assertEqual(reload_payload["domains"], ["llm"])
+        self.assertEqual(reload_payload["source"], "terminal:model:switched")
+        self.assertEqual(fake_agent.llm_manager.reloaded[0][1], "other")
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
         self.assertIn("Switch: /model <profile_name>", printed)
         self.assertIn("  /model other", printed)
-        self.assertIn("model switched for this terminal session: other", printed)
+        self.assertIn("model switched: other", printed)
+        self.assertIn("Active: other", printed)
 
     def test_set_admin_chat_ids_writes_telegram_config(self):
         with patch("builtins.print") as output:

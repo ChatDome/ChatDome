@@ -671,7 +671,7 @@ def _build_terminal_command_registry(
     registry.register(CommandDef("/stop", "Stop current task", "control", handler=stop_handler))
     registry.register(CommandDef("/env", "Show environment summary", "context", handler=env_handler))
     registry.register(CommandDef("/audit", "Show recent command audit events", "context", args_hint="[N]", handler=audit_handler))
-    registry.register(CommandDef("/model", "Switch current model profile", "model", aliases=("/llm",), args_hint="<profile>", handler=model_handler, completer=_terminal_model_completion_items))
+    registry.register(CommandDef("/model", "Switch active model profile", "model", aliases=("/llm",), args_hint="<profile>", handler=model_handler, completer=_terminal_model_completion_items))
     registry.register(CommandDef("/model_list", "Show configured model profiles", "model", aliases=("/llm_list", "/l"), keywords=("list", "llm"), handler=model_list_handler))
     registry.register(CommandDef("/details", "Show pending approval details", "approval", args_hint="[full]", handler=details_handler))
     registry.register(CommandDef("/confirm", "Approve pending command", "approval", handler=confirm_handler))
@@ -963,7 +963,16 @@ async def _switch_terminal_model(runtime: _TerminalChatRuntime, profile_name: st
         _print_chatdome_message(_format_terminal_model_profiles(runtime))
         return
     try:
-        snapshot = await manager.switch_profile(profile_name)
+        result = await _profile_admin_service("terminal:model").set_active_profile(
+            profile_name,
+            ProfileActor(source="terminal:model", chat_id=runtime.chat_id),
+        )
+        config = _load_terminal_chat_config()
+        reloader = getattr(manager, "reload_profiles", None)
+        if callable(reloader):
+            reload_result = reloader(config.ai_profiles, config.active_ai_profile)
+            if inspect.isawaitable(reload_result):
+                await reload_result
     except Exception as exc:
         _print_chatdome_message(
             _status_label("❌", "[x]", "model switch failed.")
@@ -972,9 +981,9 @@ async def _switch_terminal_model(runtime: _TerminalChatRuntime, profile_name: st
         )
         return
 
-    profile = snapshot.profile
+    profile = config.ai_profiles[result.profile_name]
     _print_chatdome_message(
-        _status_label("✅", "[ok]", f"model switched for this terminal session: {snapshot.profile_name}")
+        _status_label("✅", "[ok]", f"model switched: {result.profile_name}")
         + f"\n{profile.provider}/{profile.api_mode}, model={profile.model}"
     )
 
