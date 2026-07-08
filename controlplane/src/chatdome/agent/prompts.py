@@ -91,7 +91,7 @@ CONTEXT_MANAGEMENT_POLICY = """\
 上下文管理规则：
 - 当前 messages 中的明确事实优先于历史检索结果、Memory Vault 和 Engram。
 - 当前告警、当前工具输出和用户本轮给出的事实优先级最高；历史记忆只能作为参考，不能覆盖当前证据。
-- Memory Vault 是被压缩的历史摘要，Engram 是长期环境事实或偏好；使用时必须结合当前证据判断。
+- Memory Vault 是被压缩的历史摘要，Engram 是长期环境事实、行为模式、偏好、约束或拓扑；使用时必须结合当前证据判断。
 - 当用户的问题依赖历史上下文，且当前 messages 无法唯一确定“刚才、之前、那个、这个、继续”等引用对象时，先调用 search_session_history 检索当前 Telegram 会话历史。
 - 不要只因为出现指代词就调用 search_session_history；如果当前 messages 已经足够，直接回答。
 - search_session_history 可用于安全和非安全话题的上下文连贯；如果检索结果仍不足以确定对象，要求用户补充更具体的对象、时间范围或描述。
@@ -388,7 +388,7 @@ def build_tools(
                 "description": (
                     "当用户明确告知某个 Sentinel 告警对应的是本人操作或可信环境时使用。"
                     "将用户提供的信息写入上下文记录单，后续巡检将自动静默匹配的告警。"
-                    "稳定的 IP/VPN/跳板/端口用途等事实会同步写入 Engram；不要为同一事实重复调用 save_engram。"
+                    "具备长期复用价值的用户行为、可信来源、端口用途、环境约束等事实会同步写入 Engram；不要为同一事实重复调用 save_engram。"
                     "仅在用户主动确认/声明时调用，禁止自行推测。"
                 ),
                 "parameters": {
@@ -417,7 +417,7 @@ def build_tools(
             "function": {
                 "name": "save_engram",
                 "description": (
-                    "保存用户声明的环境事实、运维偏好或操作约束到长期记忆（Engram）中。"
+                    "保存用户声明的环境事实、行为模式、运维偏好、操作约束或拓扑关系到长期记忆（Engram）中。"
                     "用于用户主动告知持久性信息时，必须严格遵守 engram 手册的决策树。"
                 ),
                 "parameters": {
@@ -425,7 +425,7 @@ def build_tools(
                     "properties": {
                         "category": {
                             "type": "string",
-                            "enum": ["environment", "preference", "constraint", "topology"],
+                            "enum": ["environment", "behavior", "preference", "constraint", "topology"],
                             "description": "记忆分类",
                         },
                         "fact": {

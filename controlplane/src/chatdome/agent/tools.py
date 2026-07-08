@@ -26,33 +26,30 @@ from chatdome.sentinel.alert_controls import format_alert_push_status, parse_ale
 
 logger = logging.getLogger(__name__)
 
-_DURABLE_USER_CONTEXT_KEYWORDS = (
-    "vpn",
-    "节点",
-    "跳板",
-    "堡垒",
-    "代理",
-    "内网",
-    "办公",
-    "公司",
-    "家里",
+_LONG_TERM_CONTEXT_SIGNALS = (
+    "通常",
+    "一般",
+    "经常",
+    "常用",
+    "日常",
     "固定",
     "长期",
     "常驻",
-    "网关",
-    "负载均衡",
-    "反代",
-    "监控",
-    "备份",
-    "可信",
+    "默认",
+    "总是",
+    "每次",
+    "习惯",
+    "偏好",
 )
-_EPHEMERAL_USER_CONTEXT_KEYWORDS = (
+_TRANSIENT_CONTEXT_SIGNALS = (
     "刚才",
     "刚刚",
     "临时",
     "今天",
     "本次",
     "这次",
+    "这条",
+    "刚发生",
     "手动重启",
     "重启",
     "停止",
@@ -63,14 +60,81 @@ _EPHEMERAL_USER_CONTEXT_KEYWORDS = (
     "排查",
     "维护",
 )
-_STRONG_IDENTITY_KEYWORDS = (
-    "vpn",
+_IDENTITY_CONTEXT_SIGNALS = (
+    "我的",
+    "本人",
+    "自己",
+    "我们",
+    "可信",
+    "白名单",
+    "允许",
+    "合法",
+    "正常来源",
+    "正常操作",
+)
+_BEHAVIOR_CONTEXT_SIGNALS = (
+    "通过",
+    "使用",
+    "登录",
+    "连接",
+    "访问",
+    "发布",
+    "巡检",
+    "备份",
+    "同步",
+    "拉取",
+    "推送",
+)
+_TOPOLOGY_CONTEXT_SIGNALS = (
+    "ip",
+    "网段",
+    "端口",
     "节点",
     "跳板",
     "堡垒",
+    "vpn",
     "内网",
-    "固定",
-    "可信",
+    "公网",
+    "网关",
+    "负载均衡",
+    "反代",
+    "域名",
+    "地址",
+    "服务",
+    "机器",
+    "服务器",
+    "容器",
+)
+_ENVIRONMENT_CONTEXT_SIGNALS = (
+    "路径",
+    "目录",
+    "配置",
+    "软件",
+    "组件",
+    "版本",
+    "进程",
+    "服务",
+    "数据库",
+    "中间件",
+)
+_CONSTRAINT_CONTEXT_SIGNALS = (
+    "不要",
+    "不能",
+    "禁止",
+    "避免",
+    "只允许",
+    "必须",
+    "不得",
+)
+_PREFERENCE_CONTEXT_SIGNALS = (
+    "优先",
+    "偏好",
+    "习惯",
+    "希望",
+    "默认",
+    "尽量",
+    "回复",
+    "格式",
 )
 _TOPOLOGY_CONTEXT_CHECKS = {
     "ssh_success_login",
@@ -78,6 +142,7 @@ _TOPOLOGY_CONTEXT_CHECKS = {
     "active_connections",
     "open_ports",
 }
+
 
 
 class PendingApprovalError(Exception):
@@ -805,14 +870,8 @@ class ToolDispatcher:
         if not self._is_durable_user_context(check_id, pattern, normalized_summary):
             return None
 
-        fact = normalized_summary
-        if fact.startswith("用户确认"):
-            fact = fact.replace("用户确认", "", 1).strip()
-        fact = fact.replace("是其", "是用户的", 1)
-        if pattern and pattern not in fact:
-            fact = f"{pattern}: {fact}"
-
-        category = "topology" if check_id in _TOPOLOGY_CONTEXT_CHECKS else "environment"
+        category = self._classify_user_context_engram(check_id, pattern, normalized_summary)
+        fact = self._normalize_user_context_fact(pattern, normalized_summary)
         return {
             "category": category,
             "fact": fact,
@@ -824,12 +883,53 @@ class ToolDispatcher:
 
     def _is_durable_user_context(self, check_id: str, pattern: str, summary: str) -> bool:
         text = f"{check_id} {pattern} {summary}".lower()
-        has_durable_signal = any(keyword.lower() in text for keyword in _DURABLE_USER_CONTEXT_KEYWORDS)
-        if not has_durable_signal:
+        if not text.strip():
             return False
-        has_ephemeral_signal = any(keyword.lower() in text for keyword in _EPHEMERAL_USER_CONTEXT_KEYWORDS)
-        has_strong_identity = any(keyword.lower() in text for keyword in _STRONG_IDENTITY_KEYWORDS)
-        return not has_ephemeral_signal or has_strong_identity
+
+        has_long_term_signal = self._contains_any(text, _LONG_TERM_CONTEXT_SIGNALS)
+        has_transient_signal = self._contains_any(text, _TRANSIENT_CONTEXT_SIGNALS)
+        if has_transient_signal and not has_long_term_signal:
+            return False
+
+        has_identity_signal = self._contains_any(text, _IDENTITY_CONTEXT_SIGNALS)
+        has_behavior_signal = self._contains_any(text, _BEHAVIOR_CONTEXT_SIGNALS)
+        has_topology_signal = self._contains_any(text, _TOPOLOGY_CONTEXT_SIGNALS)
+        has_environment_signal = self._contains_any(text, _ENVIRONMENT_CONTEXT_SIGNALS)
+        has_declarative_signal = any(token in summary for token in ("是", "属于", "用于", "对应", "负责", "作为"))
+
+        return (
+            has_long_term_signal
+            or (has_declarative_signal and (has_identity_signal or has_behavior_signal or has_topology_signal or has_environment_signal))
+            or (has_identity_signal and (has_behavior_signal or has_topology_signal))
+        )
+
+    def _classify_user_context_engram(self, check_id: str, pattern: str, summary: str) -> str:
+        text = f"{check_id} {pattern} {summary}".lower()
+        if self._contains_any(text, _CONSTRAINT_CONTEXT_SIGNALS):
+            return "constraint"
+        if self._contains_any(text, _PREFERENCE_CONTEXT_SIGNALS):
+            return "preference"
+        if self._contains_any(text, _BEHAVIOR_CONTEXT_SIGNALS):
+            return "behavior"
+        if check_id in _TOPOLOGY_CONTEXT_CHECKS or self._contains_any(text, _TOPOLOGY_CONTEXT_SIGNALS):
+            return "topology"
+        if self._contains_any(text, _ENVIRONMENT_CONTEXT_SIGNALS):
+            return "environment"
+        return "behavior"
+
+    def _normalize_user_context_fact(self, pattern: str, summary: str) -> str:
+        fact = summary
+        if fact.startswith("用户确认"):
+            fact = fact.replace("用户确认", "", 1).strip()
+        fact = fact.replace("是其", "是用户的", 1)
+        fact = fact.replace("属于本人操作", "属于用户本人操作", 1)
+        if pattern and pattern not in fact:
+            fact = f"{pattern}: {fact}"
+        return fact
+
+    @staticmethod
+    def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+        return any(keyword.lower() in text for keyword in keywords)
 
     # ----- Formatting -----
 
