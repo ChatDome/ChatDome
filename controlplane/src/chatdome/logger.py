@@ -14,6 +14,7 @@ import sys
 from typing import Optional
 
 _log_origin = contextvars.ContextVar("chatdome_log_origin", default="")
+_CHATDOME_ORIGIN_FACTORY_ATTR = "_chatdome_origin_record_factory"
 
 
 class log_origin:
@@ -38,16 +39,32 @@ def current_log_origin() -> str:
     return _log_origin.get()
 
 
+def _install_origin_record_factory() -> None:
+    factory = logging.getLogRecordFactory()
+    if getattr(factory, _CHATDOME_ORIGIN_FACTORY_ATTR, False):
+        return
+
+    def chatdome_record_factory(*args, **kwargs):
+        record = factory(*args, **kwargs)
+        if not hasattr(record, "chatdome_origin"):
+            record.chatdome_origin = _log_origin.get()
+        return record
+
+    setattr(chatdome_record_factory, _CHATDOME_ORIGIN_FACTORY_ATTR, True)
+    logging.setLogRecordFactory(chatdome_record_factory)
+
+
 def _is_sentinel_record(record: logging.LogRecord) -> bool:
     return (
-        getattr(record, "chatdome_origin", "") == "sentinel"
+        getattr(record, "chatdome_origin", _log_origin.get()) == "sentinel"
         or record.name.startswith("chatdome.sentinel")
     )
 
 
 class OriginFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        record.chatdome_origin = _log_origin.get()
+        if not hasattr(record, "chatdome_origin"):
+            record.chatdome_origin = _log_origin.get()
         return True
 
 
@@ -59,6 +76,50 @@ class ExcludeSentinelFilter(logging.Filter):
 class SentinelOnlyFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         return _is_sentinel_record(record)
+
+
+class ChatDomeFileHandler(RotatingFileHandler):
+    """Rotating file handler that reopens files replaced by external rotation."""
+
+    @staticmethod
+    def _same_file(path_stat: os.stat_result, stream_stat: os.stat_result) -> bool:
+        return (
+            path_stat.st_dev == stream_stat.st_dev
+            and path_stat.st_ino == stream_stat.st_ino
+        )
+
+    def _should_reopen(self) -> bool:
+        if self.stream is None:
+            return True
+        try:
+            path_stat = os.stat(self.baseFilename)
+            stream_stat = os.fstat(self.stream.fileno())
+        except (OSError, ValueError):
+            return True
+        return not self._same_file(path_stat, stream_stat)
+
+    def _reopen_stream(self) -> None:
+        Path(self.baseFilename).parent.mkdir(parents=True, exist_ok=True)
+        if self.stream is not None:
+            try:
+                self.stream.flush()
+            except (OSError, ValueError):
+                pass
+            try:
+                self.stream.close()
+            except (OSError, ValueError):
+                pass
+            self.stream = None
+        if not self.delay:
+            self.stream = self._open()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if self._should_reopen():
+                self._reopen_stream()
+            super().emit(record)
+        except Exception:
+            self.handleError(record)
 
 
 class ChatDomeFormatter(logging.Formatter):
@@ -141,10 +202,10 @@ class ChatDomeFormatter(logging.Formatter):
         return formatted
 
 
-def _build_file_handler(log_file: str, formatter: logging.Formatter) -> RotatingFileHandler:
+def _build_file_handler(log_file: str, formatter: logging.Formatter) -> ChatDomeFileHandler:
     log_path = Path(log_file).expanduser()
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    file_handler = RotatingFileHandler(
+    file_handler = ChatDomeFileHandler(
         log_path,
         maxBytes=10 * 1024 * 1024,
         backupCount=5,
@@ -169,6 +230,7 @@ def _stream_supports_color(stream: object) -> bool:
 
 def setup_logging(level: int = logging.INFO, use_colors: Optional[bool] = None) -> None:
     """Configures the global logging system with ChatDome aesthetics."""
+    _install_origin_record_factory()
     handler = logging.StreamHandler(sys.stdout)
     if use_colors is None:
         use_colors = _stream_supports_color(sys.stdout)

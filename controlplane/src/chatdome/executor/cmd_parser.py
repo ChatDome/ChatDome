@@ -8,21 +8,121 @@ from typing import Any
 
 
 COMMAND_DESCRIPTIONS = {
+    # --- 危险/破坏性命令 ---
     "rm": "删除文件或目录",
     "rmdir": "删除空目录",
+    "dd": "底层块设备或文件写入",
+    "shred": "安全擦除文件内容",
+    "wipe": "安全擦除文件内容",
+    # --- 文件操作 ---
     "mv": "移动或重命名文件",
     "cp": "复制文件",
+    "ln": "创建文件链接",
+    "touch": "创建文件或更新时间戳",
+    "truncate": "截断文件到指定大小",
+    "tee": "将输入写入文件",
+    # --- 权限/所有权 ---
     "chmod": "修改文件权限",
     "chown": "修改文件所有者",
+    "chgrp": "修改文件所属组",
+    # --- 进程 ---
     "kill": "终止进程",
     "pkill": "按名称终止进程",
+    "killall": "按名称终止所有匹配进程",
+    # --- 服务/系统 ---
     "systemctl": "控制系统服务",
-    "dd": "底层块设备或文件写入",
+    "service": "控制系统服务（旧式）",
+    "shutdown": "关机或重启系统",
+    "reboot": "重启系统",
+    "init": "切换运行级别",
+    # --- 网络 ---
     "wget": "网络下载",
     "curl": "网络请求或下载",
     "iptables": "修改防火墙规则",
-    "crontab": "管理定时任务",
+    "ip": "网络配置",
+    "ifconfig": "网络接口配置",
+    "nft": "修改 nftables 防火墙规则",
+    "ufw": "管理防火墙规则",
+    # --- 账号/认证 ---
     "passwd": "修改用户密码",
+    "useradd": "创建用户账号",
+    "userdel": "删除用户账号",
+    "usermod": "修改用户账号",
+    "groupadd": "创建用户组",
+    "groupdel": "删除用户组",
+    "visudo": "编辑 sudoers 配置",
+    # --- 定时任务 ---
+    "crontab": "管理定时任务",
+    "at": "安排一次性定时任务",
+    # --- 只读/查询命令 ---
+    "stat": "查询文件或文件系统元信息",
+    "ls": "列出目录内容",
+    "cat": "显示文件内容",
+    "less": "分页查看文件内容",
+    "more": "分页查看文件内容",
+    "head": "显示文件开头内容",
+    "tail": "显示文件末尾内容",
+    "grep": "搜索文本内容",
+    "find": "搜索文件",
+    "du": "统计磁盘占用",
+    "df": "查看磁盘空间",
+    "ps": "查看进程列表",
+    "top": "实时查看系统资源",
+    "htop": "实时查看系统资源（交互式）",
+    "netstat": "查看网络连接状态",
+    "ss": "查看 socket 连接状态",
+    "lsof": "列出打开的文件",
+    "who": "显示登录用户",
+    "w": "显示登录用户及活动",
+    "last": "显示登录历史",
+    "id": "显示用户身份",
+    "uname": "显示系统信息",
+    "uptime": "显示系统运行时间",
+    "free": "显示内存使用情况",
+    "env": "显示或设置环境变量",
+    "echo": "输出文本",
+    "printf": "格式化输出文本",
+    "date": "显示或设置系统时间",
+    "which": "查找命令路径",
+    "whereis": "查找命令及相关文件",
+    "file": "识别文件类型",
+    "wc": "统计文件行数/字数/字节数",
+    "md5sum": "计算 MD5 校验和",
+    "sha256sum": "计算 SHA256 校验和",
+    "journalctl": "查看系统日志",
+    "dmesg": "查看内核日志",
+    "lspci": "列出 PCI 设备",
+    "lsblk": "列出块设备",
+    "mount": "挂载文件系统",
+    "umount": "卸载文件系统",
+    # --- 包管理 ---
+    "apt": "管理 APT 软件包",
+    "apt-get": "管理 APT 软件包",
+    "yum": "管理 YUM 软件包",
+    "dnf": "管理 DNF 软件包",
+    "pip": "管理 Python 软件包",
+    "pip3": "管理 Python 3 软件包",
+    "npm": "管理 Node.js 软件包",
+    # --- 文本处理 ---
+    "sed": "流编辑器（可修改文件）",
+    "awk": "文本处理工具",
+    "sort": "排序文本",
+    "uniq": "去重文本行",
+    "cut": "截取文本字段",
+    "tr": "转换或删除字符",
+    # --- 其他 ---
+    "bash": "执行 bash 脚本或命令",
+    "sh": "执行 sh 脚本或命令",
+    "python": "执行 Python 脚本",
+    "python3": "执行 Python 3 脚本",
+    "ssh": "远程 SSH 连接",
+    "scp": "通过 SSH 复制文件",
+    "rsync": "远程或本地文件同步",
+    "tar": "归档或解压文件",
+    "gzip": "压缩或解压文件",
+    "gunzip": "解压 gzip 文件",
+    "zip": "压缩文件",
+    "unzip": "解压 zip 文件",
 }
 
 WRAPPER_COMMANDS = {"sudo", "doas", "command"}
@@ -347,8 +447,10 @@ def _parse_passwd(args: list[str]) -> tuple[list[dict[str, str]], list[str], lis
 
 
 def _parse_unknown(args: list[str]) -> tuple[list[dict[str, str]], list[str], list[str], bool]:
-    entries = [_entry(arg, "参数", "原始命令参数") for arg in args]
-    return entries, _non_flag_args(args), [], False
+    # flags 已经在 _flag_entries() 中单独记录，这里只处理非 flag 参数，避免重复
+    non_flags = _non_flag_args(args)
+    entries = [_entry(arg, "参数", "命令参数") for arg in non_flags]
+    return entries, non_flags, [], False
 
 
 def _target_role(target: str) -> str:

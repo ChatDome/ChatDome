@@ -16,6 +16,15 @@ class _FakeStream:
         return self._isatty
 
 
+class _CaptureHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
 class LoggerTests(unittest.TestCase):
     @staticmethod
     def _clear_root_handlers() -> None:
@@ -117,6 +126,73 @@ class LoggerTests(unittest.TestCase):
             self.assertIn("main-only-entry", main_text)
             self.assertNotIn("sentinel-no-fallback", main_text)
             self.assertNotIn("sentinel-origin-no-fallback", main_text)
+
+    def test_origin_tag_is_attached_when_record_is_created(self):
+        capture = _CaptureHandler()
+        try:
+            with patch.dict(os.environ, {"CHATDOME_LOG_FILE": "", "CHATDOME_SENTINEL_LOG_FILE": ""}, clear=False):
+                setup_logging(use_colors=False)
+            logging.getLogger().addHandler(capture)
+            with log_origin("sentinel"):
+                logging.getLogger("chatdome.executor.sandbox").info("captured-origin")
+        finally:
+            self._clear_root_handlers()
+
+        self.assertEqual(len(capture.records), 1)
+        self.assertEqual(getattr(capture.records[0], "chatdome_origin", ""), "sentinel")
+
+    def test_file_handler_reopens_closed_stream(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            main_log = Path(tmp) / "chatdome.log"
+            env = {
+                "CHATDOME_LOG_FILE": str(main_log),
+                "CHATDOME_SENTINEL_LOG_FILE": "",
+            }
+            try:
+                with patch.dict(os.environ, env, clear=False):
+                    setup_logging(use_colors=False)
+                    logging.getLogger("chatdome.agent.core").info("before-close")
+                    self._flush_root_handlers()
+                    file_handler = next(
+                        handler
+                        for handler in logging.getLogger().handlers
+                        if getattr(handler, "baseFilename", "") == str(main_log)
+                    )
+                    file_handler.stream.close()
+                    logging.getLogger("chatdome.agent.core").info("after-close")
+                    self._flush_root_handlers()
+            finally:
+                self._clear_root_handlers()
+
+            main_text = main_log.read_text(encoding="utf-8")
+            self.assertIn("before-close", main_text)
+            self.assertIn("after-close", main_text)
+
+    @unittest.skipIf(os.name == "nt", reason="requires POSIX rename of an open log file")
+    def test_file_handler_reopens_after_external_log_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            main_log = Path(tmp) / "chatdome.log"
+            rotated_log = Path(tmp) / "chatdome.log.1"
+            env = {
+                "CHATDOME_LOG_FILE": str(main_log),
+                "CHATDOME_SENTINEL_LOG_FILE": "",
+            }
+            try:
+                with patch.dict(os.environ, env, clear=False):
+                    setup_logging(use_colors=False)
+                    logging.getLogger("chatdome.agent.core").info("before-replace")
+                    self._flush_root_handlers()
+                    main_log.rename(rotated_log)
+                    main_log.write_text("", encoding="utf-8")
+                    logging.getLogger("chatdome.agent.core").info("after-replace")
+                    self._flush_root_handlers()
+            finally:
+                self._clear_root_handlers()
+
+            self.assertIn("before-replace", rotated_log.read_text(encoding="utf-8"))
+            main_text = main_log.read_text(encoding="utf-8")
+            self.assertIn("after-replace", main_text)
+            self.assertNotIn("before-replace", main_text)
 
     def test_color_auto_detection_disables_color_for_redirected_streams(self):
         with patch.dict("os.environ", {}, clear=True):
