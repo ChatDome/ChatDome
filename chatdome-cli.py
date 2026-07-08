@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import inspect
 import json
+import logging
 import os
 import re
 import shlex
@@ -46,6 +47,7 @@ from chatdome.agent.audit import CommandAuditTracker
 from chatdome.config import validate_profile_name
 from chatdome.errors import ChatDomeError, user_facing_error_message
 from chatdome.executor.cmd_parser import parse_shell_command
+from chatdome.logger import ChatDomeFormatter, ExcludeSentinelFilter, OriginFilter, _build_file_handler
 from chatdome.llm.profile_admin import (
     CreateCodexProfileRequest,
     CreateOpenAIProfileRequest,
@@ -108,6 +110,32 @@ def _append_cli_exception_log(action: str, exc: BaseException) -> tuple[Path, bo
         except OSError:
             continue
     return candidates[0], False
+
+
+def _setup_cli_file_logging() -> None:
+    log_file = str(os.environ.get("CHATDOME_LOG_FILE") or "").strip()
+    if not log_file:
+        return
+
+    root_logger = logging.getLogger()
+    target = str(Path(log_file).expanduser())
+    for handler in root_logger.handlers:
+        if (
+            getattr(handler, "_chatdome_cli_file_handler", False)
+            and getattr(handler, "baseFilename", "") == target
+        ):
+            return
+
+    formatter = ChatDomeFormatter(
+        datefmt="%Y-%m-%d %H:%M:%S",
+        use_colors=False,
+    )
+    handler = _build_file_handler(log_file, formatter)
+    handler.addFilter(OriginFilter())
+    handler.addFilter(ExcludeSentinelFilter())
+    handler._chatdome_cli_file_handler = True
+    root_logger.addHandler(handler)
+    root_logger.setLevel(logging.INFO)
 
 
 def _tail_log_command(log_path: Path) -> str:
@@ -1330,6 +1358,11 @@ async def _send_terminal_user_message(provider: Any, text: str) -> CommandResult
     _print_chatdome_message(_status_label("⏳", "[...]", "Working..."))
     try:
         runtime = provider.get()
+        logging.getLogger("chatdome.terminal.chat").info(
+            "Message from chat_id=%d via terminal: %s",
+            runtime.chat_id,
+            _terminal_log_excerpt(text),
+        )
         result = await runtime.agent.handle_message(runtime.chat_id, text)
     except Exception as exc:
         provider.last_failed_message = text
@@ -1404,6 +1437,13 @@ def _terminal_prompt() -> str:
     return os.environ.get("CHATDOME_PROMPT", _terminal_default_prompt())
 
 
+def _terminal_log_excerpt(text: str, max_len: int = 200) -> str:
+    value = " ".join(str(text or "").replace("\r", " ").replace("\n", " ").replace("\t", " ").split())
+    if len(value) > max_len:
+        value = value[: max_len - 3] + "..."
+    return value
+
+
 def _terminal_prompt_for_state(state: ChatSessionState | str) -> str:
     value = ChatSessionState(state)
     if value == ChatSessionState.APPROVAL_REQUIRED:
@@ -1455,6 +1495,7 @@ async def _terminal_chat_loop(args: argparse.Namespace) -> None:
 
 
 def hello(args: argparse.Namespace) -> None:
+    _setup_cli_file_logging()
     _print_terminal_start(args)
     try:
         asyncio.run(_terminal_chat_loop(args))

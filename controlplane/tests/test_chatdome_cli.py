@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import nullcontext
 import importlib.util
+import logging
 import os
 import subprocess
 import sys
@@ -71,6 +72,11 @@ class ChatDomeCLITests(unittest.TestCase):
         self.cli.PROFILE_AUDIT_RECORDER = lambda *args, **kwargs: None
 
     def tearDown(self):
+        root = logging.getLogger()
+        for handler in root.handlers[:]:
+            if getattr(handler, "_chatdome_cli_file_handler", False):
+                root.removeHandler(handler)
+                handler.close()
         self.tmp_dir.cleanup()
 
     def _load_profiles(self):
@@ -266,6 +272,33 @@ class ChatDomeCLITests(unittest.TestCase):
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
         self.assertIn("____  _   _", printed)
         self.assertIn("ChatDome\n│ pong", printed)
+
+    def test_hello_writes_terminal_messages_to_main_log_when_configured(self):
+        class FakeAgent:
+            async def handle_message(self, chat_id, message):
+                return SimpleNamespace(kind="reply", content="pong", payload={})
+
+            async def stop(self):
+                return None
+
+            def clear_session(self, chat_id):
+                raise AssertionError("clear_session should not be called")
+
+        log_file = self.root / "logs" / "chatdome.log"
+        runtime = self.cli._TerminalChatRuntime(FakeAgent(), -42)
+
+        with patch.dict(os.environ, {"CHATDOME_LOG_FILE": str(log_file)}, clear=False):
+            with patch.object(self.cli, "_create_terminal_chat_runtime", return_value=runtime):
+                with patch("builtins.input", side_effect=["hello from cli", "/exit"]):
+                    with patch("builtins.print") as output:
+                        self.cli.hello(SimpleNamespace(chat_id=-42))
+
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        log_text = log_file.read_text(encoding="utf-8")
+        self.assertIn("[terminal.chat] Message from chat_id=-42 via terminal: hello from cli", log_text)
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertNotIn("Message from chat_id=-42 via terminal", printed)
 
     def test_terminal_compact_start_can_be_enabled_by_flag_or_env(self):
         async def noop_loop(_args):
