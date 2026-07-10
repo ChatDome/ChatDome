@@ -1,6 +1,6 @@
 import unittest
 
-from chatdome.agent.result import AgentResult, coerce_agent_result
+from chatdome.agent.result import AgentResult, coerce_agent_result, format_approval_purpose
 
 
 class AgentResultTests(unittest.TestCase):
@@ -24,6 +24,25 @@ class AgentResultTests(unittest.TestCase):
 
         self.assertEqual(result.kind, "reply")
         self.assertEqual(result.content, "hello")
+
+    def test_approval_purpose_is_normalized_and_truncated(self):
+        purpose = format_approval_purpose(
+            {"reason": "  restart   the SSH service " + "safely " * 30},
+            fallback="unavailable",
+            max_chars=48,
+        )
+
+        self.assertLessEqual(len(purpose), 48)
+        self.assertTrue(purpose.startswith("restart the SSH service safely"))
+        self.assertTrue(purpose.endswith("…"))
+
+    def test_approval_purpose_uses_actionable_fallback(self):
+        purpose = format_approval_purpose(
+            {"reason": "无说明"},
+            fallback="review details before approval",
+        )
+
+        self.assertEqual(purpose, "review details before approval")
 
 
 if __name__ == "__main__":

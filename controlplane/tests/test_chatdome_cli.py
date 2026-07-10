@@ -447,12 +447,20 @@ class ChatDomeCLITests(unittest.TestCase):
                 "risk_level": "HIGH",
                 "command": "systemctl restart sshd",
                 "command_hash": "abcdef1234567890",
+                "reason": "Restart the SSH service to apply its configuration.",
             }
         )
         self.assertIn("Approval required", compact)
+        self.assertIn("Purpose: Restart the SSH service to apply its configuration.", compact)
         self.assertIn("Allow operation? [y/n]  d=details", compact)
         self.assertNotIn("Approval ID", compact)
         self.assertNotIn("systemctl restart sshd", compact)
+
+        fallback = self.cli._format_terminal_pending_approval({})
+        self.assertIn(
+            "Purpose: Unavailable; review details before approval.",
+            fallback,
+        )
 
         class FakeAgent:
             def __init__(self):

@@ -1,4 +1,4 @@
-"""Typed result contract between Agent and Telegram Bot."""
+"""Typed result contract between Agent and presentation layers."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ AgentResultKind = Literal["reply", "pending_approval", "round_limit"]
 
 LEGACY_PENDING_APPROVAL_PREFIX = "__PENDING_APPROVAL__:"
 LEGACY_ROUND_LIMIT_PREFIX = "__ROUND_LIMIT_CONFIRM__:"
+_EMPTY_APPROVAL_REASONS = frozenset({"无说明", "not provided", "unknown"})
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,23 @@ class AgentResult:
     @classmethod
     def round_limit(cls, payload: dict[str, Any]) -> "AgentResult":
         return cls(kind="round_limit", payload=dict(payload or {}))
+
+
+def format_approval_purpose(
+    payload: dict[str, Any] | None,
+    *,
+    fallback: str,
+    max_chars: int = 120,
+) -> str:
+    """Return a compact purpose line for an approval prompt."""
+    reason = " ".join(str((payload or {}).get("reason") or "").split()).strip()
+    if not reason or reason.casefold() in _EMPTY_APPROVAL_REASONS:
+        reason = " ".join(str(fallback or "").split()).strip()
+
+    limit = max(2, int(max_chars))
+    if len(reason) <= limit:
+        return reason
+    return reason[: limit - 1].rstrip() + "…"
 
 
 def coerce_agent_result(value: Any) -> AgentResult:

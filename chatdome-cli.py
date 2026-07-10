@@ -44,6 +44,7 @@ if CONTROLPLANE_SRC.is_dir():
 
 from chatdome import __version__
 from chatdome.agent.audit import CommandAuditTracker
+from chatdome.agent.result import format_approval_purpose
 from chatdome.config import validate_profile_name
 from chatdome.errors import ChatDomeError, user_facing_error_message
 from chatdome.logger import ChatDomeFormatter, ExcludeSentinelFilter, OriginFilter, _build_file_handler
@@ -796,10 +797,14 @@ def _print_chatdome_message(text: str) -> None:
 
 
 def _format_terminal_pending_approval(payload: dict[str, Any]) -> str:
-    del payload
+    purpose = format_approval_purpose(
+        payload,
+        fallback="Unavailable; review details before approval.",
+    )
     return "\n".join(
         [
             _status_label("⚠️", "[!]", "Approval required"),
+            f"Purpose: {purpose}",
             _TERMINAL_APPROVAL_ACTION_WITH_DETAILS,
         ]
     )

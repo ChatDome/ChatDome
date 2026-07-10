@@ -31,7 +31,7 @@ from telegram.ext import (
 )
 
 from chatdome.agent.core import Agent
-from chatdome.agent.result import AgentResult, coerce_agent_result
+from chatdome.agent.result import AgentResult, coerce_agent_result, format_approval_purpose
 from chatdome.config import AIConfig, ChatDomeConfig, validate_profile_name
 from chatdome.errors import (
     LLMProfileNotFound,
@@ -507,7 +507,11 @@ class TelegramBot:
 
     async def _send_approval_request(self, message, data: dict) -> None:
         approval_id = str((data or {}).get("approval_id") or "").strip()
-        text = "⚠️ 待审批\n是否允许本次操作？\n点击“详细命令”查看解析。"
+        purpose = format_approval_purpose(
+            data,
+            fallback="信息不可用，请先查看详细命令。",
+        )
+        text = f"⚠️ 待审批\n目的：{purpose}\n是否允许本次操作？\n点击“详细命令”查看解析。"
         if approval_id:
             approve_data = f"approval:approve:{approval_id}"
             approve_task_data = f"approval:approve_task:{approval_id}"
@@ -535,16 +539,6 @@ class TelegramBot:
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
-
-    @staticmethod
-    def _compact_approval_text(value: Any, fallback: str, max_chars: int = 120) -> str:
-        """Keep approval-card context short and single-line for mobile display."""
-        text = " ".join(str(value or "").split()).strip()
-        if not text:
-            text = fallback
-        if len(text) <= max_chars:
-            return text
-        return text[: max_chars - 1].rstrip() + "…"
 
     @staticmethod
     def _approval_action_markup(data: dict) -> InlineKeyboardMarkup:
