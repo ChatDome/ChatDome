@@ -461,6 +461,26 @@ class ChatDomeCLITests(unittest.TestCase):
             "Purpose: Unavailable; review details before approval.",
             fallback,
         )
+        with patch("builtins.print"):
+            blocked_state = self.cli._print_terminal_agent_result(
+                SimpleNamespace(
+                    kind="pending_approval",
+                    payload={"approval_id": "AP-2", "reason": "无说明"},
+                )
+            )
+        self.assertEqual(blocked_state, self.cli.ChatSessionState.APPROVAL_REVIEW_REQUIRED.value)
+        provider = SimpleNamespace(get=lambda: object())
+        with patch.object(self.cli, "_resolve_terminal_confirm") as confirm:
+            with patch("builtins.print"):
+                blocked_choice = asyncio.run(
+                    self.cli._handle_terminal_approval_choice(
+                        provider,
+                        "y",
+                        approval_allowed=False,
+                    )
+                )
+        confirm.assert_not_awaited()
+        self.assertEqual(blocked_choice.state, self.cli.ChatSessionState.APPROVAL_REVIEW_REQUIRED.value)
 
         class FakeAgent:
             def __init__(self):
@@ -478,6 +498,7 @@ class ChatDomeCLITests(unittest.TestCase):
                         "risk_level": "HIGH",
                         "command": "systemctl restart sshd",
                         "command_hash": "abcdef1234567890",
+                        "reason": "Restart the SSH service.",
                     },
                 )
 
@@ -751,6 +772,10 @@ class ChatDomeCLITests(unittest.TestCase):
             "approve [y/n]> ",
         )
         self.assertEqual(
+            self.cli._terminal_prompt_for_state(self.cli.ChatSessionState.APPROVAL_REVIEW_REQUIRED),
+            "review [n/d]> ",
+        )
+        self.assertEqual(
             self.cli._terminal_prompt_for_state(self.cli.ChatSessionState.CONTINUATION_REQUIRED),
             "continue [y/n]> ",
         )
@@ -777,7 +802,11 @@ class ChatDomeCLITests(unittest.TestCase):
                 self.messages.append((chat_id, message))
                 if message == "needs approval":
                     self.pending_kind = "approval"
-                    return SimpleNamespace(kind="pending_approval", content="", payload={})
+                    return SimpleNamespace(
+                        kind="pending_approval",
+                        content="",
+                        payload={"approval_id": "AP-1", "reason": "Restart the SSH service."},
+                    )
                 self.pending_kind = "round_limit"
                 return SimpleNamespace(kind="round_limit", content="", payload={"rounds": 10})
 

@@ -624,6 +624,9 @@ class PendingApprovalFollowupTests(unittest.TestCase):
             response = asyncio.run(agent._run_loop(123, session))
 
         self.assertEqual(response.kind, "pending_approval")
+        self.assertEqual(response.payload["safety_status"], "NEEDS_APPROVAL")
+        self.assertFalse(response.payload["mutation_detected"])
+        self.assertFalse(response.payload["deletion_detected"])
         self.assertEqual(
             [call["tool_call_id"] for call in dispatcher.calls],
             ["call-1", "call-2"],

@@ -18,11 +18,16 @@ class ChatSessionState(str, Enum):
     WORKING = "working"
     APPROVAL_REQUIRED = "approval_required"
     APPROVAL_DETAILS = "approval_details"
+    APPROVAL_REVIEW_REQUIRED = "approval_review_required"
     CONTINUATION_REQUIRED = "continuation_required"
     ERROR = "error"
 
 
-APPROVAL_STATES = {ChatSessionState.APPROVAL_REQUIRED, ChatSessionState.APPROVAL_DETAILS}
+APPROVAL_STATES = {
+    ChatSessionState.APPROVAL_REQUIRED,
+    ChatSessionState.APPROVAL_DETAILS,
+    ChatSessionState.APPROVAL_REVIEW_REQUIRED,
+}
 
 
 class ChatSessionController:
@@ -61,6 +66,8 @@ class ChatSessionController:
             return "approval: y=allow n=reject d=details"
         if self.state == ChatSessionState.APPROVAL_DETAILS:
             return "approval: y=allow n=reject"
+        if self.state == ChatSessionState.APPROVAL_REVIEW_REQUIRED:
+            return "approval: n=reject d=details"
         if self.state == ChatSessionState.CONTINUATION_REQUIRED:
             return "paused: y=continue n=stop"
         if self.state == ChatSessionState.ERROR:
@@ -218,6 +225,8 @@ class ChatSessionController:
     def _approval_default_state(self) -> str:
         if self.state == ChatSessionState.APPROVAL_DETAILS:
             return ChatSessionState.APPROVAL_DETAILS.value
+        if self.state == ChatSessionState.APPROVAL_REVIEW_REQUIRED:
+            return ChatSessionState.APPROVAL_REVIEW_REQUIRED.value
         return ChatSessionState.APPROVAL_REQUIRED.value
 
     async def _run_continuation_handler(self, text: str) -> CommandResult:

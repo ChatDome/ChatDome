@@ -31,7 +31,9 @@ from telegram.ext import (
 )
 
 from chatdome.agent.core import Agent
-from chatdome.agent.result import AgentResult, coerce_agent_result, format_approval_purpose
+from chatdome.agent.result import AgentResult, coerce_agent_result
+from chatdome.outbound.builders import build_approval_details, build_approval_request
+from chatdome.outbound.renderers.telegram import TelegramOutboundRenderer, group_controls
 from chatdome.config import AIConfig, ChatDomeConfig, validate_profile_name
 from chatdome.errors import (
     LLMProfileNotFound,
@@ -505,61 +507,32 @@ class TelegramBot:
 
     # ----- Interactive Approval -----
 
-    async def _send_approval_request(self, message, data: dict) -> None:
-        approval_id = str((data or {}).get("approval_id") or "").strip()
-        purpose = format_approval_purpose(
-            data,
-            fallback="信息不可用，请先查看详细命令。",
-        )
-        text = f"⚠️ 待审批\n目的：{purpose}\n是否允许本次操作？\n点击“详细命令”查看解析。"
-        if approval_id:
-            approve_data = f"approval:approve:{approval_id}"
-            approve_task_data = f"approval:approve_task:{approval_id}"
-            reject_data = f"approval:reject:{approval_id}"
-            detail_data = f"approval:details:{approval_id}"
-        else:
-            approve_data = "approve_cmd"
-            approve_task_data = "approve_task_cmd"
-            reject_data = "reject_cmd"
-            detail_data = "show_cmd_details"
+    @staticmethod
+    def _rendered_control_markup(rendered):
         keyboard = [
-            [
-                InlineKeyboardButton("✅ 允许", callback_data=approve_data),
-                InlineKeyboardButton("✅ 本次任务允许", callback_data=approve_task_data),
-            ],
-            [
-                InlineKeyboardButton("❌ 拒绝", callback_data=reject_data),
-                InlineKeyboardButton("🔎 详细命令", callback_data=detail_data),
-            ],
+            [InlineKeyboardButton(control.label, callback_data=control.data) for control in row]
+            for row in group_controls(rendered.controls)
         ]
+        return InlineKeyboardMarkup(keyboard) if keyboard else None
+
+    async def _send_approval_request(self, message, data: dict) -> None:
+        outbound = build_approval_request(data)
+        rendered = TelegramOutboundRenderer().render(outbound)
         await self._reply_text(
             message,
-            text,
+            "\n".join(rendered.text_parts),
             markup=MessageMarkup.PLAIN,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=self._rendered_control_markup(rendered),
         )
         return
 
     @staticmethod
-    def _approval_action_markup(data: dict) -> InlineKeyboardMarkup:
-        approval_id = str((data or {}).get("approval_id") or "").strip()
-        if approval_id:
-            approve_data = f"approval:approve:{approval_id}"
-            approve_task_data = f"approval:approve_task:{approval_id}"
-            reject_data = f"approval:reject:{approval_id}"
-        else:
-            approve_data = "approve_cmd"
-            approve_task_data = "approve_task_cmd"
-            reject_data = "reject_cmd"
-
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ 允许", callback_data=approve_data),
-                InlineKeyboardButton("✅ 本次任务允许", callback_data=approve_task_data),
-            ],
-            [InlineKeyboardButton("❌ 拒绝", callback_data=reject_data)],
-        ]
-        return InlineKeyboardMarkup(keyboard)
+    def _approval_action_markup(data: dict) -> Any:
+        payload = dict(data or {})
+        payload["ok"] = True
+        outbound = build_approval_details(payload)
+        rendered = TelegramOutboundRenderer().render(outbound)
+        return TelegramBot._rendered_control_markup(rendered)
 
     async def _send_approval_actions(self, message, data: dict) -> None:
         """Send compact action buttons after the detailed analysis message."""
@@ -587,7 +560,7 @@ class TelegramBot:
         if existing_task and not existing_task.done():
             await self._send_long_message(
                 message,
-                "详细命令分析仍在进行中，请稍候。",
+                "命令分析仍在进行中，请稍候。",
             )
             return
 
@@ -632,8 +605,8 @@ class TelegramBot:
                 message,
                 self._format_error_text(
                     e,
-                    prefix="详细命令分析失败",
-                    fallback="详细命令分析失败，请稍后重试。",
+                    prefix="命令分析失败",
+                    fallback="命令分析失败，请稍后重试。",
                 ),
             )
             return
@@ -650,16 +623,18 @@ class TelegramBot:
     async def _send_approval_detail_result(self, message, details: dict, *, chat_id: int) -> None:
         analysis = details.get("analysis", {}) or {}
         command_hash = str(details.get("command_hash", ""))
-        text = self._format_approval_detail_text(details)
+        outbound = build_approval_details(details)
+        rendered = TelegramOutboundRenderer().render(outbound)
+        text = "\n".join(rendered.text_parts)
         await self._send_long_message(
             message,
             text,
-            reply_markup=self._approval_action_markup(details),
+            reply_markup=self._rendered_control_markup(rendered),
         )
         self._record_visible_context(
             chat_id,
             event_type="approval_detail",
-            user_action="查看待审批命令详细分析",
+            user_action="查看待审批命令分析",
             assistant_summary=text,
             refs={
                 "approval_id": details.get("approval_id", ""),
@@ -670,55 +645,11 @@ class TelegramBot:
             },
         )
 
-    @classmethod
-    def _format_approval_detail_text(cls, details: dict) -> str:
-        analysis = details.get("analysis") if isinstance(details.get("analysis"), dict) else {}
-        command = str(details.get("command") or "").strip()
-        impact = str(analysis.get("impact_analysis") or "review required").strip()
-        breakdown = analysis.get("command_breakdown") if isinstance(analysis.get("command_breakdown"), dict) else {}
-        risk = str(analysis.get("risk_level") or details.get("risk_level") or "HIGH")
-        safety = str(analysis.get("safety_status") or "UNSAFE")
-
-        lines = ["🔎 命令审批详情", "", "📋 命令解析", command or "(empty)"]
-        breakdown_lines = cls._format_command_breakdown_lines(breakdown)
-        if breakdown_lines:
-            lines.extend(["", *breakdown_lines])
-        lines.extend(["", "🛡 安全评估", f"风险等级: {risk} | 安全状态: {safety}"])
-        flags = cls._approval_flag_text(analysis)
-        if flags:
-            lines.append(f"标记: {flags}")
-        lines.extend(["", "💥 影响说明", impact])
-        return "\n".join(lines)
-
     @staticmethod
-    def _format_command_breakdown_lines(breakdown: dict) -> list[str]:
-        entries = [item for item in (breakdown or {}).get("tokens", []) if isinstance(item, dict)]
-        if not entries:
-            return []
-        warnings = (breakdown or {}).get("warnings") or []
-        lines: list[str] = []
-        for index, item in enumerate(entries):
-            prefix = "└" if index == len(entries) - 1 and not warnings else "├"
-            token = str(item.get("token") or "").strip()
-            label = str(item.get("label") or item.get("role") or "").strip()
-            meaning = str(item.get("meaning") or label or "命令组成部分").strip()
-            if label and label not in meaning:
-                meaning = f"{label}（{meaning}）"
-            lines.append(f"{prefix} {token} → {meaning}")
-        for warning in warnings:
-            text = str(warning or "").strip()
-            if text:
-                lines.append(f"⚠ {text}")
-        return lines
-
-    @staticmethod
-    def _approval_flag_text(analysis: dict) -> str:
-        flags = []
-        if bool((analysis or {}).get("mutation_detected", False)):
-            flags.append("修改系统")
-        if bool((analysis or {}).get("deletion_detected", False)):
-            flags.append("删除文件")
-        return " · ".join(flags)
+    def _format_approval_detail_text(details: dict) -> str:
+        outbound = build_approval_details(details)
+        rendered = TelegramOutboundRenderer().render(outbound)
+        return "\n".join(rendered.text_parts)
 
     async def _send_round_limit_prompt(self, message, data: dict[str, Any] | None = None) -> None:
         """Ask user whether to continue after reaching one execution window."""

@@ -1000,6 +1000,9 @@ class Agent:
                             "reason": getattr(e, 'reason', ''),
                             "risk_level": getattr(e, "risk_level", ""),
                             "impact_analysis": getattr(e, "impact_analysis", ""),
+                            "safety_status": getattr(e, "safety_status", ""),
+                            "mutation_detected": bool(getattr(e, "mutation_detected", False)),
+                            "deletion_detected": bool(getattr(e, "deletion_detected", False)),
                             "requires_detail_expansion": True,
                         }
                         self._persist_session(session)

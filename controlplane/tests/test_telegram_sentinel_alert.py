@@ -204,15 +204,24 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         text = bot._reply_text.await_args.args[1]
         self.assertIn("待审批", text)
         self.assertIn("目的：delete file", text)
-        self.assertIn("详细命令", text)
+        self.assertIn("命令分析", text)
         self.assertNotIn("风险等级", text)
         self.assertNotIn("审批编号", text)
         self.assertNotIn("命令指纹", text)
         self.assertNotIn("show_time.sh", text)
+        markup = bot._reply_text.await_args.kwargs["reply_markup"]
+        labels = [button.text for row in markup.inline_keyboard for button in row]
+        self.assertEqual(
+            labels,
+            ["✅ 允许", "✅ 本次任务允许", "❌ 拒绝", "🔎 命令分析"],
+        )
 
         await bot._send_approval_request(message, {"approval_id": "AP-2", "reason": "无说明"})
         fallback_text = bot._reply_text.await_args.args[1]
-        self.assertIn("目的：信息不可用，请先查看详细命令。", fallback_text)
+        self.assertIn("目的：信息不可用，请先查看命令分析。", fallback_text)
+        fallback_markup = bot._reply_text.await_args.kwargs["reply_markup"]
+        fallback_labels = [button.text for row in fallback_markup.inline_keyboard for button in row]
+        self.assertEqual(fallback_labels, ["❌ 拒绝", "🔎 命令分析"])
 
     async def test_approval_detail_callback_removes_original_buttons(self):
         bot = _bot()
