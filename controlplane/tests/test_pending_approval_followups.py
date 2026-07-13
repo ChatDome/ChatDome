@@ -429,6 +429,7 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         self.assertEqual(session.messages[-1]["role"], "tool")
         self.assertEqual(session.messages[-1]["tool_call_id"], "call_legacy")
         self.assertIn("Legacy tool output was missing", session.messages[-1]["content"])
+        self.assertIn("Do not retry or continue it", session.messages[-1]["content"])
 
     def test_pending_tool_output_is_not_repaired_until_decision(self):
         session = _pending_session()

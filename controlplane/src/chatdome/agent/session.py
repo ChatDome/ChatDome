@@ -542,7 +542,8 @@ class AgentSession:
                     (
                         "Legacy tool output was missing from the persisted session. "
                         "ChatDome marked this tool call as unavailable without executing it. "
-                        "Re-request the check if this result is still needed."
+                        "Treat this tool call as failed. Do not retry or continue it unless "
+                        "the user explicitly asks to continue this task."
                     ),
                 )
                 existing_outputs.add(call_id)
