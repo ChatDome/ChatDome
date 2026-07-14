@@ -71,7 +71,7 @@ class ChatSessionController:
         if self.state == ChatSessionState.CONTINUATION_REQUIRED:
             return "paused: y=continue n=stop"
         if self.state == ChatSessionState.ERROR:
-            return "error: run /retry or send a new message"
+            return "error: send a new message"
         return ""
 
     async def handle_line(self, line: str) -> bool:

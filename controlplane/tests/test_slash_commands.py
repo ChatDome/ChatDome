@@ -9,6 +9,7 @@ from chatdome.slash_commands import (
     CommandDef,
     CommandRegistry,
     CommandResult,
+    command_catalog,
     toggle_command_echo,
 )
 
@@ -169,3 +170,22 @@ def test_toggle_command_echo_uses_session_manager_and_persists() -> None:
         agent.session_manager.session,
         agent.session_manager.session,
     ]
+
+
+def test_cli_and_telegram_share_one_command_catalog() -> None:
+    cli_commands = command_catalog("cli")
+    telegram_commands = command_catalog("telegram")
+    cli_names = {command.name for command in cli_commands}
+    telegram_names = {command.name for command in telegram_commands}
+
+    assert "/retry" not in cli_names
+    assert telegram_names <= cli_names
+    assert cli_names - telegram_names == {"/exit"}
+
+    cli_aliases = {
+        alias
+        for command in cli_commands
+        for alias in command.aliases
+    }
+    assert "/start" in cli_aliases
+    assert "/llm_add" in cli_aliases

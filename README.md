@@ -359,7 +359,20 @@ chatdome hello
 | `/confirm [approval_id]` | Approve a pending command |
 | `/reject [approval_id]` | Reject a pending command or stop a paused task |
 | `/continue` | Continue a paused task |
-| `/retry` | Retry the last failed request |
+| `/engram [delete <id>]` | List or delete persistent memory |
+| `/model_add` | Add an OpenAI-compatible or Codex model profile |
+| `/model_delete <profile>` | Delete an inactive model profile |
+| `/model_cancel` | Cancel the current model operation |
+| `/codex_login [profile]` | Start Codex OAuth device-code authentication |
+| `/sentinel_status` | Show Sentinel status |
+| `/sentinel_trigger` | Run all Sentinel checks |
+| `/sentinel_history` | Show recent Sentinel alerts |
+| `/sentinel_packs` | Show loaded Sentinel command packs |
+| `/sentinel_mute [duration]` | Pause Sentinel alert pushes |
+| `/sentinel_resume` | Resume Sentinel alert pushes |
+| `/exit` | Exit terminal chat; `/quit` is an alias |
+
+CLI and Telegram load the same command catalog and call the same business operations. Each surface only adapts input, controls, and rendering. `/exit` and `/quit` are CLI-only because they close the local terminal process.
 
 ## Telegram Commands
 
@@ -368,19 +381,26 @@ chatdome hello
 | *(any message)* | Talk to the AI agent in natural language |
 | `/clear` | Clear conversation context, start fresh |
 | `/stop` | Stop the current task |
-| `/details [approval_id]` | Show pending approval details |
+| `/details [approval_id] [full]` | Show pending approval details |
 | `/confirm [approval_id]` | Force-approve and execute the current pending high-risk command |
-| `/reject [approval_id]` | Reject the current pending command |
+| `/reject [approval_id]` | Reject a pending command or abandon a paused task |
 | `/continue` | Continue a paused task |
 | `/env` | Show runtime environment summary from `/var/lib/chatdome/environment/profile.md` |
 | `/token` | Show token usage statistics for current chat |
 | `/cmd_echo` | Toggle command echo mode in replies |
 | `/audit [N]` | Show latest command audit events for current chat (default 10, max 30) |
+| `/engram [delete <id>]` | List or delete persistent memory |
+| `/sentinel_status` | Show Sentinel status |
+| `/sentinel_trigger` | Run all Sentinel checks |
+| `/sentinel_history` | Show recent Sentinel alerts |
+| `/sentinel_packs` | Show loaded Sentinel command packs |
+| `/sentinel_mute [duration]` | Pause Sentinel alert pushes |
+| `/sentinel_resume` | Resume Sentinel alert pushes |
 | `/codex_login [profile]` | Start Codex OAuth device-code login for the current or named Codex profile |
 | `/model_list` | Show configured model profiles and auth status |
 | `/model [profile]` | Show profiles or switch the active model profile as an administrator |
 | `/model_add` | Add or overwrite a model profile as an administrator |
-| `/model_delete` | Delete an inactive model profile as an administrator |
+| `/model_delete <profile>` | Delete an inactive model profile as an administrator |
 | `/model_cancel` | Cancel the current model management flow |
 | `/help` | Show usage guide and example questions |
 

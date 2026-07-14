@@ -1002,7 +1002,7 @@ class ChatDomeCLITests(unittest.TestCase):
 
         asyncio.run(run_case())
 
-    def test_terminal_retry_replays_last_failed_message(self):
+    def test_terminal_retry_command_is_removed(self):
         class FakeAgent:
             def __init__(self):
                 self.messages = []
@@ -1010,9 +1010,7 @@ class ChatDomeCLITests(unittest.TestCase):
 
             async def handle_message(self, chat_id, message):
                 self.messages.append((chat_id, message))
-                if len(self.messages) == 1:
-                    raise RuntimeError("boom")
-                return SimpleNamespace(kind="reply", content=f"retried {message}", payload={})
+                raise RuntimeError("boom")
 
             async def stop(self):
                 self.stopped = True
@@ -1025,13 +1023,13 @@ class ChatDomeCLITests(unittest.TestCase):
                 with patch("builtins.print") as output:
                     self.cli.hello(SimpleNamespace(chat_id=-8))
 
-        self.assertEqual(fake_agent.messages, [(-8, "fail"), (-8, "fail")])
+        self.assertEqual(fake_agent.messages, [(-8, "fail")])
         self.assertTrue(fake_agent.stopped)
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
         self.assertIn("ChatDome · error", printed)
         self.assertIn("Request failed.", printed)
-        self.assertIn("Run: /retry", printed)
-        self.assertIn("retried fail", printed)
+        self.assertIn("Unknown command.", printed)
+        self.assertNotIn("Run: /retry", printed)
 
     def test_read_terminal_line_does_not_complete_removed_l_alias(self):
         class FakeIn:
@@ -1143,7 +1141,7 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertEqual(reload_payload["source"], "terminal:model:switched")
         self.assertEqual(fake_agent.llm_manager.reloaded[0][1], "other")
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
-        self.assertIn("Switch: /model <profile_name>", printed)
+        self.assertIn("Switch: /model <profile>", printed)
         self.assertIn("  /model other", printed)
         self.assertIn("model switched: other", printed)
         self.assertIn("Active: other", printed)

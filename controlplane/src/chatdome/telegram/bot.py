@@ -14,7 +14,6 @@ import re
 import time
 import uuid
 from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -40,10 +39,6 @@ from chatdome.errors import (
     LLMProfileNotReady,
     user_facing_error_message,
 )
-from chatdome.sentinel.alert_controls import (
-    format_alert_push_status,
-    parse_alert_mute_until,
-)
 from chatdome.telegram.auth import Authenticator
 from chatdome.telegram.formatting import MessageMarkup, TelegramMessageFormatter
 from chatdome.runtime_paths import environment_profile_path
@@ -53,14 +48,26 @@ from chatdome.slash_commands import (
     CommandInvocation,
     CommandResult,
     clear_agent_session,
+    command_catalog,
     continue_agent_task,
     execute_command,
+    execute_engram_command,
+    format_command_help,
+    format_model_profiles,
     format_user_command_audit_events,
     get_agent_approval_details,
     get_token_usage,
     get_user_command_audit_events,
     parse_audit_limit,
+    parse_details_options,
+    reject_agent_action,
     resume_agent_approval,
+    sentinel_history,
+    sentinel_mute,
+    sentinel_packs,
+    sentinel_resume,
+    sentinel_status,
+    sentinel_trigger,
     stop_active_task,
     toggle_command_echo,
 )
@@ -77,48 +84,7 @@ logger = logging.getLogger(__name__)
 # Help text
 # ---------------------------------------------------------------------------
 
-HELP_TEXT = """\
-🛡️ *ChatDome — AI 主机安全助手*
-
-直接用自然语言和我对话，我会自动执行安全审计命令并分析结果。
-
-*示例问题：*
-• 有没有人在爆破我的SSH？
-• 检查一下磁盘使用情况
-• 最近有没有异常的登录记录？
-• 系统负载怎么样？有没有可疑进程？
-• 检查一下防火墙规则
-• 我的服务器有哪些端口在监听？
-
-*命令：*
-/help \\- 显示帮助
-/clear \\- 清除对话上下文
-/stop \\- 中止当前任务
-/details \\[approval\\_id\\] \\- 查看待审批命令分析
-/confirm \\[approval\\_id\\] \\- 批准待审批命令
-/reject \\[approval\\_id\\] \\- 拒绝待审批命令
-/continue \\- 继续暂停中的任务
-/env \\- 查看当前运行环境摘要（来自 environment\\_profile\\.md）
-/token \\- 查看当前账号的 Token 资源流水与花费汇总
-/cmd\\_echo \\- 开关命令回显模式（显示底层执行的具体步骤）
-/audit \\[N\\] \\- 查看当前会话最近 N 条命令审计事件
-/engram \\- 查看长期记忆印迹
-/engram delete <id> \\- 删除指定长期记忆
-/sentinel\\_status \\- 哨兵模式告警状态总览
-/sentinel\\_trigger \\- 手动触发全量巡检
-/sentinel\\_history \\- 查看告警历史
-/sentinel\\_packs \\- 查看已加载的命令包
-/sentinel\\_mute \\[时长\\] \\- 暂停 Sentinel 告警推送
-/sentinel\\_resume \\- 恢复 Sentinel 告警推送
-/model \\[profile\\] \\- 查看或切换当前 model profile
-/model\\_list \\- 查看所有 model profiles
-/model\\_add \\- 新增 OpenAI-compatible 或 Codex model
-/model\\_delete <profile> \\- 删除 model profile
-/model\\_cancel \\- 取消正在进行的 model 新增流程
-/codex\\_login \\- 触发 OpenAI Codex OAuth 设备码认证流程
-
-_直接发送你的问题即可，无需命令前缀。_
-"""
+HELP_TEXT = format_command_help("telegram")
 
 
 # ---------------------------------------------------------------------------
@@ -210,37 +176,42 @@ class TelegramBot:
 
         self._app = builder.post_init(self.post_init).post_stop(self.post_stop).build()
 
-        # Register handlers
-        self._app.add_handler(self._command_handler("help", self._handle_help))
-        self._app.add_handler(self._command_handler("start", self._handle_help))
-        self._app.add_handler(self._command_handler("clear", self._handle_clear))
-        self._app.add_handler(self._command_handler("stop", self._handle_stop))
-        self._app.add_handler(self._command_handler("details", self._handle_details))
-        self._app.add_handler(self._command_handler("continue", self._handle_continue))
-        self._app.add_handler(self._command_handler("confirm", self._handle_confirm))
-        self._app.add_handler(self._command_handler("reject", self._handle_reject))
-        self._app.add_handler(self._command_handler("cmd_echo", self._handle_cmd_echo))
-        self._app.add_handler(self._command_handler("env", self._handle_env))
-        self._app.add_handler(self._command_handler("token", self._handle_token))
-        self._app.add_handler(self._command_handler("audit", self._handle_audit))
-        self._app.add_handler(self._command_handler("sentinel_status", self._handle_sentinel_status))
-        self._app.add_handler(self._command_handler("sentinel_trigger", self._handle_sentinel_trigger))
-        self._app.add_handler(self._command_handler("sentinel_history", self._handle_sentinel_history))
-        self._app.add_handler(self._command_handler("sentinel_packs", self._handle_sentinel_packs))
-        self._app.add_handler(self._command_handler("sentinel_mute", self._handle_sentinel_mute))
-        self._app.add_handler(self._command_handler("sentinel_resume", self._handle_sentinel_resume))
-        self._app.add_handler(self._command_handler("engram", self._handle_engram))
-        self._app.add_handler(self._command_handler("model", self._handle_llm))
-        self._app.add_handler(self._command_handler("model_list", self._handle_llm_list))
-        self._app.add_handler(self._command_handler("model_add", self._handle_llm_add))
-        self._app.add_handler(self._command_handler("model_delete", self._handle_llm_delete))
-        self._app.add_handler(self._command_handler("model_cancel", self._handle_llm_cancel))
-        self._app.add_handler(self._command_handler("llm", self._handle_llm))
-        self._app.add_handler(self._command_handler("llm_list", self._handle_llm_list))
-        self._app.add_handler(self._command_handler("llm_add", self._handle_llm_add))
-        self._app.add_handler(self._command_handler("llm_delete", self._handle_llm_delete))
-        self._app.add_handler(self._command_handler("llm_cancel", self._handle_llm_cancel))
-        self._app.add_handler(self._command_handler("codex_login", self._handle_codex_login))
+        callbacks = {
+            "/help": self._handle_help,
+            "/clear": self._handle_clear,
+            "/stop": self._handle_stop,
+            "/details": self._handle_details,
+            "/continue": self._handle_continue,
+            "/confirm": self._handle_confirm,
+            "/reject": self._handle_reject,
+            "/cmd_echo": self._handle_cmd_echo,
+            "/env": self._handle_env,
+            "/token": self._handle_token,
+            "/audit": self._handle_audit,
+            "/sentinel_status": self._handle_sentinel_status,
+            "/sentinel_trigger": self._handle_sentinel_trigger,
+            "/sentinel_history": self._handle_sentinel_history,
+            "/sentinel_packs": self._handle_sentinel_packs,
+            "/sentinel_mute": self._handle_sentinel_mute,
+            "/sentinel_resume": self._handle_sentinel_resume,
+            "/engram": self._handle_engram,
+            "/model": self._handle_llm,
+            "/model_list": self._handle_llm_list,
+            "/model_add": self._handle_llm_add,
+            "/model_delete": self._handle_llm_delete,
+            "/model_cancel": self._handle_llm_cancel,
+            "/codex_login": self._handle_codex_login,
+        }
+        for command in command_catalog("telegram"):
+            callback = callbacks[command.name]
+            for exposed_name in (command.name, *command.aliases):
+                self._app.add_handler(
+                    self._command_handler(
+                        exposed_name.removeprefix("/"),
+                        callback,
+                        command=command,
+                    )
+                )
         self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
@@ -285,7 +256,13 @@ class TelegramBot:
             self._log_value(callback_data),
         )
 
-    def _command_handler(self, command_name: str, callback: Any) -> CommandHandler:
+    def _command_handler(
+        self,
+        command_name: str,
+        callback: Any,
+        *,
+        command: CommandDef | None = None,
+    ) -> CommandHandler:
         async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if not self._check_auth(update):
                 self._log_telegram_command(update, command_name)
@@ -304,7 +281,7 @@ class TelegramBot:
                 if manager is not None:
                     manager.record_control_event(chat_id, event)
 
-            command = CommandDef(
+            command_def = command or CommandDef(
                 name=f"/{command_name}",
                 description="",
                 category="telegram",
@@ -314,7 +291,7 @@ class TelegramBot:
                 raw_name=f"/{command_name}",
                 args=args,
                 arg_text=" ".join(args),
-                command=command,
+                command=command_def,
                 context=CommandContext(
                     source="telegram",
                     chat_id=chat_id,
@@ -339,7 +316,7 @@ class TelegramBot:
         if not self._check_auth(update):
             return
 
-        await self._send_long_message(update.message, HELP_TEXT)
+        await self._send_long_message(update.message, format_command_help("telegram"))
 
     async def _handle_clear(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -676,11 +653,18 @@ class TelegramBot:
 
         await self._send_approval_detail_result(message, details, chat_id=chat_id)
 
-    async def _send_approval_detail_result(self, message, details: dict, *, chat_id: int) -> None:
+    async def _send_approval_detail_result(
+        self,
+        message,
+        details: dict,
+        *,
+        chat_id: int,
+        full: bool = False,
+    ) -> None:
         analysis = details.get("analysis", {}) or {}
         command_hash = str(details.get("command_hash", ""))
         outbound = build_approval_details(details)
-        rendered = TelegramOutboundRenderer().render(outbound)
+        rendered = TelegramOutboundRenderer(full=full).render(outbound)
         text = "\n".join(rendered.text_parts)
         await self._send_long_message(
             message,
@@ -796,84 +780,21 @@ class TelegramBot:
 
         await self._send_agent_result(message, final_response)
 
-    async def _handle_engram(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _handle_engram(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> CommandResult:
         """Handle /engram command."""
         if not self._check_auth(update):
-            return
-            
-        args = context.args or []
-        store = getattr(self.agent.tool_dispatcher, "engram_store", None)
-        
-        if not store:
-            await self._send_text(update, "❌ EngramStore 未初始化。")
-            return
-            
-        if len(args) == 2 and args[0].lower() == "delete":
-            engram_id = args[1]
-            if store.remove(engram_id):
-                await self._send_text(update, f"✅ 已删除 Engram: {engram_id}")
-            else:
-                await self._send_text(update, f"❌ 未找到有效记录: {engram_id}")
-            return
-            
-        active = store.list(include_superseded=False)
-        if not active:
-            await self._send_text(update, "📭 当前没有任何有效的 Engram 记录。")
-            return
-            
-        lines = ["🧠 *ChatDome 主机记忆印迹 (Engrams)*", ""]
-        import datetime
-        for e in active:
-            dt = datetime.datetime.fromtimestamp(e.created_at).strftime('%Y-%m-%d %H:%M')
-            lines.append(f"• `[{e.category}]` {e.fact}")
-            lines.append(f"  _ID: `{e.id}` | {dt}_")
-            
-        lines.append("")
-        lines.append("🗑️ _删除记录: `/engram delete <id>`_")
-        
-        await self._send_text(update, "\n".join(lines))
+            return CommandResult(outcome="unauthorized")
+        result = execute_engram_command(self.agent, context.args or ())
+        await self._send_long_message(update.message, result.text)
+        return result
 
     def _get_llm_manager(self):
         return getattr(self.agent, "llm_manager", None)
 
     def _format_llm_profile_list(self) -> str:
-        manager = self._get_llm_manager()
-        if manager is None:
-            return "model 管理服务未启用。"
-
-        profiles = manager.list_profiles()
-        if not profiles:
-            return "No model is configured. Run /model_add."
-        active = next((item for item in profiles if item.active), None)
-        active_name = active.name if active else manager.get_active_profile_name()
-
-        lines = [
-            "Model profiles",
-            "",
-            f"当前: {active_name}",
-            "切换命令: /model <profile_name>",
-            "",
-            "可复制的切换命令:",
-        ]
-        for item in profiles:
-            suffix = "  (current)" if item.active else ""
-            lines.append(f"  /model {item.name}{suffix}")
-
-        lines.extend(["", "详细信息:"])
-        for item in profiles:
-            marker = "[当前]" if item.active else "[可选]"
-            lines.extend([
-                "",
-                f"{marker} {item.name}",
-                f"  状态: {self._format_llm_status(item.status)}",
-                f"  类型: {item.provider}/{item.api_mode}",
-                f"  模型: {item.model}",
-            ])
-            if item.base_url:
-                lines.append(f"  地址: {item.base_url}")
-            if item.key_ref:
-                lines.append(f"  Key: {item.key_ref}")
-        return "\n".join(lines)
+        return format_model_profiles(self._get_llm_manager())
 
     @staticmethod
     def _format_llm_status(status: str) -> str:
@@ -1669,14 +1590,7 @@ class TelegramBot:
             return CommandResult(outcome="unauthorized")
 
         args = getattr(context, "args", None) or ()
-        approval_id = next(
-            (
-                str(item).strip()
-                for item in args
-                if str(item).strip().lower() not in {"full", "--full", "-f"}
-            ),
-            None,
-        )
+        approval_id, full = parse_details_options(args)
         chat_id = update.effective_chat.id
         status_message = await update.message.reply_text("⏳")
         try:
@@ -1695,6 +1609,7 @@ class TelegramBot:
             update.message,
             details,
             chat_id=chat_id,
+            full=full,
         )
         return CommandResult(
             outcome="details_shown" if details.get("ok") else "details_unavailable",
@@ -1775,10 +1690,9 @@ class TelegramBot:
         approval_id = context.args[0].strip() if context.args else None
         thinking_msg = await update.message.reply_text("⏳")
         try:
-            final_response = await resume_agent_approval(
+            final_response = await reject_agent_action(
                 self.agent,
                 chat_id,
-                "REJECT",
                 approval_id=approval_id,
             )
             try:
@@ -2296,158 +2210,77 @@ class TelegramBot:
 
     async def _handle_sentinel_mute(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle /sentinel_mute — pause Sentinel alert pushes."""
+    ) -> CommandResult:
         if not self._check_auth(update):
-            return
-        if self._sentinel is None:
-            await update.message.reply_text("ℹ️ 哨兵模式未启用。")
-            return
-
-        raw_args = " ".join(context.args or []).strip()
-        until = parse_alert_mute_until(raw_args)
-        chat_id = update.effective_chat.id
-        status = self._sentinel.mute_alert_push(
-            until=until,
-            reason=f"telegram_command:/sentinel_mute {raw_args}".strip(),
-            chat_id=chat_id,
+            return CommandResult(outcome="unauthorized")
+        result = sentinel_mute(
+            self._sentinel,
+            context.args or (),
+            chat_id=update.effective_chat.id,
+            source="telegram",
         )
-        await update.message.reply_text(
-            format_alert_push_status(status, prefix="✅ 已暂停 Sentinel 告警推送。")
-        )
+        await update.message.reply_text(result.text)
+        return result
 
     async def _handle_sentinel_resume(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle /sentinel_resume — resume Sentinel alert pushes."""
+    ) -> CommandResult:
+        del context
         if not self._check_auth(update):
-            return
-        if self._sentinel is None:
-            await update.message.reply_text("ℹ️ 哨兵模式未启用。")
-            return
-
-        chat_id = update.effective_chat.id
-        status = self._sentinel.resume_alert_push(chat_id=chat_id)
-        await update.message.reply_text(
-            format_alert_push_status(status, prefix="✅ 已恢复 Sentinel 告警推送。")
+            return CommandResult(outcome="unauthorized")
+        result = sentinel_resume(
+            self._sentinel,
+            chat_id=update.effective_chat.id,
         )
+        await update.message.reply_text(result.text)
+        return result
 
     async def _handle_sentinel_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle /sentinel_status — show alert statistics overview."""
+    ) -> CommandResult:
+        del context
         if not self._check_auth(update):
-            return
-        if self._sentinel is None:
-            await update.message.reply_text("ℹ️ 哨兵模式未启用。")
-            return
-        from chatdome.sentinel.alerter import format_status_message
-        status = "运行中" if self._sentinel.is_running else "未运行"
-        check_count = len(self._sentinel.checks)
-        alert_target_count = len(self._sentinel.alert_chat_ids)
-        loaded_commands = self._pack_loader.command_count if self._pack_loader is not None else 0
-        learning = "是" if self._sentinel.suppressor.is_learning else "否"
-        push_status = self._sentinel.alert_push_status()
-        if push_status.get("muted"):
-            muted_until = push_status.get("muted_until")
-            if isinstance(muted_until, datetime):
-                push_line = f"已静默至 {muted_until.strftime('%Y-%m-%d %H:%M %Z').strip()}"
-            else:
-                push_line = "已静默至手动恢复"
-        else:
-            push_line = "开启"
-
-        runtime_lines = [
-            "🧭 调度器状态",
-            f"  - 运行状态: {status}",
-            f"  - 检查项数量: {check_count}",
-            f"  - 已加载命令: {loaded_commands}",
-            f"  - 告警推送目标: {alert_target_count} 个",
-            f"  - 告警推送状态: {push_line}",
-            f"  - 基线学习中: {learning}",
-        ]
-        if alert_target_count == 0:
-            runtime_lines.append("  - ⚠️ 未配置推送目标，告警只会记录，不会发到手机")
-        text = format_status_message(self._sentinel.history)
-        await update.message.reply_text("\n".join(runtime_lines) + "\n\n" + text)
+            return CommandResult(outcome="unauthorized")
+        result = sentinel_status(self._sentinel, self._pack_loader)
+        await self._send_long_message(update.message, result.text)
+        return result
 
     async def _handle_sentinel_trigger(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle /sentinel_trigger — manually trigger all checks."""
+    ) -> CommandResult:
+        del context
         if not self._check_auth(update):
-            return
-        if self._sentinel is None:
-            await update.message.reply_text("ℹ️ 哨兵模式未启用。")
-            return
+            return CommandResult(outcome="unauthorized")
         status_msg = await update.message.reply_text("⏳")
         try:
-            result = await self._sentinel.trigger_all()
-            if len(result) > self.max_message_length:
-                result = result[:self.max_message_length - 20] + "\n... (已截断)"
-            final_text = f"🛡️ 巡检完成:\n\n{result}"
-        except Exception as e:
-            logger.exception("Sentinel trigger failed")
-            await update.message.reply_text(
-                self._format_error_text(
-                    e,
-                    prefix="❌ 巡检出错",
-                    fallback="巡检执行失败，请稍后重试。",
-                )
-            )
-        else:
-            await update.message.reply_text(final_text)
-            self._record_visible_context(
-                update.effective_chat.id,
-                event_type="sentinel_trigger",
-                user_action="/sentinel_trigger",
-                assistant_summary=final_text,
-            )
+            result = await sentinel_trigger(self._sentinel)
         finally:
             try:
                 await status_msg.delete()
             except Exception:
                 pass
+        await self._send_long_message(update.message, result.text)
+        return result
 
     async def _handle_sentinel_history(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle /sentinel_history — show alert history."""
+    ) -> CommandResult:
+        del context
         if not self._check_auth(update):
-            return
-        if self._sentinel is None:
-            await update.message.reply_text("ℹ️ 哨兵模式未启用。")
-            return
-        from chatdome.sentinel.alerter import format_history_message
-        text = format_history_message(self._sentinel.history)
-        await self._send_long_message(update.message, text)
+            return CommandResult(outcome="unauthorized")
+        result = sentinel_history(self._sentinel)
+        await self._send_long_message(update.message, result.text)
+        return result
 
     async def _handle_sentinel_packs(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle /sentinel_packs — list loaded command packs."""
+    ) -> CommandResult:
+        del context
         if not self._check_auth(update):
-            return
-        if self._pack_loader is None:
-            await update.message.reply_text("ℹ️ PackLoader 未初始化。")
-            return
-        checks = self._pack_loader.list_checks()
-        if not checks:
-            await update.message.reply_text("ℹ️ 无可用命令包。")
-            return
-        from collections import defaultdict
-        packs: dict[str, list[str]] = defaultdict(list)
-        for cmd in self._pack_loader._commands.values():
-            packs[cmd.pack].append(f"  - {cmd.id}: {cmd.name}")
-        lines = [f"📦 已加载 {len(checks)} 条命令 ({len(packs)} 个包):", ""]
-        for pack_name, cmds in sorted(packs.items()):
-            lines.append(f"**{pack_name}** ({len(cmds)} 条):")
-            lines.extend(sorted(cmds))
-            lines.append("")
-        text = "\n".join(lines)
-        if len(text) > self.max_message_length:
-            text = text[:self.max_message_length - 20] + "\n... (已截断)"
-        await update.message.reply_text(text)
+            return CommandResult(outcome="unauthorized")
+        result = sentinel_packs(self._pack_loader)
+        await self._send_long_message(update.message, result.text)
+        return result
 
     async def send_alert(self, chat_id: int, text: str, alert_event: Any | None = None) -> None:
         """Send an alert message to a specific chat. Used by Sentinel Alerter."""

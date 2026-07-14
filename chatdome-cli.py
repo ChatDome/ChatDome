@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import inspect
 import json
 import logging
@@ -17,6 +18,7 @@ import time
 import traceback
 import urllib.parse
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -51,13 +53,25 @@ from chatdome.outbound.renderers.terminal import TerminalOutboundRenderer
 from chatdome.slash_commands import (
     CommandContext,
     clear_agent_session,
+    command_catalog,
     continue_agent_task,
+    execute_engram_command,
+    format_command_help,
+    format_model_profiles,
     format_user_command_audit_events,
     get_agent_approval_details,
     get_token_usage,
     get_user_command_audit_events,
     parse_audit_limit,
+    parse_details_options,
+    reject_agent_action,
     resume_agent_approval,
+    sentinel_history,
+    sentinel_mute,
+    sentinel_packs,
+    sentinel_resume,
+    sentinel_status,
+    sentinel_trigger,
     stop_active_task,
     toggle_command_echo,
 )
@@ -418,9 +432,18 @@ def show_status(args: argparse.Namespace) -> None:
 
 
 class _TerminalChatRuntime:
-    def __init__(self, agent: Any, chat_id: int) -> None:
+    def __init__(
+        self,
+        agent: Any,
+        chat_id: int,
+        *,
+        pack_loader: Any = None,
+        sentinel: Any = None,
+    ) -> None:
         self.agent = agent
         self.chat_id = chat_id
+        self.pack_loader = pack_loader
+        self.sentinel = sentinel
 
 
 class _TerminalRuntimeProvider:
@@ -428,7 +451,6 @@ class _TerminalRuntimeProvider:
         self._args = args
         self._runtime: _TerminalChatRuntime | None = None
         self.last_message: str | None = None
-        self.last_failed_message: str | None = None
 
     @property
     def runtime(self) -> _TerminalChatRuntime | None:
@@ -459,7 +481,6 @@ class _TerminalRuntimeProvider:
 class _StaticTerminalRuntimeProvider:
     def __init__(self, runtime: _TerminalChatRuntime) -> None:
         self._runtime = runtime
-        self.last_failed_message: str | None = None
 
     @property
     def runtime(self) -> _TerminalChatRuntime:
@@ -521,6 +542,7 @@ def _create_terminal_chat_runtime(args: argparse.Namespace) -> _TerminalChatRunt
     from chatdome.llm.manager import LLMManager
     from chatdome.runtime_environment import collect_and_persist_runtime_environment
     from chatdome.sentinel.pack_loader import PackLoader
+    from chatdome.sentinel.scheduler import SentinelScheduler
     from chatdome.sentinel.user_context import UserContextLedger
 
     pack_loader = PackLoader(builtin_dir=CONTROLPLANE_SRC / "chatdome" / "packs")
@@ -541,6 +563,7 @@ def _create_terminal_chat_runtime(args: argparse.Namespace) -> _TerminalChatRunt
     except Exception:
         runtime_environment_context = ""
 
+    user_context_ledger = UserContextLedger()
     agent = Agent(
         llm=None,
         llm_manager=llm_manager,
@@ -548,11 +571,30 @@ def _create_terminal_chat_runtime(args: argparse.Namespace) -> _TerminalChatRunt
         config=config.agent,
         runtime_environment_context=runtime_environment_context,
         pack_loader=pack_loader,
-        user_context_ledger=UserContextLedger(),
+        user_context_ledger=user_context_ledger,
         valid_check_ids=[str(c.get("check_id")) for c in config.sentinel.checks if c.get("check_id")],
         engram_store=EngramStore(),
     )
-    return _TerminalChatRuntime(agent=agent, chat_id=_terminal_chat_id(args))
+
+    async def discard_alert(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    sentinel = SentinelScheduler(
+        config.sentinel,
+        pack_loader,
+        sandbox,
+        discard_alert,
+        alert_chat_ids=list(config.telegram.allowed_chat_ids),
+        user_context_ledger=user_context_ledger,
+    )
+    if hasattr(agent, "set_sentinel"):
+        agent.set_sentinel(sentinel)
+    return _TerminalChatRuntime(
+        agent=agent,
+        chat_id=_terminal_chat_id(args),
+        pack_loader=pack_loader,
+        sentinel=sentinel,
+    )
 
 
 
@@ -620,7 +662,7 @@ def _build_terminal_command_registry(
         return runtime_provider
 
     async def help_handler(_invocation: CommandInvocation) -> CommandResult:
-        _print_chatdome_message(_terminal_help_text())
+        _print_chatdome_message(format_command_help("cli"))
         return CommandResult()
 
     async def clear_handler(_invocation: CommandInvocation) -> CommandResult:
@@ -710,7 +752,7 @@ def _build_terminal_command_registry(
 
     async def details_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        approval_id, full = _terminal_details_options(invocation.args)
+        approval_id, full = parse_details_options(invocation.args)
         shown = await _show_terminal_details(runtime, approval_id, full=full)
         state = ChatSessionState.APPROVAL_DETAILS if shown else ChatSessionState.IDLE
         return CommandResult(state=state.value)
@@ -733,29 +775,186 @@ def _build_terminal_command_registry(
         state = await _resolve_terminal_reject(runtime, approval_id)
         return CommandResult(state=state)
 
-    async def retry_handler(_invocation: CommandInvocation) -> CommandResult:
-        provider = require_provider()
-        message = getattr(provider, "last_failed_message", None)
-        if not message:
-            _print_chatdome_message(_status_label("ℹ️", "[i]", "No failed request to retry."))
-            return CommandResult()
-        return await _send_terminal_user_message(provider, message)
+    async def engram_handler(invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        result = execute_engram_command(runtime.agent, invocation.args)
+        _print_chatdome_message(result.text)
+        return result
 
-    registry.register(CommandDef("/help", "Show commands", "basic", handler=help_handler))
-    registry.register(CommandDef("/clear", "Clear this terminal session", "basic", handler=clear_handler))
-    registry.register(CommandDef("/exit", "Exit terminal chat", "basic", aliases=("/quit",), handler=exit_handler))
-    registry.register(CommandDef("/stop", "Stop current task", "control", handler=stop_handler))
-    registry.register(CommandDef("/env", "Show environment summary", "context", handler=env_handler))
-    registry.register(CommandDef("/audit", "Show recent command audit events", "context", args_hint="[N]", handler=audit_handler))
-    registry.register(CommandDef("/token", "Show token usage", "context", handler=token_handler))
-    registry.register(CommandDef("/cmd_echo", "Toggle command echo", "context", handler=cmd_echo_handler))
-    registry.register(CommandDef("/model", "Switch active model profile", "model", aliases=("/llm",), args_hint="<profile>", handler=model_handler, completer=_terminal_model_completion_items))
-    registry.register(CommandDef("/model_list", "Show configured model profiles", "model", aliases=("/llm_list",), keywords=("list", "llm"), handler=model_list_handler))
-    registry.register(CommandDef("/details", "Show pending approval details", "approval", args_hint="[full]", handler=details_handler))
-    registry.register(CommandDef("/confirm", "Approve pending command", "approval", handler=confirm_handler))
-    registry.register(CommandDef("/reject", "Reject pending command or stop task", "approval", handler=reject_handler))
-    registry.register(CommandDef("/continue", "Continue paused task", "approval", handler=continue_handler))
-    registry.register(CommandDef("/retry", "Retry the last failed request", "recovery", handler=retry_handler))
+    async def sentinel_status_handler(_invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        result = sentinel_status(runtime.sentinel, runtime.pack_loader)
+        _print_chatdome_message(result.text)
+        return result
+
+    async def sentinel_trigger_handler(_invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        result = await sentinel_trigger(runtime.sentinel)
+        _print_chatdome_message(result.text)
+        return result
+
+    async def sentinel_history_handler(_invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        result = sentinel_history(runtime.sentinel)
+        _print_chatdome_message(result.text)
+        return result
+
+    async def sentinel_packs_handler(_invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        result = sentinel_packs(runtime.pack_loader)
+        _print_chatdome_message(result.text)
+        return result
+
+    async def sentinel_mute_handler(invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        result = sentinel_mute(
+            runtime.sentinel,
+            invocation.args,
+            chat_id=runtime.chat_id,
+            source="cli",
+        )
+        _request_reload(["sentinel"], "cli:/sentinel_mute")
+        _print_chatdome_message(result.text)
+        return result
+
+    async def sentinel_resume_handler(_invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        result = sentinel_resume(runtime.sentinel, chat_id=runtime.chat_id)
+        _request_reload(["sentinel"], "cli:/sentinel_resume")
+        _print_chatdome_message(result.text)
+        return result
+
+
+    async def reload_model_manager(runtime: _TerminalChatRuntime) -> None:
+        manager = _get_terminal_model_manager(runtime)
+        reloader = getattr(manager, "reload_profiles", None)
+        if callable(reloader):
+            config = _load_terminal_chat_config()
+            reloaded = reloader(config.ai_profiles, config.active_ai_profile)
+            if inspect.isawaitable(reloaded):
+                await reloaded
+
+    def codex_args(profile: str) -> argparse.Namespace:
+        return argparse.Namespace(
+            profile=profile,
+            model="gpt-5.5",
+            client_id="",
+            token_file=None,
+            base_url="https://chatgpt.com/backend-api/codex",
+            temperature=0.1,
+            max_tokens=2000,
+            overwrite=False,
+            expected_profile_fingerprint=None,
+        )
+
+    async def model_delete_handler(invocation: CommandInvocation) -> CommandResult:
+        if len(invocation.args) != 1:
+            _print_chatdome_message("Usage: /model_delete <profile>")
+            return CommandResult(outcome="invalid_arguments")
+        runtime = require_provider().get()
+        result = await _profile_admin_service("cli:model_delete").delete_profile(
+            invocation.args[0],
+            ProfileActor(source="cli:model_delete", chat_id=runtime.chat_id),
+        )
+        await reload_model_manager(runtime)
+        _print_chatdome_message(f"Model profile deleted: {result.profile_name}")
+        return CommandResult(
+            outcome="model_deleted",
+            event_summary=f"用户删除了 model profile {result.profile_name}。",
+        )
+
+    async def model_cancel_handler(_invocation: CommandInvocation) -> CommandResult:
+        _print_chatdome_message("No pending model operation.")
+        return CommandResult(outcome="no_pending_operation")
+
+    async def codex_login_handler(invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        profile = invocation.args[0] if invocation.args else "codex"
+        try:
+            await _codex_login_async(codex_args(profile))
+        except SystemExit as exc:
+            _print_chatdome_message(str(exc))
+            return CommandResult(outcome="failed")
+        await reload_model_manager(runtime)
+        return CommandResult(
+            outcome="codex_authenticated",
+            event_summary=f"用户完成了 Codex profile {profile} 认证。",
+        )
+
+    async def model_add_handler(_invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        profile_type = input("Model type [openai/codex]: ").strip().lower() or "openai"
+        if profile_type == "codex":
+            profile = input("Profile [codex]: ").strip() or "codex"
+            try:
+                await _codex_login_async(codex_args(profile))
+            except SystemExit as exc:
+                _print_chatdome_message(str(exc))
+                return CommandResult(outcome="failed")
+            await reload_model_manager(runtime)
+            return CommandResult(
+                outcome="model_added",
+                event_summary=f"用户新增了 model profile {profile}。",
+            )
+        if profile_type != "openai":
+            _print_chatdome_message("Model type must be openai or codex.")
+            return CommandResult(outcome="invalid_arguments")
+
+        profile = input("Profile: ").strip()
+        model = input("Model: ").strip()
+        base_url = (
+            input("Base URL [https://api.openai.com/v1]: ").strip()
+            or "https://api.openai.com/v1"
+        )
+        api_key = getpass.getpass("API key: ").strip()
+        result = await _profile_admin_service("cli:model_add").create_openai(
+            CreateOpenAIProfileRequest(
+                name=profile,
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+                temperature=0.1,
+                max_tokens=2000,
+            ),
+            ProfileActor(source="cli:model_add", chat_id=runtime.chat_id),
+        )
+        await reload_model_manager(runtime)
+        _print_chatdome_message(f"Model profile added: {result.profile_name}")
+        return CommandResult(
+            outcome="model_added",
+            event_summary=f"用户新增了 model profile {result.profile_name}。",
+        )
+
+    handlers = {
+        "/help": help_handler, "/clear": clear_handler, "/exit": exit_handler,
+        "/stop": stop_handler, "/env": env_handler, "/audit": audit_handler,
+        "/token": token_handler, "/cmd_echo": cmd_echo_handler,
+        "/engram": engram_handler, "/model": model_handler,
+        "/model_list": model_list_handler, "/model_add": model_add_handler,
+        "/model_delete": model_delete_handler, "/model_cancel": model_cancel_handler,
+        "/codex_login": codex_login_handler, "/details": details_handler,
+        "/confirm": confirm_handler, "/reject": reject_handler,
+        "/continue": continue_handler,
+        "/sentinel_status": sentinel_status_handler,
+        "/sentinel_trigger": sentinel_trigger_handler,
+        "/sentinel_history": sentinel_history_handler,
+        "/sentinel_packs": sentinel_packs_handler,
+        "/sentinel_mute": sentinel_mute_handler,
+        "/sentinel_resume": sentinel_resume_handler,
+    }
+    for command in command_catalog("cli"):
+        completer = (
+            _terminal_model_completion_items
+            if command.name == "/model"
+            else None
+        )
+        registry.register(
+            replace(
+                command,
+                handler=handlers[command.name],
+                completer=completer,
+            )
+        )
     return registry
 
 
@@ -948,43 +1147,7 @@ def _terminal_model_status(status: str) -> str:
 
 
 def _format_terminal_model_profiles(runtime: _TerminalChatRuntime) -> str:
-    manager = _get_terminal_model_manager(runtime)
-    if manager is None:
-        return "model manager is not available.\nRun: chatdome setup"
-
-    profiles = manager.list_profiles()
-    if not profiles:
-        return "No model is configured.\nRun: chatdome setup"
-
-    active = next((item for item in profiles if item.active), None)
-    active_name = active.name if active else manager.get_active_profile_name()
-    lines = [
-        "Model profiles",
-        "",
-        f"Active: {active_name}",
-        "Switch: /model <profile_name>",
-        "",
-        "Commands:",
-    ]
-    for item in profiles:
-        suffix = "  (current)" if item.active else ""
-        lines.append(f"  /model {item.name}{suffix}")
-
-    lines.extend(["", "Details:"])
-    for item in profiles:
-        marker = "[active]" if item.active else "[available]"
-        lines.extend([
-            "",
-            f"{marker} {item.name}",
-            f"  Status: {_terminal_model_status(item.status)}",
-            f"  Type: {item.provider}/{item.api_mode}",
-            f"  Model: {item.model}",
-        ])
-        if item.base_url:
-            lines.append(f"  Base URL: {item.base_url}")
-        if item.key_ref:
-            lines.append(f"  Key: {item.key_ref}")
-    return "\n".join(lines)
+    return format_model_profiles(_get_terminal_model_manager(runtime))
 
 
 def _terminal_model_error_text(exc: BaseException) -> str:
@@ -1163,18 +1326,7 @@ def _terminal_session(runtime: _TerminalChatRuntime) -> Any:
 
 
 def _terminal_details_options(args: tuple[str, ...]) -> tuple[str | None, bool]:
-    full = False
-    approval_id: str | None = None
-    for arg in args:
-        value = str(arg or "").strip()
-        if not value:
-            continue
-        if value.lower() in {"full", "--full", "-f"}:
-            full = True
-            continue
-        if approval_id is None:
-            approval_id = value
-    return approval_id, full
+    return parse_details_options(args)
 
 
 async def _show_terminal_details(runtime: _TerminalChatRuntime, approval_id: str | None, *, full: bool = False) -> bool:
@@ -1205,14 +1357,9 @@ async def _resolve_terminal_continue(runtime: _TerminalChatRuntime) -> str:
 
 
 async def _resolve_terminal_reject(runtime: _TerminalChatRuntime, approval_id: str | None) -> str:
-    session = _terminal_session(runtime)
-    if session is not None and getattr(session, "pending_round_limit", False) and not getattr(session, "pending_approval", False):
-        result = await continue_agent_task(runtime.agent, runtime.chat_id, "ABANDON")
-        return _print_terminal_agent_result(result)
-    result = await resume_agent_approval(
+    result = await reject_agent_action(
         runtime.agent,
         runtime.chat_id,
-        "REJECT",
         approval_id=approval_id,
     )
     return _print_terminal_agent_result(result)
@@ -1293,15 +1440,13 @@ async def _send_terminal_user_message(provider: Any, text: str) -> CommandResult
         )
         result = await runtime.agent.handle_message(runtime.chat_id, text)
     except Exception as exc:
-        provider.last_failed_message = text
         log_path, logged = _append_cli_exception_log("Terminal chat request", exc)
         message = user_facing_error_message(exc, fallback="Request failed.")
-        lines = [message, "Run: /retry"]
+        lines = [message]
         if logged:
             lines.append(f"Log: {_tail_log_command(log_path)}")
         _print_chatdome_message("\n".join(lines))
         return CommandResult(state=ChatSessionState.ERROR.value)
-    provider.last_failed_message = None
     state = _print_terminal_agent_result(result)
     return CommandResult(state=state)
 

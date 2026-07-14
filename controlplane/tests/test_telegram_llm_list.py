@@ -62,14 +62,14 @@ class TelegramLLMListTests(unittest.TestCase):
 
         text = bot._format_llm_profile_list()
 
-        self.assertIn("当前: codex-gpt5", text)
-        self.assertIn("切换命令: /model <profile_name>", text)
+        self.assertIn("Active: codex-gpt5", text)
+        self.assertIn("Switch: /model <profile>", text)
         self.assertIn("  /model codex-gpt5  (current)", text)
         self.assertIn("  /model deepseek", text)
         self.assertNotIn("* /model codex-gpt5", text)
-        self.assertIn("[当前] codex-gpt5", text)
-        self.assertIn("[可选] deepseek", text)
-        self.assertIn("状态: ready，可切换", text)
+        self.assertIn("[active] codex-gpt5", text)
+        self.assertIn("[available] deepseek", text)
+        self.assertIn("Status: ready", text)
         self.assertIn("Key: configured fp=12345678", text)
         self.assertNotIn("deepseek | openai/openai_api", text)
 
