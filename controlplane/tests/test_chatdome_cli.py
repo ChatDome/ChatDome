@@ -727,7 +727,8 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertIn("\b \b", fake_out.text)
 
     def test_terminal_command_completion_matches_model_commands(self):
-        self.assertEqual(self.cli._terminal_command_matches("/l"), ["/model_list"])
+        self.assertEqual(self.cli._terminal_command_matches("/l"), [])
+        self.assertEqual(self.cli._terminal_command_matches("/list"), ["/model_list"])
         self.assertEqual(self.cli._terminal_command_matches("/m")[0], "/model")
         self.assertEqual(self.cli._terminal_command_matches("/model other"), [])
         self.assertIn("/cmd_echo", self.cli._terminal_command_names())
@@ -735,7 +736,8 @@ class ChatDomeCLITests(unittest.TestCase):
     def test_terminal_command_registry_completes_model_profiles(self):
         registry = self.cli._build_terminal_command_registry()
 
-        self.assertEqual(registry.command_matches("/l"), ["/model_list"])
+        self.assertIsNone(registry.resolve_name("/l"))
+        self.assertEqual(registry.command_matches("/l"), [])
         self.assertEqual(registry.completions("/m")[0].text, "/model")
         self.assertEqual(registry.completions("/model ")[0].text, "base")
 
@@ -1031,7 +1033,7 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertIn("Run: /retry", printed)
         self.assertIn("retried fail", printed)
 
-    def test_read_terminal_line_completes_single_slash_command_match(self):
+    def test_read_terminal_line_does_not_complete_removed_l_alias(self):
         class FakeIn:
             def __init__(self):
                 self.chars = iter("/l\n")
@@ -1072,8 +1074,8 @@ class ChatDomeCLITests(unittest.TestCase):
                 with patch.object(sys, "stdout", fake_out):
                     line = self.cli._read_terminal_line("you> ")
 
-        self.assertEqual(line, "/model_list")
-        self.assertIn("/model_list", fake_out.text)
+        self.assertEqual(line, "/l")
+        self.assertNotIn("/model_list", fake_out.text)
 
     def test_terminal_model_commands_list_and_switch(self):
         data = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))

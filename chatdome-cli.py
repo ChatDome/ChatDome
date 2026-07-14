@@ -750,7 +750,7 @@ def _build_terminal_command_registry(
     registry.register(CommandDef("/token", "Show token usage", "context", handler=token_handler))
     registry.register(CommandDef("/cmd_echo", "Toggle command echo", "context", handler=cmd_echo_handler))
     registry.register(CommandDef("/model", "Switch active model profile", "model", aliases=("/llm",), args_hint="<profile>", handler=model_handler, completer=_terminal_model_completion_items))
-    registry.register(CommandDef("/model_list", "Show configured model profiles", "model", aliases=("/llm_list", "/l"), keywords=("list", "llm"), handler=model_list_handler))
+    registry.register(CommandDef("/model_list", "Show configured model profiles", "model", aliases=("/llm_list",), keywords=("list", "llm"), handler=model_list_handler))
     registry.register(CommandDef("/details", "Show pending approval details", "approval", args_hint="[full]", handler=details_handler))
     registry.register(CommandDef("/confirm", "Approve pending command", "approval", handler=confirm_handler))
     registry.register(CommandDef("/reject", "Reject pending command or stop task", "approval", handler=reject_handler))

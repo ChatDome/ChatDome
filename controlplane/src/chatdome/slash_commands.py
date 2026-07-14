@@ -190,6 +190,8 @@ class CommandRegistry:
             for command in self._commands
             if command.name.lower().startswith(token) and command not in exact_matches
         ]
+        if len(query) < 2:
+            return exact_matches + prefix_matches
         keyword_matches = []
         for command in self._commands:
             if command in exact_matches or command in prefix_matches:
