@@ -38,6 +38,7 @@ _TOOL_ARGUMENT_SNIPPET_CHARS = 600
 _MEMORY_MERGE_THRESHOLD_CHARS = 1500
 _MEMORY_UPDATE_MERGE_THRESHOLD = 2
 _DEFERRED_VISIBLE_CONTEXT_LIMIT = 5
+_CONTROL_EVENT_LIMIT = 200
 
 
 def redact_sensitive_text(text: str) -> str:
@@ -50,11 +51,18 @@ def redact_sensitive_text(text: str) -> str:
     redacted = _OPENAI_STYLE_KEY_RE.sub(_REDACTED, redacted)
     return redacted
 
+
+def _redact_control_field(key: str, value: Any) -> str:
+    """Redact an event value using both its field name and content."""
+    composite = redact_sensitive_text(f"{key}={value}")
+    return composite.partition("=")[2]
+
 def _truncate_context_text(text: Any, max_chars: int) -> str:
     value = redact_sensitive_text(str(text or "")).strip()
     if max_chars <= 0 or len(value) <= max_chars:
         return value
     return value[: max_chars - 12].rstrip() + "\n...(已截断)"
+
 
 
 def _compact_context_value(value: Any, max_chars: int = 240) -> str:
@@ -261,6 +269,7 @@ class AgentSession:
 
     chat_id: int
     messages: list[dict[str, Any]] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
     round_count: int = 0
@@ -291,6 +300,7 @@ class AgentSession:
         return {
             "chat_id": self.chat_id,
             "messages": self.messages,
+            "events": self.events,
             "created_at": self.created_at,
             "last_active": self.last_active,
             "round_count": self.round_count,
@@ -316,6 +326,12 @@ class AgentSession:
         """Restore a session from persisted JSON payload."""
         raw_messages = payload.get("messages", [])
         messages = raw_messages if isinstance(raw_messages, list) else []
+        raw_events = payload.get("events", [])
+        events = (
+            [item for item in raw_events if isinstance(item, dict)][-_CONTROL_EVENT_LIMIT:]
+            if isinstance(raw_events, list)
+            else []
+        )
 
         raw_followups = payload.get("pending_followups", [])
         pending_followups = raw_followups if isinstance(raw_followups, list) else []
@@ -328,6 +344,7 @@ class AgentSession:
         return cls(
             chat_id=chat_id,
             messages=messages,
+            events=events,
             created_at=float(payload.get("created_at", time.time())),
             last_active=float(payload.get("last_active", time.time())),
             round_count=int(payload.get("round_count", 0)),
@@ -393,6 +410,32 @@ class AgentSession:
         })
         self.last_active = time.time()
 
+    def add_control_event(self, event: dict[str, Any]) -> None:
+        """Append a redacted control event to the persistent session timeline."""
+
+        safe_event: dict[str, Any] = {}
+        for key, value in dict(event or {}).items():
+            key_text = _compact_context_value(key, 80)
+            if not key_text:
+                continue
+            if isinstance(value, str):
+                safe_event[key_text] = _redact_control_field(key_text, value)
+            elif isinstance(value, dict):
+                safe_event[key_text] = {
+                    nested_key: _redact_control_field(nested_key, item_value)
+                    for item_key, item_value in value.items()
+                    if (nested_key := _compact_context_value(item_key, 80))
+                }
+            elif isinstance(value, (bool, int, float)) or value is None:
+                safe_event[key_text] = value
+            else:
+                safe_event[key_text] = _redact_control_field(key_text, value)
+        safe_event.setdefault("created_at", time.time())
+        self.events.append(safe_event)
+        if len(self.events) > _CONTROL_EVENT_LIMIT:
+            self.events = self.events[-_CONTROL_EVENT_LIMIT:]
+        self.last_active = time.time()
+
     def _build_visible_context_messages(
         self,
         *,
@@ -401,17 +444,24 @@ class AgentSession:
         assistant_summary: str,
         refs: dict[str, Any] | None = None,
         max_summary_chars: int = 3500,
+        source: str = "telegram",
     ) -> tuple[str, str]:
         event_label = _compact_context_value(event_type, 80) or "visible_event"
-        action = _compact_context_value(user_action, 300) or "用户查看了 Telegram 可见结果"
+        source_value = _compact_context_value(source, 40).lower() or "chatdome"
+        source_label = {
+            "telegram": "Telegram",
+            "cli": "CLI",
+            "terminal": "CLI",
+        }.get(source_value, source_value)
+        action = _compact_context_value(user_action, 300) or f"用户查看了 {source_label} 可见结果"
         user_content = (
-            "[Telegram 用户可见事件]\n"
+            f"[{source_label} 用户可见事件]\n"
             f"事件: {event_label}\n"
             f"用户操作: {action}"
         )
 
         lines = [
-            "[Telegram 用户可见结果]",
+            f"[{source_label} 用户可见结果]",
             f"事件: {event_label}",
         ]
         cleaned_refs: list[str] = []
@@ -438,6 +488,7 @@ class AgentSession:
         assistant_summary: str,
         refs: dict[str, Any] | None,
         max_summary_chars: int,
+        source: str,
     ) -> bool:
         if len(self._deferred_visible_contexts) >= _DEFERRED_VISIBLE_CONTEXT_LIMIT:
             logger.warning("Deferred visible context queue full, dropping event: %s", event_type)
@@ -450,6 +501,7 @@ class AgentSession:
                 "assistant_summary": assistant_summary,
                 "refs": dict(refs or {}),
                 "max_summary_chars": max_summary_chars,
+                "source": source,
             }
         )
         self.last_active = time.time()
@@ -463,8 +515,9 @@ class AgentSession:
         assistant_summary: str,
         refs: dict[str, Any] | None = None,
         max_summary_chars: int = 3500,
+        source: str = "telegram",
     ) -> bool:
-        """Persist a Telegram-visible interaction as conversation context."""
+        """Persist a platform-visible interaction as conversation context."""
         if self.agent_running:
             return self._defer_visible_context(
                 event_type=event_type,
@@ -472,6 +525,7 @@ class AgentSession:
                 assistant_summary=assistant_summary,
                 refs=refs,
                 max_summary_chars=max_summary_chars,
+                source=source,
             )
 
         user_content, assistant_content = self._build_visible_context_messages(
@@ -480,6 +534,7 @@ class AgentSession:
             assistant_summary=assistant_summary,
             refs=refs,
             max_summary_chars=max_summary_chars,
+            source=source,
         )
 
         if self.pending_approval:
@@ -752,6 +807,7 @@ class AgentSession:
         if self.messages and self.messages[0].get("role") == "system":
             system_msg = self.messages[0]
         self.messages.clear()
+        self.events.clear()
         if system_msg:
             self.messages.append(system_msg)
         self.round_count = 0
@@ -1019,6 +1075,21 @@ class SessionManager:
 
         return session
 
+    def record_control_event(self, chat_id: int, event: dict[str, Any]) -> None:
+        """Persist a control event and its optional Agent-visible projection."""
+
+        session = self.get_or_create(chat_id)
+        session.add_control_event(event)
+        if bool(event.get("visible_to_agent")):
+            session.add_visible_context(
+                event_type=str(event.get("event_type") or "control_command"),
+                user_action=str(event.get("command") or "control command"),
+                assistant_summary=str(event.get("display_text") or ""),
+                refs=event.get("refs") if isinstance(event.get("refs"), dict) else None,
+                source=str(event.get("source") or "chatdome"),
+            )
+        self.save_session(session)
+
     def clear_session(self, chat_id: int) -> bool:
         """Clear a specific chat session. Returns True if it existed."""
         session = self._sessions.get(chat_id)
@@ -1104,3 +1175,49 @@ class SessionManager:
                 logger.warning("Unexpected session snapshot filename: %s", snapshot_path.name)
             except Exception as e:
                 logger.error("Failed during persisted cleanup for %s: %s", snapshot_path, e)
+
+
+
+def record_persisted_control_event(chat_id: int, event: dict[str, Any]) -> bool:
+    """Append a control event without initializing an Agent runtime."""
+
+    session_store_dir = data_dir() / "sessions"
+    snapshot_path = session_store_dir / f"{int(chat_id)}.json"
+    try:
+        session_store_dir.mkdir(parents=True, exist_ok=True)
+        if snapshot_path.exists():
+            data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            payload = data.get("session", data)
+            if not isinstance(payload, dict):
+                payload = {"chat_id": int(chat_id)}
+            session = AgentSession.from_snapshot(payload)
+        else:
+            session = AgentSession(chat_id=int(chat_id))
+
+        session.chat_id = int(chat_id)
+        session.add_control_event(event)
+        if bool(event.get("visible_to_agent")):
+            session.add_visible_context(
+                event_type=str(event.get("event_type") or "control_command"),
+                user_action=str(event.get("command") or "control command"),
+                assistant_summary=str(event.get("display_text") or ""),
+                refs=event.get("refs") if isinstance(event.get("refs"), dict) else None,
+                source=str(event.get("source") or "chatdome"),
+            )
+        snapshot = {
+            "version": 1,
+            "saved_at": time.time(),
+            "session": session.to_snapshot(),
+        }
+        snapshot_path.write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return True
+    except Exception as exc:
+        logger.error(
+            "Failed to persist control event for chat_id=%s: %s",
+            chat_id,
+            exc,
+        )
+        return False

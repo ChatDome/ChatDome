@@ -39,12 +39,22 @@ class FakeUpdate:
         self.effective_user = None
 
 
+class RecordingSessionManager:
+    def __init__(self):
+        self.events = []
+
+    def record_control_event(self, chat_id, event):
+        self.events.append((chat_id, event))
+
+
 class BlockingAgent:
     def __init__(self):
         self.started = asyncio.Event()
         self.cancelled = asyncio.Event()
         self.release = asyncio.Event()
         self.calls = []
+
+        self.session_manager = RecordingSessionManager()
 
     async def handle_message(self, chat_id, user_message):
         self.calls.append((chat_id, user_message))
@@ -78,13 +88,18 @@ class TelegramStopTests(unittest.TestCase):
         self.assertEqual(second_message.replies[-1], "任务正在运行。\n发送 /stop 中止。")
 
         stop_message = FakeMessage("/stop")
-        await bot._handle_stop(FakeUpdate(stop_message), SimpleNamespace())
+        handler = bot._command_handler("stop", bot._handle_stop)
+        await handler.callback(FakeUpdate(stop_message), SimpleNamespace(args=[]))
         await asyncio.wait_for(agent.cancelled.wait(), timeout=1)
         await asyncio.sleep(0)
 
         self.assertTrue(first_message.status_messages[0].deleted)
         self.assertEqual(stop_message.replies[-1], "任务已停止。")
         self.assertNotIn(123, bot._message_tasks)
+
+        self.assertEqual(agent.session_manager.events[-1][0], 123)
+        self.assertEqual(agent.session_manager.events[-1][1]["command"], "/stop")
+        self.assertEqual(agent.session_manager.events[-1][1]["outcome"], "task_stopped")
 
     def test_stop_reports_no_running_task(self):
         asyncio.run(self._run_stop_reports_no_running_task())

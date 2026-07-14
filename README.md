@@ -347,12 +347,17 @@ chatdome hello
 | Command | Description |
 |---------|-------------|
 | `/help` | Show terminal commands |
+| `/clear` | Clear conversation context |
 | `/stop` | Stop the current task |
+| `/env` | Show the runtime environment summary |
+| `/token` | Show token usage for the current terminal session |
+| `/cmd_echo` | Toggle command echo mode |
+| `/audit [N]` | Show recent command audit events |
 | `/model <profile>` | Switch the model profile for this terminal session |
 | `/model_list` | Show configured model profiles and auth status |
-| `/details [full]` | Show pending approval details |
-| `/confirm` | Approve a pending command |
-| `/reject` | Reject a pending command or stop a paused task |
+| `/details [approval_id] [full]` | Show pending approval details |
+| `/confirm [approval_id]` | Approve a pending command |
+| `/reject [approval_id]` | Reject a pending command or stop a paused task |
 | `/continue` | Continue a paused task |
 | `/retry` | Retry the last failed request |
 
@@ -361,10 +366,12 @@ chatdome hello
 | Command | Description |
 |---------|-------------|
 | *(any message)* | Talk to the AI agent in natural language |
-| `/confirm` | Force-approve and execute the current pending high-risk command |
-| `/reject` | Reject the current pending command |
 | `/clear` | Clear conversation context, start fresh |
 | `/stop` | Stop the current task |
+| `/details [approval_id]` | Show pending approval details |
+| `/confirm [approval_id]` | Force-approve and execute the current pending high-risk command |
+| `/reject [approval_id]` | Reject the current pending command |
+| `/continue` | Continue a paused task |
 | `/env` | Show runtime environment summary from `/var/lib/chatdome/environment/profile.md` |
 | `/token` | Show token usage statistics for current chat |
 | `/cmd_echo` | Toggle command echo mode in replies |

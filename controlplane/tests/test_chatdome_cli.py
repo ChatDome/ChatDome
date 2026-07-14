@@ -332,6 +332,7 @@ class ChatDomeCLITests(unittest.TestCase):
 
             def clear_session(self, chat_id):
                 self.cleared.append(chat_id)
+                return True
 
             async def stop(self):
                 self.stopped = True
@@ -360,7 +361,7 @@ class ChatDomeCLITests(unittest.TestCase):
                 "command": "systemctl restart sshd",
             },
         ]
-        with patch.object(self.cli.CommandAuditTracker, "get_recent_events", return_value=events):
+        with patch("chatdome.agent.audit.CommandAuditTracker.get_recent_events", return_value=events):
             text = self.cli._format_terminal_audit_events(-1, 10)
 
         self.assertIn("command_pending_approval", text)
@@ -376,7 +377,7 @@ class ChatDomeCLITests(unittest.TestCase):
                 "command": "whoami",
             }
         ]
-        with patch.object(self.cli.CommandAuditTracker, "get_recent_events", return_value=events):
+        with patch("chatdome.agent.audit.CommandAuditTracker.get_recent_events", return_value=events):
             with patch.object(self.cli, "_create_terminal_chat_runtime", side_effect=AssertionError("runtime initialized")):
                 with patch("builtins.input", side_effect=["/audit 1", "/exit"]):
                     with patch("builtins.print") as output:
@@ -729,6 +730,7 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertEqual(self.cli._terminal_command_matches("/l"), ["/model_list"])
         self.assertEqual(self.cli._terminal_command_matches("/m")[0], "/model")
         self.assertEqual(self.cli._terminal_command_matches("/model other"), [])
+        self.assertIn("/cmd_echo", self.cli._terminal_command_names())
 
     def test_terminal_command_registry_completes_model_profiles(self):
         registry = self.cli._build_terminal_command_registry()

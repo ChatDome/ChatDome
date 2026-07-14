@@ -47,6 +47,23 @@ from chatdome.sentinel.alert_controls import (
 from chatdome.telegram.auth import Authenticator
 from chatdome.telegram.formatting import MessageMarkup, TelegramMessageFormatter
 from chatdome.runtime_paths import environment_profile_path
+from chatdome.slash_commands import (
+    CommandContext,
+    CommandDef,
+    CommandInvocation,
+    CommandResult,
+    clear_agent_session,
+    continue_agent_task,
+    execute_command,
+    format_user_command_audit_events,
+    get_agent_approval_details,
+    get_token_usage,
+    get_user_command_audit_events,
+    parse_audit_limit,
+    resume_agent_approval,
+    stop_active_task,
+    toggle_command_echo,
+)
 from chatdome.llm.profile_admin import (
     CreateCodexProfileRequest,
     CreateOpenAIProfileRequest,
@@ -77,6 +94,10 @@ HELP_TEXT = """\
 /help \\- 显示帮助
 /clear \\- 清除对话上下文
 /stop \\- 中止当前任务
+/details \\[approval\\_id\\] \\- 查看待审批命令分析
+/confirm \\[approval\\_id\\] \\- 批准待审批命令
+/reject \\[approval\\_id\\] \\- 拒绝待审批命令
+/continue \\- 继续暂停中的任务
 /env \\- 查看当前运行环境摘要（来自 environment\\_profile\\.md）
 /token \\- 查看当前账号的 Token 资源流水与花费汇总
 /cmd\\_echo \\- 开关命令回显模式（显示底层执行的具体步骤）
@@ -194,6 +215,8 @@ class TelegramBot:
         self._app.add_handler(self._command_handler("start", self._handle_help))
         self._app.add_handler(self._command_handler("clear", self._handle_clear))
         self._app.add_handler(self._command_handler("stop", self._handle_stop))
+        self._app.add_handler(self._command_handler("details", self._handle_details))
+        self._app.add_handler(self._command_handler("continue", self._handle_continue))
         self._app.add_handler(self._command_handler("confirm", self._handle_confirm))
         self._app.add_handler(self._command_handler("reject", self._handle_reject))
         self._app.add_handler(self._command_handler("cmd_echo", self._handle_cmd_echo))
@@ -264,8 +287,46 @@ class TelegramBot:
 
     def _command_handler(self, command_name: str, callback: Any) -> CommandHandler:
         async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-            self._log_telegram_command(update, command_name)
-            await callback(update, context)
+            if not self._check_auth(update):
+                self._log_telegram_command(update, command_name)
+                return
+
+            chat = getattr(update, "effective_chat", None)
+            user = getattr(update, "effective_user", None)
+            message = getattr(update, "effective_message", None)
+            chat_id = int(getattr(chat, "id", 0) or 0)
+            actor_id = str(getattr(user, "id", "") or "")
+            raw = str(getattr(message, "text", "") or f"/{command_name}").strip()
+            args = tuple(str(item) for item in (getattr(context, "args", None) or ()))
+
+            def record_event(event: dict[str, Any]) -> None:
+                manager = getattr(getattr(self, "agent", None), "session_manager", None)
+                if manager is not None:
+                    manager.record_control_event(chat_id, event)
+
+            command = CommandDef(
+                name=f"/{command_name}",
+                description="",
+                category="telegram",
+            )
+            invocation = CommandInvocation(
+                raw=raw,
+                raw_name=f"/{command_name}",
+                args=args,
+                arg_text=" ".join(args),
+                command=command,
+                context=CommandContext(
+                    source="telegram",
+                    chat_id=chat_id,
+                    actor_id=actor_id,
+                    event_recorder=record_event,
+                ),
+            )
+
+            async def invoke(_invocation: CommandInvocation) -> Any:
+                return await callback(update, context)
+
+            await execute_command(invocation, invoke)
 
         return CommandHandler(command_name, wrapped)
 
@@ -282,18 +343,25 @@ class TelegramBot:
 
     async def _handle_clear(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
+    ) -> CommandResult:
         """Handle /clear command — reset conversation context."""
+        del context
         if not self._check_auth(update):
-            return
+            return CommandResult(outcome="unauthorized")
 
         chat_id = update.effective_chat.id
-        cleared = self.agent.clear_session(chat_id)
-
+        cleared = clear_agent_session(self.agent, chat_id)
         if cleared:
             await update.message.reply_text("✅ 对话已重置。")
-        else:
-            await update.message.reply_text("ℹ️ 当前没有活跃的对话。")
+            return CommandResult(
+                outcome="session_cleared",
+                event_summary="用户通过 Telegram 清空了当前会话。",
+            )
+        await update.message.reply_text("ℹ️ 当前没有活跃的对话。")
+        return CommandResult(
+            outcome="no_active_session",
+            event_summary="Telegram 当前没有可清空的会话。",
+        )
 
     def _active_task_for_chat(self, chat_id: int) -> asyncio.Task | None:
         for tasks in (self._message_tasks, self._round_limit_tasks):
@@ -306,19 +374,10 @@ class TelegramBot:
             return task
         return None
 
-    async def _handle_stop(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle /stop command."""
-        if not self._check_auth(update):
-            return
-
-        chat_id = update.effective_chat.id
+    async def _cancel_active_task_for_chat(self, chat_id: int) -> bool:
         task = self._active_task_for_chat(chat_id)
         if task is None:
-            await update.message.reply_text("当前没有运行中的任务。")
-            return
-
+            return False
         task.cancel()
         try:
             await task
@@ -326,45 +385,77 @@ class TelegramBot:
             pass
         except Exception:
             logger.debug("Task ended while stopping chat_id=%s", chat_id, exc_info=True)
+        return True
+
+    async def _handle_stop(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> CommandResult:
+        """Handle /stop command."""
+        del context
+        if not self._check_auth(update):
+            return CommandResult(outcome="unauthorized")
+
+        chat_id = update.effective_chat.id
+        stopped = await stop_active_task(
+            lambda: self._cancel_active_task_for_chat(chat_id)
+        )
+        if not stopped:
+            await update.message.reply_text("当前没有运行中的任务。")
+            return CommandResult(
+                outcome="no_active_task",
+                event_summary="Telegram 当前没有运行中的任务。",
+            )
+
         await update.message.reply_text("任务已停止。")
+        return CommandResult(
+            outcome="task_stopped",
+            event_summary="用户通过 Telegram 中止了当前任务，后续步骤未执行。",
+            visible_to_agent=True,
+        )
 
     async def _handle_cmd_echo(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
+    ) -> CommandResult:
         """Handle /cmd-echo command — toggle command echo mode."""
+        del context
         if not self._check_auth(update):
-            return
+            return CommandResult(outcome="unauthorized")
 
         chat_id = update.effective_chat.id
-        session = self.agent.session_manager.get_or_create(chat_id)
-        session.command_echo = not session.command_echo
-        
-        if session.command_echo:
+        enabled = toggle_command_echo(self.agent, chat_id)
+        if enabled:
             msg = "🔍 命令回显 已开启 🟢"
         else:
             msg = "🔍 命令回显 已关闭 🔴"
-            
+
         await self._send_long_message(update.message, msg)
+        state = "enabled" if enabled else "disabled"
+        return CommandResult(
+            outcome=f"command_echo_{state}",
+            event_summary=f"用户通过 Telegram {'开启' if enabled else '关闭'}了命令回显。",
+        )
 
     async def _handle_token(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
+    ) -> CommandResult:
         """Handle /token command — query local token usage statistics."""
+        del context
         if not self._check_auth(update):
-            return
+            return CommandResult(outcome="unauthorized")
 
         chat_id = update.effective_chat.id
-        from chatdome.agent.tracker import TokenTracker
-        stats = TokenTracker.get_user_stats(chat_id)
-        
+        stats = get_token_usage(chat_id)
         msg = (
             "📊 *Token 资源消耗统计*\n\n"
-            f"👤 用户 ID: `{chat_id}`\n"
+            f"👤 用户 ID: {chat_id}\n"
             f"⬆️ 上行总花费 (Prompt): {stats['prompt_tokens']:,.0f} Tokens\n"
             f"⬇️ 下行总花费 (Completion): {stats['completion_tokens']:,.0f} Tokens\n"
             f"🔢 累计调用账单: {stats['total_tokens']:,.0f} Tokens"
         )
         await self._send_long_message(update.message, msg)
+        return CommandResult(
+            event_summary="用户通过 Telegram 查看了当前会话的 Token 用量。"
+        )
 
     async def _handle_env(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -378,56 +469,21 @@ class TelegramBot:
 
     async def _handle_audit(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle /audit command - show recent command audit events for current chat."""
+    ) -> CommandResult:
+        """Handle /audit command - show recent command audit events."""
         if not self._check_auth(update):
-            return
+            return CommandResult(outcome="unauthorized")
 
         chat_id = update.effective_chat.id
-        limit = 10
-        if context.args:
-            try:
-                parsed = int(context.args[0])
-                if parsed > 0:
-                    limit = min(parsed, 30)
-            except (TypeError, ValueError):
-                pass
-
-        from chatdome.agent.audit import CommandAuditTracker
-
-        raw_events = CommandAuditTracker.get_recent_events(
-            chat_id=chat_id,
-            limit=max(100, limit * 10),
-            audit_source="user",
+        limit = parse_audit_limit(getattr(context, "args", None) or ())
+        events = get_user_command_audit_events(chat_id, limit)
+        await self._send_long_message(
+            update.message,
+            format_user_command_audit_events(events),
         )
-        direct_command_events = {"security_check_executed", "security_check_invalid"}
-        events = []
-        for event in raw_events:
-            event_type = str(event.get("event_type", ""))
-            if not event_type.startswith("command_") and event_type not in direct_command_events:
-                continue
-            events.append(event)
-            if len(events) >= limit:
-                break
-
-        if not events:
-            await update.message.reply_text("No user command audit events yet.")
-            return
-
-        lines = [f"User command audit events (latest {len(events)}):"]
-        for event in events:
-            ts = str(event.get("timestamp_iso", "unknown"))
-            event_type = str(event.get("event_type", "unknown"))
-            risk = str(event.get("risk_level", "-"))
-            command = str(event.get("command", "")).replace("\n", " ").strip()
-            if len(command) > 100:
-                command = command[:100] + "..."
-            line = f"- {ts} | {event_type} | risk={risk}"
-            if command:
-                line += f"\n  {command}"
-            lines.append(line)
-
-        await self._send_long_message(update.message, "\n".join(lines))
+        return CommandResult(
+            event_summary=f"用户通过 Telegram 查看了最近 {len(events)} 条命令审计事件。"
+        )
 
     # ----- Message handler -----
 
@@ -1605,56 +1661,147 @@ class TelegramBot:
                 )
             )
 
-    async def _handle_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _handle_details(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> CommandResult:
+        """Handle /details for the current pending approval."""
+        if not self._check_auth(update):
+            return CommandResult(outcome="unauthorized")
+
+        args = getattr(context, "args", None) or ()
+        approval_id = next(
+            (
+                str(item).strip()
+                for item in args
+                if str(item).strip().lower() not in {"full", "--full", "-f"}
+            ),
+            None,
+        )
+        chat_id = update.effective_chat.id
+        status_message = await update.message.reply_text("⏳")
+        try:
+            details = await get_agent_approval_details(
+                self.agent,
+                chat_id,
+                approval_id=approval_id,
+                include_llm=True,
+            )
+        finally:
+            try:
+                await status_message.delete()
+            except Exception:
+                pass
+        await self._send_approval_detail_result(
+            update.message,
+            details,
+            chat_id=chat_id,
+        )
+        return CommandResult(
+            outcome="details_shown" if details.get("ok") else "details_unavailable",
+            event_summary="用户通过 Telegram 查看了待审批命令分析。",
+        )
+
+    async def _handle_continue(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> CommandResult:
+        """Handle /continue for a round-limit pause."""
+        del context
+        if not self._check_auth(update):
+            return CommandResult(outcome="unauthorized")
+        chat_id = update.effective_chat.id
+        status_message = await update.message.reply_text("⏳")
+        try:
+            result = await continue_agent_task(self.agent, chat_id, "CONTINUE")
+        finally:
+            try:
+                await status_message.delete()
+            except Exception:
+                pass
+        await self._send_agent_result(update.message, result)
+        return CommandResult(
+            outcome="task_continued",
+            event_summary="用户通过 Telegram 继续了暂停的任务。",
+            visible_to_agent=True,
+        )
+
+    async def _handle_confirm(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> CommandResult:
         """Handle /confirm command for high-risk executions."""
         if not self._check_auth(update):
-            return
-            
+            return CommandResult(outcome="unauthorized")
+
         chat_id = update.effective_chat.id
         approval_id = context.args[0].strip() if context.args else None
         thinking_msg = await update.message.reply_text("⏳")
         try:
-            _, final_response = await self.agent.resume_session(chat_id, "APPROVE", approval_id=approval_id)
+            final_response = await resume_agent_approval(
+                self.agent,
+                chat_id,
+                "APPROVE",
+                approval_id=approval_id,
+            )
             try:
                 await thinking_msg.delete()
             except Exception:
                 pass
-
             await self._send_agent_result(update.message, final_response)
-        except Exception as e:
+            return CommandResult(
+                outcome="approval_confirmed",
+                event_summary="用户通过 Telegram 批准了待审批命令。",
+            )
+        except Exception as exc:
             logger.exception("Confirm command failed")
             await update.message.reply_text(
                 self._format_error_text(
-                    e,
+                    exc,
                     prefix="⚠️ 恢复会话失败",
                     fallback="恢复会话失败，请稍后重试。",
                 )
             )
+            return CommandResult(
+                outcome="failed",
+                event_summary="Telegram 命令审批失败。",
+            )
 
-    async def _handle_reject(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _handle_reject(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> CommandResult:
         """Handle /reject command for pending high-risk execution."""
         if not self._check_auth(update):
-            return
+            return CommandResult(outcome="unauthorized")
 
         chat_id = update.effective_chat.id
         approval_id = context.args[0].strip() if context.args else None
         thinking_msg = await update.message.reply_text("⏳")
         try:
-            _, final_response = await self.agent.resume_session(chat_id, "REJECT", approval_id=approval_id)
+            final_response = await resume_agent_approval(
+                self.agent,
+                chat_id,
+                "REJECT",
+                approval_id=approval_id,
+            )
             try:
                 await thinking_msg.delete()
             except Exception:
                 pass
-
             await self._send_agent_result(update.message, final_response)
-        except Exception as e:
+            return CommandResult(
+                outcome="approval_rejected",
+                event_summary="用户通过 Telegram 拒绝了待审批命令。",
+            )
+        except Exception as exc:
             logger.exception("Reject command failed")
             await update.message.reply_text(
                 self._format_error_text(
-                    e,
+                    exc,
                     prefix="⚠️ 恢复会话失败",
                     fallback="恢复会话失败，请稍后重试。",
                 )
+            )
+            return CommandResult(
+                outcome="failed",
+                event_summary="Telegram 命令拒绝操作失败。",
             )
 
     # ----- Utilities -----

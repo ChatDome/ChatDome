@@ -351,12 +351,17 @@ chatdome hello
 | 命令 | 描述 |
 |------|------|
 | `/help` | 查看终端命令 |
+| `/clear` | 清除对话上下文 |
 | `/stop` | 中止当前任务 |
+| `/env` | 查看当前运行环境摘要 |
+| `/token` | 查看当前终端会话 Token 消耗统计 |
+| `/cmd_echo` | 切换底层命令回显模式 |
+| `/audit [N]` | 查看最近的命令审计事件 |
 | `/model <profile>` | 切换当前终端会话使用的 model profile |
 | `/model_list` | 查看已配置 model profile 与鉴权状态 |
-| `/details [full]` | 查看待审批动作详情 |
-| `/confirm` | 批准待审批命令 |
-| `/reject` | 拒绝待审批命令或停止暂停任务 |
+| `/details [approval_id] [full]` | 查看待审批动作详情 |
+| `/confirm [approval_id]` | 批准待审批命令 |
+| `/reject [approval_id]` | 拒绝待审批命令或停止暂停任务 |
 | `/continue` | 继续暂停中的任务 |
 | `/retry` | 重试上一次失败请求 |
 
@@ -365,10 +370,12 @@ chatdome hello
 | 命令 | 描述 |
 |------|------|
 | *(直接发送消息)* | 用自然语言与 AI Agent 对话 |
-| `/confirm` | 强制批准并执行当前待确认的高风险命令 |
-| `/reject` | 拒绝当前待确认命令 |
 | `/clear` | 清除对话上下文，重新开始 |
 | `/stop` | 中止当前任务 |
+| `/details [approval_id]` | 查看待审批命令分析 |
+| `/confirm [approval_id]` | 强制批准并执行当前待确认的高风险命令 |
+| `/reject [approval_id]` | 拒绝当前待确认命令 |
+| `/continue` | 继续暂停中的任务 |
 | `/env` | 查看当前运行环境摘要（来自 `/var/lib/chatdome/environment/profile.md`） |
 | `/token` | 查看当前会话 Token 消耗统计 |
 | `/cmd_echo` | 切换底层命令回显模式 |
