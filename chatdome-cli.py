@@ -47,7 +47,12 @@ if CONTROLPLANE_SRC.is_dir():
 from chatdome import __version__
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.agent.session import record_persisted_control_event
-from chatdome.outbound.builders import build_approval_details, build_approval_request
+from chatdome.outbound.builders import (
+    EnvironmentFactsBuilder,
+    OutboundMessageBuilder,
+    build_approval_details,
+    build_approval_request,
+)
 from chatdome.outbound.models import ActionKind
 from chatdome.outbound.renderers.terminal import TerminalOutboundRenderer
 from chatdome.slash_commands import (
@@ -75,9 +80,10 @@ from chatdome.slash_commands import (
     stop_active_task,
     toggle_command_echo,
 )
-from chatdome.config import validate_profile_name
+from chatdome.config import AIConfig, validate_profile_name
 from chatdome.errors import ChatDomeError, user_facing_error_message
 from chatdome.logger import ChatDomeFormatter, ExcludeSentinelFilter, OriginFilter, _build_file_handler
+from chatdome.llm.codex_oauth_service import CodexOAuthService
 from chatdome.llm.profile_admin import (
     CreateCodexProfileRequest,
     CreateOpenAIProfileRequest,
@@ -85,6 +91,7 @@ from chatdome.llm.profile_admin import (
     ProfileActor,
     ProfileConfigStore,
 )
+from chatdome.model_commands import ModelCommandService
 from chatdome.terminal import (
     ChatSessionController,
     ChatSessionState,
@@ -654,7 +661,16 @@ def _build_terminal_command_registry(
             event_recorder=record_event,
         )
 
-    registry = CommandRegistry(context_factory=command_context)
+    async def render_command_result(
+        _invocation: CommandInvocation,
+        result: CommandResult,
+    ) -> None:
+        _render_terminal_outbound(result.outbound)
+
+    registry = CommandRegistry(
+        context_factory=command_context,
+        result_handler=render_command_result,
+    )
 
     def require_provider() -> Any:
         if runtime_provider is None:
@@ -662,8 +678,11 @@ def _build_terminal_command_registry(
         return runtime_provider
 
     async def help_handler(_invocation: CommandInvocation) -> CommandResult:
-        _print_chatdome_message(format_command_help("cli"))
-        return CommandResult()
+        return CommandResult(
+            outcome="help_shown",
+            title="Commands",
+            text=format_command_help("cli"),
+        )
 
     async def clear_handler(_invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
@@ -676,8 +695,11 @@ def _build_terminal_command_registry(
             text = _status_label("ℹ️", "[i]", "No active session.")
             summary = "CLI 当前没有可清空的会话。"
             outcome = "no_active_session"
-        _print_chatdome_message(text)
-        return CommandResult(outcome=outcome, event_summary=summary)
+        return CommandResult(
+            outcome=outcome,
+            event_summary=summary,
+            text=text,
+        )
 
     async def exit_handler(_invocation: CommandInvocation) -> CommandResult:
         return CommandResult(keep_running=False)
@@ -685,22 +707,29 @@ def _build_terminal_command_registry(
     async def stop_handler(_invocation: CommandInvocation) -> CommandResult:
         stopped = await stop_active_task(stop_request_handler)
         if stopped:
-            _print_chatdome_message(_status_label("⏹️", "[stop]", "Task stopped."))
             return CommandResult(
                 state=ChatSessionState.IDLE.value,
                 outcome="task_stopped",
                 event_summary="用户通过 CLI 中止了当前任务，后续步骤未执行。",
                 visible_to_agent=True,
+                text=_status_label("⏹️", "[stop]", "Task stopped."),
             )
-        _print_chatdome_message(_status_label("ℹ️", "[i]", "No running task."))
         return CommandResult(
             outcome="no_active_task",
             event_summary="CLI 当前没有运行中的任务。",
+            text=_status_label("ℹ️", "[i]", "No running task."),
         )
 
     async def env_handler(_invocation: CommandInvocation) -> CommandResult:
-        _print_chatdome_message(_terminal_environment_summary())
-        return CommandResult()
+        facts = EnvironmentFactsBuilder().from_profile(
+            ENV_PROFILE_PATH,
+            fallback_paths=(LEGACY_ENV_PROFILE_PATH,),
+        )
+        return CommandResult(
+            outcome="environment_shown" if facts.available else "unavailable",
+            event_summary="用户通过 CLI 查看了运行环境。",
+            facts=facts,
+        )
 
     async def audit_handler(invocation: CommandInvocation) -> CommandResult:
         _sync_terminal_runtime_paths()
@@ -708,47 +737,59 @@ def _build_terminal_command_registry(
         chat_id = provider.chat_id if provider is not None else -1
         limit = parse_audit_limit(invocation.args)
         events = get_user_command_audit_events(chat_id, limit)
-        _print_chatdome_message(format_user_command_audit_events(events))
-        return CommandResult(event_summary=f"用户通过 CLI 查看了最近 {len(events)} 条命令审计事件。")
+        return CommandResult(
+            outcome="audit_shown",
+            event_summary=f"用户通过 CLI 查看了最近 {len(events)} 条命令审计事件。",
+            text=format_user_command_audit_events(events),
+        )
 
     async def token_handler(_invocation: CommandInvocation) -> CommandResult:
         provider = runtime_provider
         chat_id = provider.chat_id if provider is not None else -1
         stats = get_token_usage(chat_id)
-        _print_chatdome_message(
-            "Token usage\n"
-            f"Prompt: {stats['prompt_tokens']:,}\n"
-            f"Completion: {stats['completion_tokens']:,}\n"
-            f"Total: {stats['total_tokens']:,}"
+        return CommandResult(
+            outcome="token_usage_shown",
+            event_summary="用户通过 CLI 查看了当前会话的 Token 用量。",
+            title="Token usage",
+            text=(
+                "Token usage\n"
+                f"Prompt: {stats['prompt_tokens']:,}\n"
+                f"Completion: {stats['completion_tokens']:,}\n"
+                f"Total: {stats['total_tokens']:,}"
+            ),
         )
-        return CommandResult(event_summary="用户通过 CLI 查看了当前会话的 Token 用量。")
 
     async def cmd_echo_handler(_invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
         enabled = toggle_command_echo(runtime.agent, runtime.chat_id)
         state = "enabled" if enabled else "disabled"
-        _print_chatdome_message(
-            _status_label(
-                "🔍",
-                "[cmd]",
-                f"Command echo {state}.",
-            )
-        )
         return CommandResult(
             outcome=f"command_echo_{state}",
             event_summary=f"用户通过 CLI {'开启' if enabled else '关闭'}了命令回显。",
+            text=_status_label("🔍", "[cmd]", f"Command echo {state}."),
         )
 
     async def model_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        profile_name = invocation.args[0] if invocation.args else None
-        await _switch_terminal_model(runtime, profile_name)
-        return CommandResult()
+        service = model_command_service(runtime, "terminal:model")
+        if not invocation.args:
+            return service.list_profiles()
+        try:
+            return await service.switch(
+                invocation.args[0],
+                ProfileActor(source="terminal:model", chat_id=runtime.chat_id),
+            )
+        except Exception as exc:
+            return CommandResult(
+                outcome="failed",
+                title="Model switch failed",
+                text=_terminal_model_error_text(exc),
+                severity="error",
+            )
 
     async def model_list_handler(_invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        _print_chatdome_message(_format_terminal_model_profiles(runtime))
-        return CommandResult()
+        return model_command_service(runtime, "cli:model_list").list_profiles()
 
     async def details_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
@@ -777,33 +818,23 @@ def _build_terminal_command_registry(
 
     async def engram_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        result = execute_engram_command(runtime.agent, invocation.args)
-        _print_chatdome_message(result.text)
-        return result
+        return execute_engram_command(runtime.agent, invocation.args)
 
     async def sentinel_status_handler(_invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        result = sentinel_status(runtime.sentinel, runtime.pack_loader)
-        _print_chatdome_message(result.text)
-        return result
+        return sentinel_status(runtime.sentinel, runtime.pack_loader)
 
     async def sentinel_trigger_handler(_invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        result = await sentinel_trigger(runtime.sentinel)
-        _print_chatdome_message(result.text)
-        return result
+        return await sentinel_trigger(runtime.sentinel)
 
     async def sentinel_history_handler(_invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        result = sentinel_history(runtime.sentinel)
-        _print_chatdome_message(result.text)
-        return result
+        return sentinel_history(runtime.sentinel)
 
     async def sentinel_packs_handler(_invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        result = sentinel_packs(runtime.pack_loader)
-        _print_chatdome_message(result.text)
-        return result
+        return sentinel_packs(runtime.pack_loader)
 
     async def sentinel_mute_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
@@ -814,14 +845,12 @@ def _build_terminal_command_registry(
             source="cli",
         )
         _request_reload(["sentinel"], "cli:/sentinel_mute")
-        _print_chatdome_message(result.text)
         return result
 
     async def sentinel_resume_handler(_invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
         result = sentinel_resume(runtime.sentinel, chat_id=runtime.chat_id)
         _request_reload(["sentinel"], "cli:/sentinel_resume")
-        _print_chatdome_message(result.text)
         return result
 
 
@@ -834,52 +863,96 @@ def _build_terminal_command_registry(
             if inspect.isawaitable(reloaded):
                 await reloaded
 
-    def codex_args(profile: str) -> argparse.Namespace:
-        return argparse.Namespace(
-            profile=profile,
-            model="gpt-5.5",
-            client_id="",
-            token_file=None,
-            base_url="https://chatgpt.com/backend-api/codex",
-            temperature=0.1,
-            max_tokens=2000,
-            overwrite=False,
-            expected_profile_fingerprint=None,
+    def model_command_service(
+        runtime: _TerminalChatRuntime,
+        source: str,
+    ) -> ModelCommandService:
+        return ModelCommandService(
+            _get_terminal_model_manager(runtime),
+            _profile_admin_service(source),
+            runtime_sync=lambda: reload_model_manager(runtime),
+        )
+
+    async def run_codex_auth(
+        runtime: _TerminalChatRuntime,
+        profile_name: str,
+        source: str,
+    ) -> CommandResult:
+        service = CodexOAuthService(_profile_admin_service(source))
+        config = _load_terminal_chat_config()
+        manager = _get_terminal_model_manager(runtime)
+        active_profile = (
+            manager.get_active_profile_name() if manager is not None else ""
+        )
+        session = await service.begin(
+            config,
+            ProfileActor(source=source, chat_id=runtime.chat_id),
+            requested_profile=profile_name,
+            active_profile=active_profile,
+        )
+        pending = CommandResult(
+            outcome="codex_authorization_pending",
+            title="Codex OAuth",
+            facts=session.authorization,
+        )
+        pending = replace(
+            pending,
+            outbound=OutboundMessageBuilder().from_command_result(None, pending),
+        )
+        _render_terminal_outbound(pending.outbound)
+        await service.complete(session)
+        await reload_model_manager(runtime)
+        return CommandResult(
+            outcome="codex_authenticated",
+            event_summary=(
+                f"用户完成了 Codex profile {session.profile_name} 认证。"
+            ),
+            title="Codex OAuth",
+            text=f"Codex profile authenticated: {session.profile_name}",
         )
 
     async def model_delete_handler(invocation: CommandInvocation) -> CommandResult:
         if len(invocation.args) != 1:
-            _print_chatdome_message("Usage: /model_delete <profile>")
-            return CommandResult(outcome="invalid_arguments")
+            return CommandResult(
+                outcome="invalid_arguments",
+                text="Usage: /model_delete <profile>",
+                severity="error",
+            )
         runtime = require_provider().get()
-        result = await _profile_admin_service("cli:model_delete").delete_profile(
-            invocation.args[0],
-            ProfileActor(source="cli:model_delete", chat_id=runtime.chat_id),
-        )
-        await reload_model_manager(runtime)
-        _print_chatdome_message(f"Model profile deleted: {result.profile_name}")
-        return CommandResult(
-            outcome="model_deleted",
-            event_summary=f"用户删除了 model profile {result.profile_name}。",
-        )
+        try:
+            return await model_command_service(runtime, "cli:model_delete").delete(
+                invocation.args[0],
+                ProfileActor(source="cli:model_delete", chat_id=runtime.chat_id),
+            )
+        except Exception as exc:
+            return CommandResult(
+                outcome="failed",
+                title="Model delete failed",
+                text=user_facing_error_message(
+                    exc,
+                    fallback="Model profile could not be deleted.",
+                ),
+                severity="error",
+            )
 
     async def model_cancel_handler(_invocation: CommandInvocation) -> CommandResult:
-        _print_chatdome_message("No pending model operation.")
-        return CommandResult(outcome="no_pending_operation")
+        return ModelCommandService.cancel(False)
 
     async def codex_login_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        profile = invocation.args[0] if invocation.args else "codex"
+        profile = invocation.args[0] if invocation.args else ""
         try:
-            await _codex_login_async(codex_args(profile))
-        except SystemExit as exc:
-            _print_chatdome_message(str(exc))
-            return CommandResult(outcome="failed")
-        await reload_model_manager(runtime)
-        return CommandResult(
-            outcome="codex_authenticated",
-            event_summary=f"用户完成了 Codex profile {profile} 认证。",
-        )
+            return await run_codex_auth(runtime, profile, "cli:codex_login")
+        except Exception as exc:
+            return CommandResult(
+                outcome="failed",
+                title="Codex OAuth failed",
+                text=user_facing_error_message(
+                    exc,
+                    fallback="Codex authentication failed.",
+                ),
+                severity="error",
+            )
 
     async def model_add_handler(_invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
@@ -887,18 +960,23 @@ def _build_terminal_command_registry(
         if profile_type == "codex":
             profile = input("Profile [codex]: ").strip() or "codex"
             try:
-                await _codex_login_async(codex_args(profile))
-            except SystemExit as exc:
-                _print_chatdome_message(str(exc))
-                return CommandResult(outcome="failed")
-            await reload_model_manager(runtime)
-            return CommandResult(
-                outcome="model_added",
-                event_summary=f"用户新增了 model profile {profile}。",
-            )
+                return await run_codex_auth(runtime, profile, "cli:model_add")
+            except Exception as exc:
+                return CommandResult(
+                    outcome="failed",
+                    title="Codex OAuth failed",
+                    text=user_facing_error_message(
+                        exc,
+                        fallback="Codex authentication failed.",
+                    ),
+                    severity="error",
+                )
         if profile_type != "openai":
-            _print_chatdome_message("Model type must be openai or codex.")
-            return CommandResult(outcome="invalid_arguments")
+            return CommandResult(
+                outcome="invalid_arguments",
+                text="Model type must be openai or codex.",
+                severity="error",
+            )
 
         profile = input("Profile: ").strip()
         model = input("Model: ").strip()
@@ -907,23 +985,28 @@ def _build_terminal_command_registry(
             or "https://api.openai.com/v1"
         )
         api_key = getpass.getpass("API key: ").strip()
-        result = await _profile_admin_service("cli:model_add").create_openai(
-            CreateOpenAIProfileRequest(
-                name=profile,
-                model=model,
-                base_url=base_url,
-                api_key=api_key,
-                temperature=0.1,
-                max_tokens=2000,
-            ),
-            ProfileActor(source="cli:model_add", chat_id=runtime.chat_id),
-        )
-        await reload_model_manager(runtime)
-        _print_chatdome_message(f"Model profile added: {result.profile_name}")
-        return CommandResult(
-            outcome="model_added",
-            event_summary=f"用户新增了 model profile {result.profile_name}。",
-        )
+        try:
+            return await model_command_service(runtime, "cli:model_add").create_openai(
+                CreateOpenAIProfileRequest(
+                    name=profile,
+                    model=model,
+                    base_url=base_url,
+                    api_key=api_key,
+                    temperature=0.1,
+                    max_tokens=2000,
+                ),
+                ProfileActor(source="cli:model_add", chat_id=runtime.chat_id),
+            )
+        except Exception as exc:
+            return CommandResult(
+                outcome="failed",
+                title="Model add failed",
+                text=user_facing_error_message(
+                    exc,
+                    fallback="Model profile could not be saved.",
+                ),
+                severity="error",
+            )
 
     handlers = {
         "/help": help_handler, "/clear": clear_handler, "/exit": exit_handler,
@@ -1073,6 +1156,17 @@ def _print_chatdome_message(text: str) -> None:
     print(_format_chatdome_block(str(text or "")))
 
 
+def _render_terminal_outbound(message: Any) -> None:
+    if message is None:
+        return
+    rendered = TerminalOutboundRenderer(
+        ascii_mode=_terminal_ascii_mode(),
+    ).render(message)
+    for part in rendered.text_parts:
+        if str(part or "").strip():
+            _print_chatdome_message(part)
+
+
 def _format_terminal_pending_approval(payload: dict[str, Any]) -> str:
     message = build_approval_request(payload)
     rendered = TerminalOutboundRenderer(ascii_mode=_terminal_ascii_mode()).render(message)
@@ -1106,18 +1200,17 @@ def _print_terminal_agent_result(result: Any) -> str:
 
 
 def _terminal_environment_summary(max_chars: int = 4000) -> str:
-    path = ENV_PROFILE_PATH if ENV_PROFILE_PATH.exists() or not LEGACY_ENV_PROFILE_PATH.exists() else LEGACY_ENV_PROFILE_PATH
-    if not path.exists():
-        return _status_label("🧭", "[i]", "Environment profile not found.") + "\nRun: chatdome doctor"
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return _status_label("❌", "[x]", "Environment profile unreadable.") + "\nRun: chatdome doctor"
-    if not text:
-        return _status_label("🧭", "[i]", "Environment profile is empty.") + "\nRun: chatdome doctor"
-    if len(text) > max_chars:
-        return text[:max_chars].rstrip() + "\n..."
-    return text
+    del max_chars
+    facts = EnvironmentFactsBuilder().from_profile(
+        ENV_PROFILE_PATH,
+        fallback_paths=(LEGACY_ENV_PROFILE_PATH,),
+    )
+    result = CommandResult(facts=facts)
+    outbound = OutboundMessageBuilder().from_command_result(None, result)
+    rendered = TerminalOutboundRenderer(
+        ascii_mode=_terminal_ascii_mode(),
+    ).render(outbound)
+    return "\n".join(rendered.text_parts)
 
 
 def _terminal_audit_limit(parts: list[str]) -> int:
@@ -1787,49 +1880,64 @@ def set_codex(args: argparse.Namespace) -> None:
     print(f"{result.action} Codex profile: {result.profile_name}")
 
 
-async def _codex_login_async(args: argparse.Namespace) -> None:
-    args.profile = _validate_profile_name(args.profile)
-    data = _load_yaml()
-    profiles = _profile_items(_chatdome_root(data))
-    token_file = _resolve_codex_login_token_file(args.profile, args.token_file, profiles.get(args.profile))
-
-    from chatdome.llm.codex_auth import CodexOAuth
-
-    oauth = CodexOAuth(
-        client_id=args.client_id or None,
-        token_file=token_file or None,
+async def _codex_login_async(args: argparse.Namespace) -> CommandResult:
+    profile_name = _validate_profile_name(args.profile)
+    config = _load_terminal_chat_config()
+    existing = config.ai_profiles.get(profile_name)
+    token_file = _resolve_codex_login_token_file(
+        profile_name,
+        args.token_file,
+        {
+            "codex_token_file": existing.codex_token_file,
+        }
+        if existing is not None
+        else None,
     )
-    device_info = await oauth.request_device_code()
-    verification_uri = device_info.get("verification_uri", "https://auth.openai.com/codex/device")
-    user_code = device_info["user_code"]
-    interval = int(device_info.get("interval", 5))
-    expires_in = int(device_info.get("expires_in", 300))
-
-    print("Codex OAuth")
-    print(f"- open: {verification_uri}")
-    print(f"- code: {user_code}")
-    print("- waiting for authorization...")
-
-    code, code_verifier = await oauth.poll_device_token(
-        device_code=device_info["device_code"],
-        user_code=user_code,
-        interval=interval,
-        timeout=expires_in,
+    profile = AIConfig(
+        provider="codex",
+        api_mode="codex_responses",
+        model=args.model,
+        temperature=args.temperature,
+        max_tokens=args.max_tokens,
+        codex_client_id=args.client_id,
+        codex_token_file=token_file,
+        codex_base_url=args.base_url,
     )
-    await oauth.exchange_token(code, code_verifier)
-    try:
-        result = await _profile_admin_service("menu:codex-login").create_codex(
-            _codex_request(args, token_file),
-            ProfileActor(source="menu"),
-        )
-    except Exception as exc:
-        raise SystemExit(str(exc)) from None
-    print(f"{result.action} Codex profile: {result.profile_name}")
-
+    service = CodexOAuthService(_profile_admin_service("menu:codex-login"))
+    session = await service.begin(
+        config,
+        ProfileActor(source="menu"),
+        requested_profile=profile_name,
+        forced_profile=profile,
+        overwrite_existing=True if getattr(args, "overwrite", False) else None,
+        expected_profile_fingerprint=getattr(
+            args,
+            "expected_profile_fingerprint",
+            None,
+        ),
+    )
+    pending = CommandResult(
+        outcome="codex_authorization_pending",
+        title="Codex OAuth",
+        facts=session.authorization,
+    )
+    pending = replace(
+        pending,
+        outbound=OutboundMessageBuilder().from_command_result(None, pending),
+    )
+    _render_terminal_outbound(pending.outbound)
+    await service.complete(session)
+    return CommandResult(
+        outcome="codex_authenticated",
+        title="Codex OAuth",
+        text=f"Codex profile authenticated: {session.profile_name}",
+    )
 
 def codex_login(args: argparse.Namespace) -> None:
     try:
-        asyncio.run(_codex_login_async(args))
+        result = asyncio.run(_codex_login_async(args))
+        outbound = OutboundMessageBuilder().from_command_result(None, result)
+        _render_terminal_outbound(outbound)
     except KeyboardInterrupt as exc:
         raise SystemExit("cancelled") from exc
     except ChatDomeError as exc:

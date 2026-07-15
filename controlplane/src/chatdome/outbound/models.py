@@ -17,6 +17,7 @@ class OutboundMessageKind(str, Enum):
     OPERATION_RESULT = "operation_result"
     ERROR = "error"
     NOTIFICATION = "notification"
+    ENVIRONMENT = "environment"
 
 
 class ActionKind(str, Enum):
@@ -28,7 +29,6 @@ class ActionKind(str, Enum):
     SHOW_DETAILS = "show_details"
     CONTINUE = "continue"
     STOP = "stop"
-    RETRY = "retry"
 
 
 @dataclass(frozen=True)
@@ -71,6 +71,58 @@ class ApprovalDetailsFacts:
     command_breakdown: Tuple[CommandBreakdownItem, ...] = ()
     warnings: Tuple[str, ...] = ()
     error_message: str = ""
+
+
+@dataclass(frozen=True)
+class EnvironmentFacts:
+    """Runtime environment values shared by every platform renderer."""
+
+    available: bool
+    profile_path: str
+    collected_at_utc: str = "unknown"
+    os_family: str = "unknown"
+    os_release: str = "unknown"
+    os_version: str = "unknown"
+    machine: str = "unknown"
+    python_version: str = "unknown"
+    shell: str = "unknown"
+    linux_distro: str = "N/A"
+    is_wsl: str = "unknown"
+    available_commands: Tuple[str, ...] = ()
+    missing_commands: Tuple[str, ...] = ()
+    error_message: str = ""
+
+
+@dataclass(frozen=True)
+class ModelProfileFacts:
+    """One model profile without credentials."""
+
+    name: str
+    provider: str
+    api_mode: str
+    model: str
+    base_url: str = ""
+    status: str = ""
+    key_ref: str = ""
+    active: bool = False
+
+
+@dataclass(frozen=True)
+class ModelProfilesFacts:
+    """Model profile inventory returned by the shared command service."""
+
+    active_profile: str
+    profiles: Tuple[ModelProfileFacts, ...] = ()
+
+
+@dataclass(frozen=True)
+class CodexAuthorizationFacts:
+    """Public device-authorization values safe to send to a user."""
+
+    profile_name: str
+    verification_uri: str
+    user_code: str
+    expires_in: int
 
 
 @dataclass(frozen=True)

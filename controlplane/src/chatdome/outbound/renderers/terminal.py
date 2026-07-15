@@ -8,6 +8,9 @@ from chatdome.outbound.models import (
     ActionKind,
     ApprovalDetailsFacts,
     ApprovalRequestFacts,
+    CodexAuthorizationFacts,
+    EnvironmentFacts,
+    ModelProfilesFacts,
     OutboundMessage,
     OutboundMessageKind,
     RenderedMessage,
@@ -106,8 +109,97 @@ class TerminalOutboundRenderer:
         lines.extend(["", "Impact:", self._indent(impact, max_chars=4000), ""])
         lines.append(self._action_prompt(message, include_details=False))
         return RenderedMessage(text_parts=("\n".join(lines),))
+    @staticmethod
+    def _command_list(items: tuple[str, ...]) -> str:
+        return ", ".join(items) if items else "none"
+
+    def _render_environment(self, facts: EnvironmentFacts) -> RenderedMessage:
+        if not facts.available:
+            text = self._status("??", "[i]", facts.error_message)
+            return RenderedMessage(text_parts=(f"{text}\nRun: chatdome doctor",))
+        lines = [
+            "ChatDome Runtime Environment Profile",
+            "",
+            f"Collected at (UTC): {facts.collected_at_utc}",
+            "",
+            "Host summary:",
+            f"- OS family: {facts.os_family}",
+            f"- OS release: {facts.os_release}",
+            f"- OS version: {facts.os_version}",
+            f"- Machine: {facts.machine}",
+            f"- Python: {facts.python_version}",
+            f"- Shell: {facts.shell}",
+            f"- Linux distro: {facts.linux_distro}",
+            f"- WSL: {facts.is_wsl}",
+            "",
+            "Command availability:",
+            f"- Available: {self._command_list(facts.available_commands)}",
+            f"- Missing: {self._command_list(facts.missing_commands)}",
+            "",
+            f"Profile: {facts.profile_path}",
+        ]
+        return RenderedMessage(text_parts=("\n".join(lines),))
+
+    @staticmethod
+    def _render_model_profiles(facts: ModelProfilesFacts) -> RenderedMessage:
+        if not facts.profiles:
+            return RenderedMessage(
+                text_parts=("No model is configured. Run /model_add.",)
+            )
+        lines = [
+            "Model profiles",
+            "",
+            f"Active: {facts.active_profile}",
+            "Switch: /model <profile>",
+            "",
+            "Profiles:",
+        ]
+        for profile in facts.profiles:
+            suffix = "  (current)" if profile.active else ""
+            lines.append(f"  /model {profile.name}{suffix}")
+        lines.extend(["", "Details:"])
+        for profile in facts.profiles:
+            marker = "active" if profile.active else "available"
+            lines.extend(
+                [
+                    f"[{marker}] {profile.name}",
+                    f"  Status: {profile.status}",
+                    f"  Type: {profile.provider}/{profile.api_mode}",
+                    f"  Model: {profile.model}",
+                ]
+            )
+            if profile.base_url:
+                lines.append(f"  Base URL: {profile.base_url}")
+            if profile.key_ref:
+                lines.append(f"  Key: {profile.key_ref}")
+            lines.append("")
+        return RenderedMessage(text_parts=("\n".join(lines).rstrip(),))
+
+    @staticmethod
+    def _render_codex_authorization(
+        facts: CodexAuthorizationFacts,
+    ) -> RenderedMessage:
+        minutes = max(1, facts.expires_in // 60)
+        text = "\n".join(
+            [
+                "Codex OAuth",
+                f"Profile: {facts.profile_name}",
+                f"Open: {facts.verification_uri}",
+                f"Code: {facts.user_code}",
+                f"Expires in: {minutes} minutes",
+                "Waiting for authorization...",
+            ]
+        )
+        return RenderedMessage(text_parts=(text,))
+
 
     def render(self, message: OutboundMessage) -> RenderedMessage:
+        if isinstance(message.facts, EnvironmentFacts):
+            return self._render_environment(message.facts)
+        if isinstance(message.facts, ModelProfilesFacts):
+            return self._render_model_profiles(message.facts)
+        if isinstance(message.facts, CodexAuthorizationFacts):
+            return self._render_codex_authorization(message.facts)
         if message.kind == OutboundMessageKind.APPROVAL_REQUEST:
             return self._render_request(message)
         if message.kind == OutboundMessageKind.APPROVAL_DETAILS:

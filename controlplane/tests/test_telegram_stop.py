@@ -108,9 +108,10 @@ class TelegramStopTests(unittest.TestCase):
         bot = TelegramBot(ChatDomeConfig(), BlockingAgent())
         stop_message = FakeMessage("/stop")
 
-        await bot._handle_stop(FakeUpdate(stop_message), SimpleNamespace())
+        result = await bot._handle_stop(FakeUpdate(stop_message), SimpleNamespace())
 
-        self.assertEqual(stop_message.replies[-1], "当前没有运行中的任务。")
+        self.assertEqual(result.outcome, "no_active_task")
+        self.assertEqual(result.text, "当前没有运行中的任务。")
 
 
 if __name__ == "__main__":

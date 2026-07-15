@@ -136,11 +136,12 @@ class TelegramLLMAdminTests(unittest.TestCase):
         update = FakeUpdate(message)
         context = SimpleNamespace(args=["other"])
 
-        self.run_async(bot._handle_llm(update, context))
+        result = self.run_async(bot._handle_llm(update, context))
 
         self.assertEqual(service.config.active_ai_profile, "other")
         self.assertEqual(service.switched[0][0], "other")
-        self.assertIn("已切换 model", message.replies[-1])
+        self.assertEqual(result.outcome, "model_switched")
+        self.assertIn("model switched", result.text)
 
     def test_empty_allowed_and_admin_chat_ids_do_not_grant_management(self):
         bot, service = self.make_bot(admin_ids=[], allowed_ids=[])
@@ -173,11 +174,12 @@ class TelegramLLMAdminTests(unittest.TestCase):
         update = FakeUpdate(message)
         context = SimpleNamespace(args=["other"])
 
-        self.run_async(bot._handle_llm(update, context))
+        result = self.run_async(bot._handle_llm(update, context))
 
         self.assertEqual(service.config.active_ai_profile, "other")
         self.assertEqual(service.switched[0][0], "other")
-        self.assertIn("已切换 model", message.replies[-1])
+        self.assertEqual(result.outcome, "model_switched")
+        self.assertIn("model switched", result.text)
 
     def test_openai_add_flow_deletes_key_message_and_confirms(self):
         bot, service = self.make_bot()
@@ -233,7 +235,7 @@ class TelegramLLMAdminTests(unittest.TestCase):
         bot._llm_admin_confirmations["nonce"] = {"key": key}
         message = FakeMessage()
 
-        self.run_async(
+        result = self.run_async(
             bot._handle_llm_cancel(
                 FakeUpdate(message), SimpleNamespace(args=[])
             )
@@ -241,7 +243,8 @@ class TelegramLLMAdminTests(unittest.TestCase):
 
         self.assertNotIn(key, bot._llm_admin_sessions)
         self.assertFalse(bot._llm_admin_confirmations)
-        self.assertIn("已取消 model 操作", message.replies[-1])
+        self.assertEqual(result.outcome, "model_operation_cancelled")
+        self.assertEqual(result.text, "Model operation cancelled.")
 
     def test_delete_confirmation_is_bound_and_one_time(self):
         bot, service = self.make_bot()

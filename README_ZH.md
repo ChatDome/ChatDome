@@ -357,36 +357,55 @@ chatdome hello
 | `/token` | 查看当前终端会话 Token 消耗统计 |
 | `/cmd_echo` | 切换底层命令回显模式 |
 | `/audit [N]` | 查看最近的命令审计事件 |
-| `/model <profile>` | 切换当前终端会话使用的 model profile |
+| `/engram [delete <id>]` | 查看或删除持久记忆 |
+| `/model [profile]` | 查看或切换 model profile |
 | `/model_list` | 查看已配置 model profile 与鉴权状态 |
+| `/model_add` | 新增 OpenAI-compatible 或 Codex model profile |
+| `/model_delete <profile>` | 删除未启用的 model profile |
+| `/model_cancel` | 取消当前 model 操作 |
+| `/codex_login [profile]` | 启动 Codex OAuth 设备码认证 |
 | `/details [approval_id] [full]` | 查看待审批动作详情 |
 | `/confirm [approval_id]` | 批准待审批命令 |
 | `/reject [approval_id]` | 拒绝待审批命令或停止暂停任务 |
 | `/continue` | 继续暂停中的任务 |
-| `/retry` | 重试上一次失败请求 |
+| `/sentinel_status` | 查看 Sentinel 状态 |
+| `/sentinel_trigger` | 运行全部 Sentinel 检查 |
+| `/sentinel_history` | 查看最近 Sentinel 告警 |
+| `/sentinel_packs` | 查看已加载 Sentinel Command Pack |
+| `/sentinel_mute [duration]` | 暂停 Sentinel 告警推送 |
+| `/sentinel_resume` | 恢复 Sentinel 告警推送 |
+| `/exit` | 退出终端会话；`/quit` 为别名 |
 
+CLI 与 Telegram 加载同一命令目录并调用同一业务服务。每个已注册命令都会规范化为 `CommandResult`，转换为统一 `OutboundMessage`，再由平台 Renderer 输出。`/model*`、`/codex_login` 和 `/env` 分别使用共享模型命令服务、OAuth 流程和环境 Facts Builder。`/exit` 与 `/quit` 只用于关闭本地终端进程。
 ## Telegram 命令
 
 | 命令 | 描述 |
 |------|------|
 | *(直接发送消息)* | 用自然语言与 AI Agent 对话 |
-| `/clear` | 清除对话上下文，重新开始 |
+| `/help` | 显示命令帮助 |
+| `/clear` | 清除对话上下文 |
 | `/stop` | 中止当前任务 |
-| `/details [approval_id]` | 查看待审批命令分析 |
-| `/confirm [approval_id]` | 强制批准并执行当前待确认的高风险命令 |
-| `/reject [approval_id]` | 拒绝当前待确认命令 |
-| `/continue` | 继续暂停中的任务 |
-| `/env` | 查看当前运行环境摘要（来自 `/var/lib/chatdome/environment/profile.md`） |
+| `/env` | 查看当前运行环境摘要 |
 | `/token` | 查看当前会话 Token 消耗统计 |
 | `/cmd_echo` | 切换底层命令回显模式 |
-| `/audit [N]` | 查看当前会话最近 N 条命令审计事件（默认 10，最大 30） |
-| `/codex_login [profile]` | 触发 Codex OAuth 设备码认证（默认使用当前 Codex profile） |
-| `/model_list` | 查看已配置 model profile 与鉴权状态 |
+| `/audit [N]` | 查看最近 N 条命令审计事件 |
+| `/engram [delete <id>]` | 查看或删除持久记忆 |
 | `/model [profile]` | 查看 profile；管理员可切换当前 model |
+| `/model_list` | 查看已配置 model profile 与鉴权状态 |
 | `/model_add` | 管理员新增或覆盖 model profile |
-| `/model_delete` | 管理员删除未启用的 model profile |
+| `/model_delete <profile>` | 管理员删除未启用的 model profile |
 | `/model_cancel` | 取消当前 model 管理流程 |
-| `/help` | 显示使用帮助和示例问题 |
+| `/codex_login [profile]` | 启动 Codex OAuth 设备码认证 |
+| `/details [approval_id] [full]` | 查看待审批命令分析 |
+| `/confirm [approval_id]` | 批准待审批命令 |
+| `/reject [approval_id]` | 拒绝待审批命令或放弃暂停任务 |
+| `/continue` | 继续暂停中的任务 |
+| `/sentinel_status` | 查看 Sentinel 状态 |
+| `/sentinel_trigger` | 运行全部 Sentinel 检查 |
+| `/sentinel_history` | 查看最近 Sentinel 告警 |
+| `/sentinel_packs` | 查看已加载 Sentinel Command Pack |
+| `/sentinel_mute [duration]` | 暂停 Sentinel 告警推送 |
+| `/sentinel_resume` | 恢复 Sentinel 告警推送 |
 
 没有死板的命令格式——直接说话就行。
 
@@ -457,7 +476,10 @@ ChatDome/
 
 - `controlplane/src/chatdome/runtime_environment.py` — 启动时采集运行环境并注入命令兼容上下文
 - `controlplane/src/chatdome/agent/audit.py` — 命令审计追踪器（哈希链 + 30 天保留）
-- `controlplane/src/chatdome/llm/codex_auth.py` 与 `codex_responses.py` — Codex OAuth 认证与 Responses API 直连
+- `controlplane/src/chatdome/llm/codex_auth.py` 与 `codex_responses.py` — Codex OAuth 传输与 Responses API 直连
+- `controlplane/src/chatdome/llm/codex_oauth_service.py` — 统一 Codex profile 解析、设备授权、令牌交换与持久化
+- `controlplane/src/chatdome/model_commands.py` — 统一 `/model*` 业务服务
+- `controlplane/src/chatdome/outbound/` — 统一出站消息契约、Builder、Policy 与平台 Renderer
 
 ## 路线图
 

@@ -13,7 +13,6 @@ import logging
 import re
 import time
 import uuid
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -31,7 +30,12 @@ from telegram.ext import (
 
 from chatdome.agent.core import Agent
 from chatdome.agent.result import AgentResult, coerce_agent_result
-from chatdome.outbound.builders import build_approval_details, build_approval_request
+from chatdome.outbound.builders import (
+    EnvironmentFactsBuilder,
+    OutboundMessageBuilder,
+    build_approval_details,
+    build_approval_request,
+)
 from chatdome.outbound.renderers.telegram import TelegramOutboundRenderer, group_controls
 from chatdome.config import AIConfig, ChatDomeConfig, validate_profile_name
 from chatdome.errors import (
@@ -42,6 +46,7 @@ from chatdome.errors import (
 from chatdome.telegram.auth import Authenticator
 from chatdome.telegram.formatting import MessageMarkup, TelegramMessageFormatter
 from chatdome.runtime_paths import environment_profile_path
+from chatdome.model_commands import ModelCommandService
 from chatdome.slash_commands import (
     CommandContext,
     CommandDef,
@@ -53,7 +58,6 @@ from chatdome.slash_commands import (
     execute_command,
     execute_engram_command,
     format_command_help,
-    format_model_profiles,
     format_user_command_audit_events,
     get_agent_approval_details,
     get_token_usage,
@@ -71,8 +75,8 @@ from chatdome.slash_commands import (
     stop_active_task,
     toggle_command_echo,
 )
+from chatdome.llm.codex_oauth_service import CodexOAuthService
 from chatdome.llm.profile_admin import (
-    CreateCodexProfileRequest,
     CreateOpenAIProfileRequest,
     LLMProfileAdminService,
     ProfileActor,
@@ -105,6 +109,7 @@ class TelegramBot:
         self.config = config
         self.agent = agent
         self.profile_admin = profile_admin
+        self._codex_oauth = CodexOAuthService(profile_admin)
         self.auth = Authenticator(config.telegram.allowed_chat_ids)
         self.max_message_length = config.telegram.max_message_length
         self._app: Application | None = None
@@ -303,7 +308,8 @@ class TelegramBot:
             async def invoke(_invocation: CommandInvocation) -> Any:
                 return await callback(update, context)
 
-            await execute_command(invocation, invoke)
+            result = await execute_command(invocation, invoke)
+            await self._send_command_result(update.message, result)
 
         return CommandHandler(command_name, wrapped)
 
@@ -311,12 +317,14 @@ class TelegramBot:
 
     async def _handle_help(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
+    ) -> CommandResult:
         """Handle /help and /start commands."""
-        if not self._check_auth(update):
-            return
-
-        await self._send_long_message(update.message, format_command_help("telegram"))
+        del update, context
+        return CommandResult(
+            outcome="help_shown",
+            title="Commands",
+            text=format_command_help("telegram"),
+        )
 
     async def _handle_clear(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -329,15 +337,15 @@ class TelegramBot:
         chat_id = update.effective_chat.id
         cleared = clear_agent_session(self.agent, chat_id)
         if cleared:
-            await update.message.reply_text("✅ 对话已重置。")
             return CommandResult(
                 outcome="session_cleared",
                 event_summary="用户通过 Telegram 清空了当前会话。",
+                text="✅ 对话已重置。",
             )
-        await update.message.reply_text("ℹ️ 当前没有活跃的对话。")
         return CommandResult(
             outcome="no_active_session",
             event_summary="Telegram 当前没有可清空的会话。",
+            text="ℹ️ 当前没有活跃的对话。",
         )
 
     def _active_task_for_chat(self, chat_id: int) -> asyncio.Task | None:
@@ -377,17 +385,17 @@ class TelegramBot:
             lambda: self._cancel_active_task_for_chat(chat_id)
         )
         if not stopped:
-            await update.message.reply_text("当前没有运行中的任务。")
             return CommandResult(
                 outcome="no_active_task",
                 event_summary="Telegram 当前没有运行中的任务。",
+                text="当前没有运行中的任务。",
             )
 
-        await update.message.reply_text("任务已停止。")
         return CommandResult(
             outcome="task_stopped",
             event_summary="用户通过 Telegram 中止了当前任务，后续步骤未执行。",
             visible_to_agent=True,
+            text="任务已停止。",
         )
 
     async def _handle_cmd_echo(
@@ -405,11 +413,11 @@ class TelegramBot:
         else:
             msg = "🔍 命令回显 已关闭 🔴"
 
-        await self._send_long_message(update.message, msg)
         state = "enabled" if enabled else "disabled"
         return CommandResult(
             outcome=f"command_echo_{state}",
             event_summary=f"用户通过 Telegram {'开启' if enabled else '关闭'}了命令回显。",
+            text=msg,
         )
 
     async def _handle_token(
@@ -429,20 +437,26 @@ class TelegramBot:
             f"⬇️ 下行总花费 (Completion): {stats['completion_tokens']:,.0f} Tokens\n"
             f"🔢 累计调用账单: {stats['total_tokens']:,.0f} Tokens"
         )
-        await self._send_long_message(update.message, msg)
         return CommandResult(
-            event_summary="用户通过 Telegram 查看了当前会话的 Token 用量。"
+            outcome="token_usage_shown",
+            event_summary="用户通过 Telegram 查看了当前会话的 Token 用量。",
+            title="Token usage",
+            text=msg,
         )
 
     async def _handle_env(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
+    ) -> CommandResult:
         """Handle /env command — show runtime environment profile summary."""
-        if not self._check_auth(update):
-            return
-
-        summary = self._build_environment_summary()
-        await self._send_long_message(update.message, summary)
+        del update, context
+        facts = EnvironmentFactsBuilder().from_profile(
+            self._environment_profile_path,
+        )
+        return CommandResult(
+            outcome="environment_shown" if facts.available else "unavailable",
+            event_summary="用户通过 Telegram 查看了运行环境。",
+            facts=facts,
+        )
 
     async def _handle_audit(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -454,12 +468,10 @@ class TelegramBot:
         chat_id = update.effective_chat.id
         limit = parse_audit_limit(getattr(context, "args", None) or ())
         events = get_user_command_audit_events(chat_id, limit)
-        await self._send_long_message(
-            update.message,
-            format_user_command_audit_events(events),
-        )
         return CommandResult(
-            event_summary=f"用户通过 Telegram 查看了最近 {len(events)} 条命令审计事件。"
+            outcome="audit_shown",
+            event_summary=f"用户通过 Telegram 查看了最近 {len(events)} 条命令审计事件。",
+            text=format_user_command_audit_events(events),
         )
 
     # ----- Message handler -----
@@ -786,15 +798,21 @@ class TelegramBot:
         """Handle /engram command."""
         if not self._check_auth(update):
             return CommandResult(outcome="unauthorized")
-        result = execute_engram_command(self.agent, context.args or ())
-        await self._send_long_message(update.message, result.text)
-        return result
+        return execute_engram_command(self.agent, context.args or ())
 
     def _get_llm_manager(self):
         return getattr(self.agent, "llm_manager", None)
 
+    def _model_command_service(self) -> ModelCommandService:
+        return ModelCommandService(
+            self._get_llm_manager(),
+            self.profile_admin,
+        )
+
     def _format_llm_profile_list(self) -> str:
-        return format_model_profiles(self._get_llm_manager())
+        result = self._model_command_service().list_profiles()
+        outbound = OutboundMessageBuilder().from_command_result(None, result)
+        return "\n".join(TelegramOutboundRenderer().render(outbound).text_parts)
 
     @staticmethod
     def _format_llm_status(status: str) -> str:
@@ -810,11 +828,10 @@ class TelegramBot:
 
     async def _handle_llm_list(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
+    ) -> CommandResult:
         """Handle /model_list command."""
-        if not self._check_auth(update):
-            return
-        await self._send_long_message(update.message, self._format_llm_profile_list())
+        del update, context
+        return self._model_command_service().list_profiles()
 
     async def _handle_llm_add(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -855,7 +872,7 @@ class TelegramBot:
 
     async def _handle_llm_cancel(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
+    ) -> CommandResult:
         del context
         if not await self._require_llm_admin(update):
             return
@@ -865,10 +882,7 @@ class TelegramBot:
             if item.get("key") == key:
                 self._llm_admin_confirmations.pop(nonce, None)
                 removed_any = True
-        if removed_any:
-            await update.message.reply_text("已取消 model 操作。")
-        else:
-            await update.message.reply_text("当前没有待取消的 model 操作。")
+        return self._model_command_service().cancel(removed_any)
 
     async def _handle_llm_delete(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -883,7 +897,9 @@ class TelegramBot:
             await update.message.reply_text("用法: /model_delete <profile>")
             return
         try:
-            summary = await self.profile_admin.get_profile_summary(str(args[0]).strip())
+            summary = await self._model_command_service().inspect_delete(
+                str(args[0]).strip()
+            )
         except Exception as exc:
             await update.message.reply_text(
                 self._format_error_text(
@@ -892,12 +908,6 @@ class TelegramBot:
                     fallback="无法读取 model profile。",
                 )
             )
-            return
-        if summary is None:
-            await update.message.reply_text(f"未找到 model profile: {args[0]}")
-            return
-        if summary.active:
-            await update.message.reply_text("请先切换 model，再删除该 profile。")
             return
         nonce = uuid.uuid4().hex[:12]
         key = self._llm_admin_key(update)
@@ -1067,270 +1077,139 @@ class TelegramBot:
 
     async def _handle_llm(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
+    ) -> CommandResult:
         """List profiles or persistently switch the active model."""
-        if not self._check_auth(update):
-            return
-
         args = getattr(context, "args", []) or []
+        service = self._model_command_service()
         if not args:
-            await self._send_long_message(update.message, self._format_llm_profile_list())
-            return
+            return service.list_profiles()
         if not await self._require_llm_admin(update):
-            return
-        if self.profile_admin is None:
-            await update.message.reply_text("model 管理服务未启用。")
-            return
+            return CommandResult(outcome="unauthorized")
 
-        profile_name = str(args[0]).strip()
-        old_profile = self.config.active_ai_profile
         try:
-            result = await self.profile_admin.set_active_profile(
-                profile_name,
+            return await service.switch(
+                str(args[0]).strip(),
                 self._profile_actor(update),
             )
         except Exception as exc:
             logger.warning("Model profile switch failed: %s", exc)
-            await update.message.reply_text(
-                self._format_error_text(
+            return CommandResult(
+                outcome="failed",
+                title="Model switch failed",
+                text=user_facing_error_message(
                     exc,
-                    prefix="model 切换失败",
                     fallback="model 切换失败，请检查配置后重试。",
-                )
+                ),
+                severity="error",
             )
-            return
-
-        profile = self.config.ai_profiles[result.profile_name]
-        await update.message.reply_text(
-            "已切换 model: "
-            f"{result.profile_name} ({profile.provider}/{profile.api_mode}, model={profile.model})"
-        )
-        logger.info(
-            "Model profile switched by Telegram: %s -> %s",
-            old_profile,
-            result.profile_name,
-        )
 
     @staticmethod
     def _default_codex_profile(profile_name: str) -> AIConfig:
-        from chatdome.llm.codex_auth import default_token_file_config_for_profile
+        return CodexOAuthService.default_profile(profile_name)
 
-        return AIConfig(
-            provider="codex",
-            api_mode="codex_responses",
-            model="gpt-5.5",
-            temperature=0.1,
-            max_tokens=2000,
-            codex_client_id="",
-            codex_token_file=default_token_file_config_for_profile(profile_name),
-            codex_base_url="https://chatgpt.com/backend-api/codex",
-        )
-
-    @staticmethod
-    def _login_profile_with_token_file(profile_name: str, profile: AIConfig) -> tuple[AIConfig, bool]:
-        if str(profile.codex_token_file or "").strip():
-            return profile, False
-        from chatdome.llm.codex_auth import default_token_file_config_for_profile
-
-        return (
-            replace(
-                profile,
-                codex_token_file=default_token_file_config_for_profile(profile_name),
-            ),
-            True,
-        )
-
-    def _resolve_codex_login_profile(self, requested_profile: str = "") -> tuple[str, Any, bool]:
-        profiles = self.config.ai_profiles
-        requested = str(requested_profile or "").strip()
-
-        if requested:
-            profile = profiles.get(requested)
-            if profile is None:
-                try:
-                    validate_profile_name(requested)
-                except ValueError as exc:
-                    raise LLMProfileNotFound(f"未知 model profile: {requested}") from exc
-                return requested, self._default_codex_profile(requested), True
-            if profile.api_mode != "codex_responses":
-                raise LLMProfileNotReady(f"profile {requested} 不是 Codex OAuth profile。")
-            login_profile, persist_profile = self._login_profile_with_token_file(requested, profile)
-            return requested, login_profile, persist_profile
-
+    def _resolve_codex_login_profile(
+        self,
+        requested_profile: str = "",
+    ) -> tuple[str, AIConfig, bool]:
         manager = self._get_llm_manager()
-        active_name = manager.get_active_profile_name() if manager else self.config.active_ai_profile
-        active_profile = profiles.get(active_name)
-        if active_profile and active_profile.api_mode == "codex_responses":
-            login_profile, persist_profile = self._login_profile_with_token_file(active_name, active_profile)
-            return active_name, login_profile, persist_profile
-
-        codex_profiles = [
-            (name, profile)
-            for name, profile in profiles.items()
-            if profile.api_mode == "codex_responses"
-        ]
-        if len(codex_profiles) == 1:
-            name, profile = codex_profiles[0]
-            login_profile, persist_profile = self._login_profile_with_token_file(name, profile)
-            return name, login_profile, persist_profile
-
-        if not codex_profiles:
-            return "codex", self._default_codex_profile("codex"), True
-
-        names = ", ".join(name for name, _ in codex_profiles) or "(none)"
-        raise LLMProfileNotReady(
-            "当前 active profile 不是 Codex。请使用 /codex_login <profile_name> 指定 Codex profile。"
-            f"可用 Codex profiles: {names}"
+        active_profile = (
+            manager.get_active_profile_name() if manager is not None else ""
+        )
+        return self._codex_oauth.resolve_profile(
+            self.config,
+            requested_profile,
+            active_profile=active_profile,
         )
 
     async def _handle_codex_login(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle /codex_login command — trigger OAuth Device Code flow."""
-        if not self._check_auth(update):
-            return
+    ) -> CommandResult:
+        """Start the shared Codex OAuth device flow."""
         if not await self._require_llm_admin(update):
-            return
-        if self.profile_admin is None:
-            await update.message.reply_text("model 管理服务未启用。")
-            return
+            return CommandResult(outcome="unauthorized")
 
-        chat_id = update.effective_chat.id
-        persist_overwrite = False
-        persist_expected_fingerprint = None
-        from chatdome.llm.codex_auth import CodexOAuth
-
+        requested_profile = (getattr(context, "args", []) or [""])[0]
+        manager = self._get_llm_manager()
+        active_profile = (
+            manager.get_active_profile_name() if manager is not None else ""
+        )
         try:
-            requested_profile = (getattr(context, "args", []) or [""])[0]
-            if getattr(context, "chatdome_force_codex", False):
-                profile_name = validate_profile_name(requested_profile)
-                profile = self._default_codex_profile(profile_name)
-                persist_profile = True
-            else:
-                profile_name, profile, persist_profile = self._resolve_codex_login_profile(
-                    requested_profile
-                )
-            if persist_profile:
-                initial_summary = await self.profile_admin.get_profile_summary(profile_name)
-                if getattr(context, "chatdome_force_codex", False):
-                    persist_overwrite = bool(
-                        getattr(context, "chatdome_codex_overwrite", False)
-                    )
-                    persist_expected_fingerprint = getattr(
-                        context, "chatdome_expected_fingerprint", None
-                    )
-                else:
-                    persist_overwrite = initial_summary is not None
-                    persist_expected_fingerprint = (
-                        initial_summary.fingerprint if initial_summary is not None else None
-                    )
-        except Exception as e:
-            await update.message.reply_text(
-                self._format_error_text(
-                    e,
-                    prefix="❌ 无法启动 Codex 认证",
+            force_codex = bool(getattr(context, "chatdome_force_codex", False))
+            forced_profile = (
+                self._default_codex_profile(requested_profile)
+                if force_codex
+                else None
+            )
+            session = await self._codex_oauth.begin(
+                self.config,
+                self._profile_actor(update),
+                requested_profile=requested_profile,
+                active_profile=active_profile,
+                forced_profile=forced_profile,
+                overwrite_existing=(
+                    bool(getattr(context, "chatdome_codex_overwrite", False))
+                    if force_codex
+                    else None
+                ),
+                expected_profile_fingerprint=getattr(
+                    context,
+                    "chatdome_expected_fingerprint",
+                    None,
+                ),
+            )
+        except Exception as exc:
+            return CommandResult(
+                outcome="failed",
+                title="Codex OAuth failed",
+                text=user_facing_error_message(
+                    exc,
                     fallback="无法启动 Codex 认证，请检查 model profile 配置。",
-                )
+                ),
+                severity="error",
             )
-            return
-        
-        oauth = CodexOAuth(
-            client_id=profile.codex_client_id or None,
-            token_file=profile.codex_token_file or None,
-        )
-        
-        try:
-            status_msg = await update.message.reply_text("正在向 OpenAI 申请设备验证码，请稍候...")
-            device_info = await oauth.request_device_code()
-            await status_msg.delete()
-        except Exception as e:
-            logger.error("Failed to request Codex device code: %s", e)
-            await update.message.reply_text(
-                self._format_error_text(
-                    e,
-                    prefix="❌ 申请验证码失败",
-                    fallback="申请 Codex 设备验证码失败，请稍后重试。",
-                )
-            )
-            return
 
-        device_code = device_info["device_code"]
-        user_code = device_info["user_code"]
-        verification_uri = device_info.get("verification_uri", "https://auth.openai.com/codex/device")
-        interval = device_info.get("interval", 5)
-        expires_in = device_info.get("expires_in", 300)
-
-        msg_text = (
-            "🔐 *OpenAI Codex 认证授权*\n\n"
-            f"Profile: `{profile_name}`\n\n"
-            f"请在浏览器中打开链接进行授权：\n"
-            f"{verification_uri}\n\n"
-            f"输入以下临时验证码：\n"
-            f"`{user_code}`\n\n"
-            f"⏳ 该验证码将在 5 分钟内有效。绑定成功后，ChatDome 将自动保存授权凭证。"
-        )
-        
-        await self._send_long_message(update.message, msg_text, markup=MessageMarkup.TELEGRAM_MARKDOWN)
-
-        # Start background polling task
-        async def do_poll_and_exchange():
+        async def complete_authorization() -> None:
             try:
-                code, code_verifier = await oauth.poll_device_token(
-                    device_code=device_code,
-                    user_code=user_code,
-                    interval=interval,
-                    timeout=expires_in
-                )
-                await oauth.exchange_token(code, code_verifier)
-                if persist_profile:
-                    result = await self.profile_admin.create_codex(
-                        CreateCodexProfileRequest(
-                            name=profile_name,
-                            model=profile.model,
-                            client_id=profile.codex_client_id,
-                            token_file=profile.codex_token_file,
-                            base_url=profile.codex_base_url,
-                            temperature=profile.temperature,
-                            max_tokens=profile.max_tokens,
-                            overwrite_existing=persist_overwrite,
-                            expected_profile_fingerprint=persist_expected_fingerprint,
-                        ),
-                        self._profile_actor(update),
-                    )
-                    logger.info(
-                        "Codex profile persisted in process: %s action=%s",
-                        result.profile_name,
-                        result.action,
-                    )
-
-                await self._send_bot_text(
-                    bot=context.bot,
-                    chat_id=chat_id,
-                    text=(
-                        "✅ *Codex 认证成功！*\n"
-                        f"Profile `{profile_name}` 已可使用。"
+                await self._codex_oauth.complete(session)
+                result = CommandResult(
+                    outcome="codex_authenticated",
+                    event_summary=(
+                        f"用户完成了 Codex profile {session.profile_name} 认证。"
                     ),
-                    markup=MessageMarkup.TELEGRAM_MARKDOWN
+                    title="Codex OAuth",
+                    text=f"Codex profile 已可使用: {session.profile_name}",
                 )
             except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logger.error("Codex device login polling background task failed: %s", e)
-                await self._send_bot_text(
-                    bot=context.bot,
-                    chat_id=chat_id,
-                    text=self._format_error_text(
-                        e,
-                        prefix="❌ Codex 认证失败",
+                return
+            except Exception as exc:
+                logger.error(
+                    "Codex device login polling background task failed: %s",
+                    exc,
+                )
+                result = CommandResult(
+                    outcome="failed",
+                    title="Codex OAuth failed",
+                    text=user_facing_error_message(
+                        exc,
                         fallback="Codex 认证失败，请重新运行 /codex_login。",
                     ),
-                    markup=MessageMarkup.PLAIN,
+                    severity="error",
                 )
+            await self._send_command_result(update.message, result)
 
         if self._app is not None:
-            self._app.create_task(do_poll_and_exchange())
+            self._app.create_task(complete_authorization())
         else:
-            asyncio.create_task(do_poll_and_exchange())
+            asyncio.create_task(complete_authorization())
+
+        return CommandResult(
+            outcome="codex_authorization_pending",
+            event_summary=(
+                f"用户为 Codex profile {session.profile_name} 启动了认证。"
+            ),
+            title="Codex OAuth",
+            facts=session.authorization,
+        )
 
     async def _handle_llm_admin_callback(
         self,
@@ -1364,7 +1243,7 @@ class TelegramBot:
                 await query.message.reply_text("已取消删除。")
                 return
             try:
-                result = await self.profile_admin.delete_profile(
+                result = await self._model_command_service().delete(
                     item["profile_name"],
                     self._profile_actor(update),
                 )
@@ -1377,7 +1256,7 @@ class TelegramBot:
                     )
                 )
                 return
-            await query.message.reply_text(f"已删除 model profile: {result.profile_name}")
+            await self._send_command_result(query.message, result)
             return
 
         session = self._active_llm_admin_session(key)
@@ -1415,7 +1294,7 @@ class TelegramBot:
             self._llm_admin_sessions.pop(key, None)
             await query.edit_message_reply_markup(reply_markup=None)
             try:
-                result = await self.profile_admin.create_openai(
+                result = await self._model_command_service().create_openai(
                     CreateOpenAIProfileRequest(
                         name=saved["name"],
                         model=saved["model"],
@@ -1435,8 +1314,7 @@ class TelegramBot:
                     )
                 )
                 return
-            verb = "已更新" if result.action == "updated" else "已新增"
-            await query.message.reply_text(f"{verb} model profile: {result.profile_name}")
+            await self._send_command_result(query.message, result)
             return
         if action == "codex_start":
             saved = dict(session)
@@ -1454,7 +1332,8 @@ class TelegramBot:
                 chatdome_codex_overwrite=saved.get("existing") is not None,
                 chatdome_expected_fingerprint=saved.get("expected_fingerprint"),
             )
-            await self._handle_codex_login(proxy_update, proxy_context)
+            result = await self._handle_codex_login(proxy_update, proxy_context)
+            await self._send_command_result(query.message, result)
             return
 
         await query.message.reply_text("Model 操作已失效，请重新开始。")
@@ -1719,6 +1598,30 @@ class TelegramBot:
             )
 
     # ----- Utilities -----
+
+    async def _send_command_result(
+        self,
+        message,
+        result: CommandResult,
+    ) -> None:
+        if result is None:
+            return
+        outbound = result.outbound or OutboundMessageBuilder().from_command_result(
+            None,
+            result,
+        )
+        rendered = TelegramOutboundRenderer().render(outbound)
+        text = "\n".join(
+            part for part in rendered.text_parts if str(part or "").strip()
+        )
+        if not text:
+            return
+        await self._send_long_message(
+            message,
+            text,
+            markup=MessageMarkup.PLAIN,
+            reply_markup=self._rendered_control_markup(rendered),
+        )
 
     async def _send_agent_result(self, message, result: AgentResult | str | None) -> None:
         """Render a structured Agent result into Telegram messages."""
@@ -2149,62 +2052,13 @@ class TelegramBot:
                 chunk = f"📄 ({i}/{len(chunks)})\n{chunk}"
             await _send_chunk(chunk, reply_markup if i == len(chunks) else None)
 
-    @staticmethod
-    def _truncate_csv_items(raw: str, max_items: int = 14) -> str:
-        """Truncate a comma-separated list for Telegram readability."""
-        items = [x.strip() for x in raw.split(",") if x.strip()]
-        if not items or items == ["none"]:
-            return "none"
-
-        if len(items) <= max_items:
-            return ", ".join(items)
-        return f"{', '.join(items[:max_items])} ... (+{len(items) - max_items} more)"
-
     def _build_environment_summary(self) -> str:
-        """Build a short environment summary from environment_profile.md."""
-        path = self._environment_profile_path
-        if not path.exists():
-            return (
-                "ℹ️ 未找到环境档案。\n"
-                "请重启 ChatDome 生成运行环境画像。"
-            )
-
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError as e:
-            return self._format_error_text(
-                e,
-                prefix="⚠️ 读取环境档案失败",
-                fallback="读取环境档案失败，请检查文件权限。",
-            )
-
-        fields: dict[str, str] = {}
-        for line in text.splitlines():
-            line = line.strip()
-            if not line.startswith("- ") or ": " not in line:
-                continue
-            key, value = line[2:].split(": ", 1)
-            fields[key.strip()] = value.strip()
-
-        available = self._truncate_csv_items(fields.get("Available", "none"))
-        missing = self._truncate_csv_items(fields.get("Missing", "none"))
-
-        return (
-            "🧭 当前运行环境摘要\n\n"
-            f"采集时间(UTC): {fields.get('UTC', 'unknown')}\n\n"
-            "主机信息:\n"
-            f"- OS family: {fields.get('OS family', 'unknown')}\n"
-            f"- OS release: {fields.get('OS release', 'unknown')}\n"
-            f"- OS version: {fields.get('OS version', 'unknown')}\n"
-            f"- Machine: {fields.get('Machine', 'unknown')}\n"
-            f"- Python: {fields.get('Python', 'unknown')}\n"
-            f"- Shell: {fields.get('Shell', 'unknown')}\n"
-            f"- Linux distro: {fields.get('Linux distro', 'N/A')}\n"
-            f"- WSL: {fields.get('WSL', 'unknown')}\n\n"
-            "命令探测(节选):\n"
-            f"- Available: {available}\n"
-            f"- Missing: {missing}"
+        facts = EnvironmentFactsBuilder().from_profile(
+            self._environment_profile_path,
         )
+        result = CommandResult(facts=facts)
+        outbound = OutboundMessageBuilder().from_command_result(None, result)
+        return "\n".join(TelegramOutboundRenderer().render(outbound).text_parts)
 
     # ----- Sentinel command handlers -----
 
@@ -2213,14 +2067,12 @@ class TelegramBot:
     ) -> CommandResult:
         if not self._check_auth(update):
             return CommandResult(outcome="unauthorized")
-        result = sentinel_mute(
+        return sentinel_mute(
             self._sentinel,
             context.args or (),
             chat_id=update.effective_chat.id,
             source="telegram",
         )
-        await update.message.reply_text(result.text)
-        return result
 
     async def _handle_sentinel_resume(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2228,12 +2080,10 @@ class TelegramBot:
         del context
         if not self._check_auth(update):
             return CommandResult(outcome="unauthorized")
-        result = sentinel_resume(
+        return sentinel_resume(
             self._sentinel,
             chat_id=update.effective_chat.id,
         )
-        await update.message.reply_text(result.text)
-        return result
 
     async def _handle_sentinel_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2241,9 +2091,7 @@ class TelegramBot:
         del context
         if not self._check_auth(update):
             return CommandResult(outcome="unauthorized")
-        result = sentinel_status(self._sentinel, self._pack_loader)
-        await self._send_long_message(update.message, result.text)
-        return result
+        return sentinel_status(self._sentinel, self._pack_loader)
 
     async def _handle_sentinel_trigger(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2259,7 +2107,6 @@ class TelegramBot:
                 await status_msg.delete()
             except Exception:
                 pass
-        await self._send_long_message(update.message, result.text)
         return result
 
     async def _handle_sentinel_history(
@@ -2269,7 +2116,6 @@ class TelegramBot:
         if not self._check_auth(update):
             return CommandResult(outcome="unauthorized")
         result = sentinel_history(self._sentinel)
-        await self._send_long_message(update.message, result.text)
         return result
 
     async def _handle_sentinel_packs(
@@ -2279,7 +2125,6 @@ class TelegramBot:
         if not self._check_auth(update):
             return CommandResult(outcome="unauthorized")
         result = sentinel_packs(self._pack_loader)
-        await self._send_long_message(update.message, result.text)
         return result
 
     async def send_alert(self, chat_id: int, text: str, alert_event: Any | None = None) -> None:

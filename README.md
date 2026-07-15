@@ -372,7 +372,7 @@ chatdome hello
 | `/sentinel_resume` | Resume Sentinel alert pushes |
 | `/exit` | Exit terminal chat; `/quit` is an alias |
 
-CLI and Telegram load the same command catalog and call the same business operations. Each surface only adapts input, controls, and rendering. `/exit` and `/quit` are CLI-only because they close the local terminal process.
+CLI and Telegram load the same command catalog and call the same business services. Every registered command is normalized to `CommandResult`, converted to a unified `OutboundMessage`, and then rendered by the platform-specific renderer. `/model*` uses one model command service, `/codex_login` uses one OAuth workflow, and `/env` uses one environment Facts Builder. `/exit` and `/quit` are CLI-only because they close the local terminal process.
 
 ## Telegram Commands
 
@@ -470,7 +470,10 @@ Additional implementation modules (current codebase):
 
 - `controlplane/src/chatdome/runtime_environment.py` — startup environment profiling and prompt compatibility context
 - `controlplane/src/chatdome/agent/audit.py` — command audit tracker (hash chain + 30-day retention)
-- `controlplane/src/chatdome/llm/codex_auth.py` and `codex_responses.py` — Codex OAuth authentication and direct Responses API access
+- `controlplane/src/chatdome/llm/codex_auth.py` and `codex_responses.py` — Codex OAuth transport and direct Responses API access
+- `controlplane/src/chatdome/llm/codex_oauth_service.py` — shared Codex profile resolution, device authorization, token exchange, and persistence
+- `controlplane/src/chatdome/model_commands.py` — shared `/model*` business service
+- `controlplane/src/chatdome/outbound/` — unified outbound message contracts, builders, policy, and platform renderers
 
 ## Roadmap
 

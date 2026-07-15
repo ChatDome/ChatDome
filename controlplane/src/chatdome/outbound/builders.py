@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
@@ -10,7 +11,9 @@ from chatdome.outbound.models import (
     ActionKind,
     ApprovalDetailsFacts,
     ApprovalRequestFacts,
+    CodexAuthorizationFacts,
     CommandBreakdownItem,
+    EnvironmentFacts,
     OutboundAction,
     OutboundMessage,
     OutboundMessageKind,
@@ -129,8 +132,127 @@ def build_approval_details(details: Optional[Mapping[str, Any]]) -> OutboundMess
     )
 
 
+def _csv_items(value: str) -> Tuple[str, ...]:
+    text = str(value or "").strip()
+    if not text or text.casefold() == "none":
+        return ()
+    return tuple(item.strip() for item in text.split(",") if item.strip())
+
+
+class EnvironmentFactsBuilder:
+    """Read the persisted runtime profile into one typed fact model."""
+
+    def from_profile(
+        self,
+        profile_path: str | Path,
+        *,
+        fallback_paths: Iterable[str | Path] = (),
+    ) -> EnvironmentFacts:
+        candidates = (Path(profile_path), *(Path(item) for item in fallback_paths))
+        selected = next((path for path in candidates if path.is_file()), candidates[0])
+        if not selected.is_file():
+            return EnvironmentFacts(
+                available=False,
+                profile_path=str(selected),
+                error_message="Environment profile not found.",
+            )
+        try:
+            text = selected.read_text(encoding="utf-8")
+        except OSError:
+            return EnvironmentFacts(
+                available=False,
+                profile_path=str(selected),
+                error_message="Environment profile is unreadable.",
+            )
+        if not text.strip():
+            return EnvironmentFacts(
+                available=False,
+                profile_path=str(selected),
+                error_message="Environment profile is empty.",
+            )
+
+        fields: Dict[str, str] = {}
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("- ") or ": " not in line:
+                continue
+            key, value = line[2:].split(": ", 1)
+            fields[key.strip()] = value.strip()
+        return EnvironmentFacts(
+            available=True,
+            profile_path=str(selected),
+            collected_at_utc=fields.get("UTC", "unknown"),
+            os_family=fields.get("OS family", "unknown"),
+            os_release=fields.get("OS release", "unknown"),
+            os_version=fields.get("OS version", "unknown"),
+            machine=fields.get("Machine", "unknown"),
+            python_version=fields.get("Python", "unknown"),
+            shell=fields.get("Shell", "unknown"),
+            linux_distro=fields.get("Linux distro", "N/A"),
+            is_wsl=fields.get("WSL", "unknown"),
+            available_commands=_csv_items(fields.get("Available", "")),
+            missing_commands=_csv_items(fields.get("Missing", "")),
+        )
+
+
+def build_environment_message(facts: EnvironmentFacts) -> OutboundMessage:
+    return OutboundMessage(
+        kind=OutboundMessageKind.ENVIRONMENT,
+        title="Runtime environment",
+        summary=facts.error_message or f"{facts.os_family} {facts.os_release}",
+        severity="info" if facts.available else "warning",
+        facts=facts,
+    )
+
+
 class OutboundMessageBuilder:
     """Convert the stable AgentResult contract into outbound semantics."""
+
+    def from_command_result(self, invocation: Any, result: Any) -> OutboundMessage:
+        """Convert every shared command result before platform rendering."""
+
+        facts = getattr(result, "facts", None)
+        if isinstance(facts, EnvironmentFacts):
+            return build_environment_message(facts)
+
+        severity = normalize_text(getattr(result, "severity", "info")) or "info"
+        outcome = normalize_text(getattr(result, "outcome", "completed"))
+        if severity == "error" or outcome == "failed":
+            kind = OutboundMessageKind.ERROR
+        elif isinstance(facts, CodexAuthorizationFacts):
+            kind = OutboundMessageKind.NOTIFICATION
+        else:
+            kind = OutboundMessageKind.OPERATION_RESULT
+        title = normalize_text(getattr(result, "title", ""))
+        text = str(getattr(result, "text", "") or "").strip()
+        refs = MappingProxyType(
+            {
+                str(key): normalize_text(value)
+                for key, value in dict(getattr(result, "event_refs", {}) or {}).items()
+                if normalize_text(value)
+            }
+        )
+        if facts is None:
+            facts = MappingProxyType(
+                {
+                    "command": str(
+                        getattr(getattr(invocation, "command", None), "name", "")
+                    ),
+                    "source": str(
+                        getattr(getattr(invocation, "context", None), "source", "")
+                    ),
+                    "outcome": outcome,
+                }
+            )
+        return OutboundMessage(
+            kind=kind,
+            title=title,
+            summary=text or title,
+            body=text,
+            severity=severity,
+            refs=refs,
+            facts=facts,
+        )
 
     def from_agent_result(self, value: Any) -> OutboundMessage:
         result = coerce_agent_result(value)

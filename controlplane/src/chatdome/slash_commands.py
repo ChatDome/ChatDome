@@ -49,6 +49,10 @@ class CommandResult:
     visible_to_agent: bool = False
     event_refs: Mapping[str, Any] = field(default_factory=dict)
     text: str = ""
+    title: str = ""
+    severity: str = "info"
+    facts: Any = None
+    outbound: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -204,11 +208,15 @@ class CommandRegistry:
         commands: Iterable[CommandDef] = (),
         *,
         context_factory: Callable[[], CommandContext] | None = None,
+        result_handler: Callable[
+            ["CommandInvocation", CommandResult], Any
+        ] | None = None,
     ) -> None:
         self._commands: list[CommandDef] = []
         self._by_name: dict[str, CommandDef] = {}
         self._aliases: dict[str, str] = {}
         self._context_factory = context_factory
+        self._result_handler = result_handler
         for command in commands:
             self.register(command)
 
@@ -357,7 +365,12 @@ class CommandRegistry:
         invocation = self.parse(line, context=context)
         if invocation is None:
             return CommandResult(handled=False)
-        return await execute_command(invocation)
+        result = await execute_command(invocation)
+        if self._result_handler is not None:
+            handled = self._result_handler(invocation, result)
+            if inspect.isawaitable(handled):
+                await handled
+        return result
 
     @staticmethod
     def _validate_name(name: str) -> None:
@@ -454,6 +467,12 @@ async def execute_command(
         )
         raise
 
+    from chatdome.outbound.builders import OutboundMessageBuilder
+
+    result = replace(
+        result,
+        outbound=OutboundMessageBuilder().from_command_result(invocation, result),
+    )
     await _record_command_event(invocation, result)
     logger.info(
         "Control command completed source=%s chat_id=%s command=%s outcome=%s request_id=%s",
