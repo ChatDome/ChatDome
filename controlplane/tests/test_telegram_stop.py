@@ -94,7 +94,7 @@ class TelegramStopTests(unittest.TestCase):
         await asyncio.sleep(0)
 
         self.assertTrue(first_message.status_messages[0].deleted)
-        self.assertEqual(stop_message.replies[-1], "任务已停止。")
+        self.assertEqual(stop_message.replies[-1], "⏹️ 任务已停止。")
         self.assertNotIn(123, bot._message_tasks)
 
         self.assertEqual(agent.session_manager.events[-1][0], 123)
@@ -111,7 +111,9 @@ class TelegramStopTests(unittest.TestCase):
         result = await bot._handle_stop(FakeUpdate(stop_message), SimpleNamespace())
 
         self.assertEqual(result.outcome, "no_active_task")
-        self.assertEqual(result.text, "当前没有运行中的任务。")
+        self.assertEqual(result.text, "No running task.")
+        self.assertEqual(result.facts.operation, "stop_task")
+        self.assertFalse(result.facts.changed)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
@@ -30,9 +31,17 @@ def _optional_bool(value: Any) -> Optional[bool]:
 
 
 def _refs(data: Mapping[str, Any]) -> Mapping[str, str]:
+    reference_keys = (
+        "approval_id",
+        "run_id",
+        "task_id",
+        "request_id",
+        "interaction_id",
+        "command_hash",
+    )
     values = {
         key: normalize_text(data.get(key, ""))
-        for key in ("approval_id", "run_id", "command_hash")
+        for key in reference_keys
         if normalize_text(data.get(key, ""))
     }
     return MappingProxyType(values)
@@ -44,12 +53,35 @@ def _approval_actions(
     include_details: bool,
 ) -> Tuple[OutboundAction, ...]:
     actions = [
-        OutboundAction(ActionKind.APPROVE, "Allow", approval_id),
-        OutboundAction(ActionKind.APPROVE_TASK, "Allow for task", approval_id),
-        OutboundAction(ActionKind.REJECT, "Reject", approval_id, destructive=True),
+        OutboundAction(
+            ActionKind.APPROVE,
+            "Allow",
+            approval_id,
+            params={"approval_id": approval_id},
+        ),
+        OutboundAction(
+            ActionKind.APPROVE_TASK,
+            "Allow for task",
+            approval_id,
+            params={"approval_id": approval_id},
+        ),
+        OutboundAction(
+            ActionKind.REJECT,
+            "Reject",
+            approval_id,
+            destructive=True,
+            params={"approval_id": approval_id},
+        ),
     ]
     if include_details:
-        actions.append(OutboundAction(ActionKind.SHOW_DETAILS, "Command analysis", approval_id))
+        actions.append(
+            OutboundAction(
+                ActionKind.SHOW_DETAILS,
+                "Command analysis",
+                approval_id,
+                params={"approval_id": approval_id},
+            )
+        )
     return tuple(actions)
 
 
@@ -72,6 +104,8 @@ def build_approval_request(payload: Optional[Mapping[str, Any]]) -> OutboundMess
         title="Approval required",
         summary=facts.reason,
         severity="warning",
+        status="approval_required",
+        outcome="approval_requested",
         refs=_refs(data),
         facts=facts,
         actions=_approval_actions(approval_id, include_details=facts.details_available),
@@ -126,6 +160,8 @@ def build_approval_details(details: Optional[Mapping[str, Any]]) -> OutboundMess
         title="Approval details",
         summary=facts.reason or facts.impact_analysis,
         severity="warning" if ok else "info",
+        status="approval_details" if ok else "idle",
+        outcome="details_shown" if ok else "details_unavailable",
         refs=_refs(data),
         facts=facts,
         actions=actions,
@@ -205,6 +241,94 @@ def build_environment_message(facts: EnvironmentFacts) -> OutboundMessage:
     )
 
 
+def build_notification_message(
+    *,
+    title: str,
+    summary: str,
+    body: str = "",
+    severity: str = "info",
+    status: str = "notified",
+    outcome: str = "notification_sent",
+    facts: Any = None,
+    refs: Optional[Mapping[str, Any]] = None,
+    actions: Iterable[OutboundAction] = (),
+) -> OutboundMessage:
+    """Build one platform-neutral notification contract."""
+
+    fact_value = facts
+    if isinstance(facts, Mapping):
+        fact_value = MappingProxyType(dict(facts))
+    if fact_value is None:
+        fact_value = MappingProxyType({"message": str(body or summary)})
+    reference_values = MappingProxyType(
+        {
+            str(key): normalize_text(value)
+            for key, value in dict(refs or {}).items()
+            if normalize_text(value)
+        }
+    )
+    return OutboundMessage(
+        kind=OutboundMessageKind.NOTIFICATION,
+        title=normalize_text(title),
+        summary=normalize_text(summary),
+        body=str(body or summary),
+        severity=normalize_text(severity) or "info",
+        status=normalize_text(status) or "notified",
+        outcome=normalize_text(outcome) or "notification_sent",
+        refs=reference_values,
+        facts=fact_value,
+        actions=tuple(actions),
+    )
+
+
+def build_sentinel_alert(
+    text: str,
+    alert_event: Optional[Mapping[str, Any]] = None,
+    *,
+    interaction_id: str = "",
+) -> OutboundMessage:
+    """Build a Sentinel push with actions and complete alert facts."""
+
+    event = dict(alert_event or {})
+    interaction_id = normalize_text(interaction_id)
+    params = {"interaction_id": interaction_id}
+    actions: Tuple[OutboundAction, ...] = ()
+    if interaction_id:
+        actions = (
+            OutboundAction(
+                ActionKind.SHOW_DETAILS,
+                "📋 查看详情",
+                f"sentinel_alert_detail:{interaction_id}",
+                params=params,
+            ),
+            OutboundAction(
+                ActionKind.ANALYZE,
+                "🤖 告警分析",
+                f"sentinel_alert_analysis:{interaction_id}",
+                params=params,
+            ),
+        )
+    facts = {
+        "message": str(text or ""),
+        "alert": MappingProxyType(event),
+    }
+    refs = {
+        "interaction_id": interaction_id,
+        "check_id": event.get("check_id", ""),
+    }
+    return build_notification_message(
+        title="Sentinel alert",
+        summary=str(text or ""),
+        body=str(text or ""),
+        severity=str(event.get("severity_label") or "warning"),
+        status="attention_required",
+        outcome="alert_pushed",
+        facts=facts,
+        refs=refs,
+        actions=actions,
+    )
+
+
 class OutboundMessageBuilder:
     """Convert the stable AgentResult contract into outbound semantics."""
 
@@ -212,11 +336,30 @@ class OutboundMessageBuilder:
         """Convert every shared command result before platform rendering."""
 
         facts = getattr(result, "facts", None)
-        if isinstance(facts, EnvironmentFacts):
-            return build_environment_message(facts)
-
         severity = normalize_text(getattr(result, "severity", "info")) or "info"
         outcome = normalize_text(getattr(result, "outcome", "completed"))
+        status = normalize_text(getattr(result, "state", ""))
+        if not status:
+            status = "failed" if severity == "error" or outcome == "failed" else "completed"
+        refs = MappingProxyType(
+            {
+                str(key): normalize_text(value)
+                for key, value in dict(getattr(result, "event_refs", {}) or {}).items()
+                if normalize_text(value)
+            }
+        )
+        actions = tuple(getattr(result, "actions", ()) or ())
+        presentation = MappingProxyType(dict(getattr(result, "presentation", {}) or {}))
+        if isinstance(facts, EnvironmentFacts):
+            return replace(
+                build_environment_message(facts),
+                status=status,
+                outcome=outcome,
+                refs=refs,
+                actions=actions,
+                presentation=presentation,
+            )
+
         if severity == "error" or outcome == "failed":
             kind = OutboundMessageKind.ERROR
         elif isinstance(facts, CodexAuthorizationFacts):
@@ -225,13 +368,6 @@ class OutboundMessageBuilder:
             kind = OutboundMessageKind.OPERATION_RESULT
         title = normalize_text(getattr(result, "title", ""))
         text = str(getattr(result, "text", "") or "").strip()
-        refs = MappingProxyType(
-            {
-                str(key): normalize_text(value)
-                for key, value in dict(getattr(result, "event_refs", {}) or {}).items()
-                if normalize_text(value)
-            }
-        )
         if facts is None:
             facts = MappingProxyType(
                 {
@@ -250,8 +386,12 @@ class OutboundMessageBuilder:
             summary=text or title,
             body=text,
             severity=severity,
+            status=status,
+            outcome=outcome,
             refs=refs,
+            presentation=presentation,
             facts=facts,
+            actions=actions,
         )
 
     def from_agent_result(self, value: Any) -> OutboundMessage:
@@ -262,8 +402,19 @@ class OutboundMessageBuilder:
             payload: Dict[str, Any] = dict(result.payload or {})
             token = normalize_text(payload.get("run_id", "")) or None
             actions = (
-                OutboundAction(ActionKind.CONTINUE, "Continue", token),
-                OutboundAction(ActionKind.STOP, "Stop", token, destructive=True),
+                OutboundAction(
+                    ActionKind.CONTINUE,
+                    "Continue",
+                    token,
+                    params={"run_id": token or ""},
+                ),
+                OutboundAction(
+                    ActionKind.STOP,
+                    "Stop",
+                    token,
+                    destructive=True,
+                    params={"run_id": token or ""},
+                ),
             )
             rounds = int(payload.get("rounds") or 0)
             return OutboundMessage(
@@ -271,6 +422,8 @@ class OutboundMessageBuilder:
                 title="Task paused",
                 summary=f"Task paused after {rounds} rounds.",
                 severity="info",
+                status="continuation_required",
+                outcome="round_limit",
                 refs=_refs(payload),
                 facts=MappingProxyType(payload),
                 actions=actions,
@@ -280,4 +433,6 @@ class OutboundMessageBuilder:
             title="",
             summary=result.content,
             body=result.content,
+            status="completed",
+            outcome="reply",
         )

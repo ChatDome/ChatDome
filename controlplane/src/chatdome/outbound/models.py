@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Mapping, Optional, Tuple
 
 
@@ -27,16 +28,32 @@ class ActionKind(str, Enum):
     APPROVE_TASK = "approve_task"
     REJECT = "reject"
     SHOW_DETAILS = "show_details"
+    ANALYZE = "analyze"
     CONTINUE = "continue"
     STOP = "stop"
+
+    SELECT = "select"
+    CONFIRM = "confirm"
+    CANCEL = "cancel"
 
 
 @dataclass(frozen=True)
 class OutboundAction:
+    """One platform-independent action attached to an outbound message."""
     kind: ActionKind
     label: str
     token: Optional[str] = None
     destructive: bool = False
+    params: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "params",
+            MappingProxyType(
+                {str(key): str(value) for key, value in self.params.items()}
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -71,6 +88,48 @@ class ApprovalDetailsFacts:
     command_breakdown: Tuple[CommandBreakdownItem, ...] = ()
     warnings: Tuple[str, ...] = ()
     error_message: str = ""
+
+
+@dataclass(frozen=True)
+class CommandHelpItemFacts:
+    """One command entry exposed by the shared command catalog."""
+
+    name: str
+    usage: str
+    aliases: Tuple[str, ...]
+    description: str
+
+
+@dataclass(frozen=True)
+class CommandHelpFacts:
+    """Commands available to the current platform."""
+
+    commands: Tuple[CommandHelpItemFacts, ...]
+
+
+@dataclass(frozen=True)
+class SessionControlFacts:
+    """Result of clearing a session or stopping a task."""
+
+    operation: str
+    changed: bool
+
+
+@dataclass(frozen=True)
+class TokenUsageFacts:
+    """Token counters for one Agent session."""
+
+    chat_id: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+@dataclass(frozen=True)
+class CommandEchoFacts:
+    """Current command echo state."""
+
+    enabled: bool
 
 
 @dataclass(frozen=True)
@@ -132,7 +191,10 @@ class OutboundMessage:
     summary: str
     body: str = ""
     severity: str = "info"
+    status: str = ""
+    outcome: str = ""
     refs: Mapping[str, str] = field(default_factory=dict)
+    presentation: Mapping[str, Any] = field(default_factory=dict)
     facts: Any = field(default_factory=dict)
     actions: Tuple[OutboundAction, ...] = ()
 

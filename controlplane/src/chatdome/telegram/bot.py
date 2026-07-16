@@ -35,8 +35,15 @@ from chatdome.outbound.builders import (
     OutboundMessageBuilder,
     build_approval_details,
     build_approval_request,
+    build_notification_message,
+    build_sentinel_alert,
 )
+from chatdome.outbound.models import ActionKind, OutboundAction
 from chatdome.outbound.renderers.telegram import TelegramOutboundRenderer, group_controls
+from chatdome.platform_adapters import (
+    TelegramDeliveryTarget,
+    TelegramPlatformAdapter,
+)
 from chatdome.config import AIConfig, ChatDomeConfig, validate_profile_name
 from chatdome.errors import (
     LLMProfileNotFound,
@@ -52,28 +59,28 @@ from chatdome.slash_commands import (
     CommandDef,
     CommandInvocation,
     CommandResult,
-    clear_agent_session,
+    abandon_command_result,
+    approval_details_command_result,
+    approve_command_result,
+    approve_task_command_result,
+    audit_command_result,
+    clear_session_command_result,
     command_catalog,
-    continue_agent_task,
-    execute_command,
+    command_echo_command_result,
+    command_help_result,
+    continue_command_result,
+    environment_command_result,
     execute_engram_command,
     format_command_help,
-    format_user_command_audit_events,
-    get_agent_approval_details,
-    get_token_usage,
-    get_user_command_audit_events,
-    parse_audit_limit,
-    parse_details_options,
-    reject_agent_action,
-    resume_agent_approval,
+    reject_command_result,
     sentinel_history,
     sentinel_mute,
     sentinel_packs,
     sentinel_resume,
     sentinel_status,
     sentinel_trigger,
-    stop_active_task,
-    toggle_command_echo,
+    stop_task_command_result,
+    token_usage_command_result,
 )
 from chatdome.llm.codex_oauth_service import CodexOAuthService
 from chatdome.llm.profile_admin import (
@@ -125,6 +132,7 @@ class TelegramBot:
         self._llm_admin_confirmations: dict[str, dict[str, Any]] = {}
         # Default policy: plain text output; markdown can be enabled per message.
         self._formatter = TelegramMessageFormatter(enable_markdown=True)
+        self._platform_adapter = TelegramPlatformAdapter(self._deliver_telegram_rendered)
 
     def set_sentinel(self, scheduler: Any, pack_loader: Any = None) -> None:
         """Inject Sentinel scheduler after construction (avoids circular deps)."""
@@ -140,10 +148,15 @@ class TelegramBot:
         # Send startup notifications
         for chat_id in self.config.telegram.allowed_chat_ids:
             try:
-                await self._send_bot_text(
-                    bot=app.bot,
-                    chat_id=chat_id,
-                    text="🚀 *ChatDome 已上线*\n安全探针与大模型推理引擎已就绪，随时听候指令！", 
+                await self._platform_adapter.deliver(
+                    build_notification_message(
+                        title="ChatDome online",
+                        summary="ChatDome 已上线。",
+                        body="🚀 ChatDome 已上线\n安全探针与大模型推理引擎已就绪。",
+                        outcome="service_started",
+                        facts={"lifecycle": "started"},
+                    ),
+                    target=TelegramDeliveryTarget(app.bot, chat_id),
                 )
             except Exception as e:
                 logger.error("Failed to send startup message to %s: %s", chat_id, e)
@@ -159,10 +172,15 @@ class TelegramBot:
 
         for chat_id in self.config.telegram.allowed_chat_ids:
             try:
-                await self._send_bot_text(
-                    bot=app.bot,
-                    chat_id=chat_id,
-                    text="💤 *ChatDome 已下线*\n主控进程已退出，暂停安全接管服务。", 
+                await self._platform_adapter.deliver(
+                    build_notification_message(
+                        title="ChatDome offline",
+                        summary="ChatDome 已下线。",
+                        body="💤 ChatDome 已下线\n主控进程已退出。",
+                        outcome="service_stopped",
+                        facts={"lifecycle": "stopped"},
+                    ),
+                    target=TelegramDeliveryTarget(app.bot, chat_id),
                 )
             except Exception as e:
                 logger.error("Failed to send shutdown message to %s: %s", chat_id, e)
@@ -188,6 +206,7 @@ class TelegramBot:
             "/details": self._handle_details,
             "/continue": self._handle_continue,
             "/confirm": self._handle_confirm,
+            "/confirm_task": self._handle_confirm_task,
             "/reject": self._handle_reject,
             "/cmd_echo": self._handle_cmd_echo,
             "/env": self._handle_env,
@@ -261,6 +280,26 @@ class TelegramBot:
             self._log_value(callback_data),
         )
 
+    def _command_context_for_update(self, update: Update) -> CommandContext:
+        """Build shared command context for Telegram messages and callbacks."""
+
+        chat = getattr(update, "effective_chat", None)
+        user = getattr(update, "effective_user", None)
+        chat_id = int(getattr(chat, "id", 0) or 0)
+        actor_id = str(getattr(user, "id", "") or "")
+
+        def record_event(event: dict[str, Any]) -> None:
+            manager = getattr(getattr(self, "agent", None), "session_manager", None)
+            if manager is not None:
+                manager.record_control_event(chat_id, event)
+
+        return CommandContext(
+            source="telegram",
+            chat_id=chat_id,
+            actor_id=actor_id,
+            event_recorder=record_event,
+        )
+
     def _command_handler(
         self,
         command_name: str,
@@ -273,45 +312,65 @@ class TelegramBot:
                 self._log_telegram_command(update, command_name)
                 return
 
-            chat = getattr(update, "effective_chat", None)
-            user = getattr(update, "effective_user", None)
             message = getattr(update, "effective_message", None)
-            chat_id = int(getattr(chat, "id", 0) or 0)
-            actor_id = str(getattr(user, "id", "") or "")
-            raw = str(getattr(message, "text", "") or f"/{command_name}").strip()
+            raw = self._platform_adapter.receive_message(
+                getattr(message, "text", "") or f"/{command_name}"
+            ).strip()
             args = tuple(str(item) for item in (getattr(context, "args", None) or ()))
-
-            def record_event(event: dict[str, Any]) -> None:
-                manager = getattr(getattr(self, "agent", None), "session_manager", None)
-                if manager is not None:
-                    manager.record_control_event(chat_id, event)
+            command_context = self._command_context_for_update(update)
 
             command_def = command or CommandDef(
                 name=f"/{command_name}",
                 description="",
                 category="telegram",
             )
-            invocation = CommandInvocation(
+            invocation = self._platform_adapter.receive_command(
                 raw=raw,
                 raw_name=f"/{command_name}",
-                args=args,
-                arg_text=" ".join(args),
                 command=command_def,
-                context=CommandContext(
-                    source="telegram",
-                    chat_id=chat_id,
-                    actor_id=actor_id,
-                    event_recorder=record_event,
-                ),
+                args=args,
+                context=command_context,
             )
 
             async def invoke(_invocation: CommandInvocation) -> Any:
                 return await callback(update, context)
 
-            result = await execute_command(invocation, invoke)
-            await self._send_command_result(update.message, result)
+            await self._platform_adapter.dispatch(
+                invocation,
+                handler=invoke,
+                target=update.message,
+            )
 
         return CommandHandler(command_name, wrapped)
+
+    async def _dispatch_callback_command(
+        self,
+        target: Any,
+        *,
+        data: str,
+        command_name: str,
+        args: tuple[str, ...] = (),
+        command_context: CommandContext,
+        handler: Any,
+    ) -> CommandResult:
+        """Run a Telegram button action through the shared command pipeline."""
+
+        command = CommandDef(
+            name=command_name,
+            description="",
+            category="interaction",
+        )
+        invocation = self._platform_adapter.receive_callback(
+            data=data,
+            command=command,
+            args=args,
+            context=command_context,
+        )
+        return await self._platform_adapter.dispatch(
+            invocation,
+            handler=handler,
+            target=target,
+        )
 
     # ----- Command handlers -----
 
@@ -320,11 +379,7 @@ class TelegramBot:
     ) -> CommandResult:
         """Handle /help and /start commands."""
         del update, context
-        return CommandResult(
-            outcome="help_shown",
-            title="Commands",
-            text=format_command_help("telegram"),
-        )
+        return command_help_result("telegram")
 
     async def _handle_clear(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -334,19 +389,8 @@ class TelegramBot:
         if not self._check_auth(update):
             return CommandResult(outcome="unauthorized")
 
-        chat_id = update.effective_chat.id
-        cleared = clear_agent_session(self.agent, chat_id)
-        if cleared:
-            return CommandResult(
-                outcome="session_cleared",
-                event_summary="用户通过 Telegram 清空了当前会话。",
-                text="✅ 对话已重置。",
-            )
-        return CommandResult(
-            outcome="no_active_session",
-            event_summary="Telegram 当前没有可清空的会话。",
-            text="ℹ️ 当前没有活跃的对话。",
-        )
+        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
+        return clear_session_command_result(self.agent, command_context)
 
     def _active_task_for_chat(self, chat_id: int) -> asyncio.Task | None:
         for tasks in (self._message_tasks, self._round_limit_tasks):
@@ -381,21 +425,8 @@ class TelegramBot:
             return CommandResult(outcome="unauthorized")
 
         chat_id = update.effective_chat.id
-        stopped = await stop_active_task(
+        return await stop_task_command_result(
             lambda: self._cancel_active_task_for_chat(chat_id)
-        )
-        if not stopped:
-            return CommandResult(
-                outcome="no_active_task",
-                event_summary="Telegram 当前没有运行中的任务。",
-                text="当前没有运行中的任务。",
-            )
-
-        return CommandResult(
-            outcome="task_stopped",
-            event_summary="用户通过 Telegram 中止了当前任务，后续步骤未执行。",
-            visible_to_agent=True,
-            text="任务已停止。",
         )
 
     async def _handle_cmd_echo(
@@ -406,19 +437,8 @@ class TelegramBot:
         if not self._check_auth(update):
             return CommandResult(outcome="unauthorized")
 
-        chat_id = update.effective_chat.id
-        enabled = toggle_command_echo(self.agent, chat_id)
-        if enabled:
-            msg = "🔍 命令回显 已开启 🟢"
-        else:
-            msg = "🔍 命令回显 已关闭 🔴"
-
-        state = "enabled" if enabled else "disabled"
-        return CommandResult(
-            outcome=f"command_echo_{state}",
-            event_summary=f"用户通过 Telegram {'开启' if enabled else '关闭'}了命令回显。",
-            text=msg,
-        )
+        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
+        return command_echo_command_result(self.agent, command_context)
 
     async def _handle_token(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -428,34 +448,16 @@ class TelegramBot:
         if not self._check_auth(update):
             return CommandResult(outcome="unauthorized")
 
-        chat_id = update.effective_chat.id
-        stats = get_token_usage(chat_id)
-        msg = (
-            "📊 *Token 资源消耗统计*\n\n"
-            f"👤 用户 ID: {chat_id}\n"
-            f"⬆️ 上行总花费 (Prompt): {stats['prompt_tokens']:,.0f} Tokens\n"
-            f"⬇️ 下行总花费 (Completion): {stats['completion_tokens']:,.0f} Tokens\n"
-            f"🔢 累计调用账单: {stats['total_tokens']:,.0f} Tokens"
-        )
-        return CommandResult(
-            outcome="token_usage_shown",
-            event_summary="用户通过 Telegram 查看了当前会话的 Token 用量。",
-            title="Token usage",
-            text=msg,
-        )
+        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
+        return token_usage_command_result(command_context)
 
     async def _handle_env(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> CommandResult:
         """Handle /env command — show runtime environment profile summary."""
         del update, context
-        facts = EnvironmentFactsBuilder().from_profile(
+        return environment_command_result(
             self._environment_profile_path,
-        )
-        return CommandResult(
-            outcome="environment_shown" if facts.available else "unavailable",
-            event_summary="用户通过 Telegram 查看了运行环境。",
-            facts=facts,
         )
 
     async def _handle_audit(
@@ -465,13 +467,10 @@ class TelegramBot:
         if not self._check_auth(update):
             return CommandResult(outcome="unauthorized")
 
-        chat_id = update.effective_chat.id
-        limit = parse_audit_limit(getattr(context, "args", None) or ())
-        events = get_user_command_audit_events(chat_id, limit)
-        return CommandResult(
-            outcome="audit_shown",
-            event_summary=f"用户通过 Telegram 查看了最近 {len(events)} 条命令审计事件。",
-            text=format_user_command_audit_events(events),
+        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
+        return audit_command_result(
+            command_context,
+            getattr(context, "args", None) or (),
         )
 
     # ----- Message handler -----
@@ -486,7 +485,9 @@ class TelegramBot:
             return
 
         chat_id = update.effective_chat.id
-        user_message = update.message.text
+        user_message = self._platform_adapter.receive_message(
+            update.message.text
+        )
 
         logger.info(
             "Message from chat_id=%d: %s",
@@ -562,14 +563,7 @@ class TelegramBot:
 
     async def _send_approval_request(self, message, data: dict) -> None:
         outbound = build_approval_request(data)
-        rendered = TelegramOutboundRenderer().render(outbound)
-        await self._reply_text(
-            message,
-            "\n".join(rendered.text_parts),
-            markup=MessageMarkup.PLAIN,
-            reply_markup=self._rendered_control_markup(rendered),
-        )
-        return
+        await self._platform_adapter.deliver(outbound, target=message)
 
     @staticmethod
     def _approval_action_markup(data: dict) -> Any:
@@ -598,6 +592,7 @@ class TelegramBot:
         message,
         chat_id: int,
         approval_id: str | None,
+        command_context: CommandContext | None = None,
     ) -> None:
         """Start an approval detail review without blocking later chat updates."""
         task_key = self._approval_detail_task_key(chat_id, approval_id)
@@ -618,6 +613,7 @@ class TelegramBot:
             message=message,
             chat_id=chat_id,
             approval_id=approval_id,
+            command_context=command_context,
         )
         if self._app is not None:
             task = self._app.create_task(coroutine)
@@ -637,12 +633,29 @@ class TelegramBot:
         message,
         chat_id: int,
         approval_id: str | None,
+        command_context: CommandContext | None = None,
     ) -> None:
+        context = command_context or CommandContext(
+            source="telegram",
+            chat_id=chat_id,
+        )
+        args = (approval_id,) if approval_id else ()
+
+        async def handler(invocation: CommandInvocation) -> CommandResult:
+            return await approval_details_command_result(
+                self.agent,
+                invocation.context,
+                invocation.args,
+            )
+
         try:
-            details = await self.agent.get_pending_approval_details(
-                chat_id,
-                approval_id=approval_id,
-                include_llm=True,
+            result = await self._dispatch_callback_command(
+                message,
+                data="approval:details",
+                command_name="/details",
+                args=args,
+                command_context=context,
+                handler=handler,
             )
         except Exception as e:
             logger.exception("Failed to load approval details in background")
@@ -656,14 +669,23 @@ class TelegramBot:
             )
             return
 
-        if not details.get("ok"):
-            await self._send_long_message(
-                message,
-                str(details.get("message", "No pending approval.")),
-            )
+        if result.outcome != "details_shown" or result.outbound is None:
             return
 
-        await self._send_approval_detail_result(message, details, chat_id=chat_id)
+        rendered = self._platform_adapter.render(result.outbound)
+        text = "\n".join(rendered.text_parts)
+        facts = result.outbound.facts
+        self._record_visible_context(
+            chat_id,
+            event_type="approval_detail",
+            user_action="查看待审批命令分析",
+            assistant_summary=text,
+            refs={
+                **dict(result.outbound.refs),
+                "safety_status": getattr(facts, "safety_status", ""),
+                "risk_level": getattr(facts, "risk_level", ""),
+            },
+        )
 
     async def _send_approval_detail_result(
         self,
@@ -705,31 +727,63 @@ class TelegramBot:
 
     async def _send_round_limit_prompt(self, message, data: dict[str, Any] | None = None) -> None:
         """Ask user whether to continue after reaching one execution window."""
-        payload = data or {}
-        rounds = int(payload.get("rounds", 0))
-        window = int(payload.get("window", self.agent.config.max_rounds_per_turn))
-        text = (
-            f"\u5f53\u524d\u4efb\u52a1\u5df2\u6267\u884c {rounds} \u8f6e\uff0c\u5c1a\u672a\u5b8c\u6210\u3002\n"
-            f"\u662f\u5426\u7ee7\u7eed\u6267\u884c\uff08\u518d\u8fd0\u884c {window} \u8f6e\uff09\uff1f"
+        payload = dict(data or {})
+        payload.setdefault("window", self.agent.config.max_rounds_per_turn)
+        outbound = OutboundMessageBuilder().from_agent_result(
+            AgentResult.round_limit(payload)
         )
-        keyboard = [[
-            InlineKeyboardButton("\u25b6\ufe0f \u7ee7\u7eed\u6267\u884c", callback_data="continue_round_task"),
-            InlineKeyboardButton("\ud83d\uded1 \u653e\u5f03\u4efb\u52a1", callback_data="abandon_round_task"),
-        ]]
-        await self._reply_text(
-            message,
-            text,
-            markup=MessageMarkup.PLAIN,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
+        await self._platform_adapter.deliver(outbound, target=message)
 
-    async def _start_round_limit_resolution(self, message, chat_id: int, action: str) -> None:
+    async def _dispatch_round_limit_command(
+        self,
+        message: Any,
+        chat_id: int,
+        action: str,
+        command_context: CommandContext | None = None,
+    ) -> CommandResult:
+        """Resolve one round-limit button through the shared command pipeline."""
+
+        normalized_action = str(action or "").strip().upper()
+        if normalized_action == "CONTINUE":
+            command_name = "/continue"
+
+            async def handler(invocation: CommandInvocation) -> CommandResult:
+                return await continue_command_result(self.agent, invocation.context)
+
+        elif normalized_action == "ABANDON":
+            command_name = "/reject"
+
+            async def handler(invocation: CommandInvocation) -> CommandResult:
+                return await abandon_command_result(self.agent, invocation.context)
+
+        else:
+            raise ValueError("unsupported round-limit action")
+
+        return await self._dispatch_callback_command(
+            message,
+            data=normalized_action,
+            command_name=command_name,
+            command_context=command_context
+            or CommandContext(source="telegram", chat_id=chat_id),
+            handler=handler,
+        )
+
+    async def _start_round_limit_resolution(
+        self,
+        message: Any,
+        chat_id: int,
+        action: str,
+        command_context: CommandContext | None = None,
+    ) -> None:
         """Continue a round-limited task in the background after a callback click."""
         normalized_action = (action or "").strip().upper()
         if normalized_action != "CONTINUE":
-            final_response = await self.agent.resolve_round_limit(chat_id, normalized_action)
-            await self._send_long_message(message, final_response)
+            await self._dispatch_round_limit_command(
+                message,
+                chat_id,
+                normalized_action,
+                command_context,
+            )
             return
 
         existing_task = self._round_limit_tasks.get(chat_id)
@@ -746,6 +800,7 @@ class TelegramBot:
             status_message=status_msg,
             chat_id=chat_id,
             action=normalized_action,
+            command_context=command_context,
         )
         if self._app is not None:
             task = self._app.create_task(coroutine)
@@ -762,14 +817,20 @@ class TelegramBot:
 
     async def _run_round_limit_resolution(
         self,
-        message,
-        status_message,
+        message: Any,
+        status_message: Any,
         chat_id: int,
         action: str,
+        command_context: CommandContext | None = None,
     ) -> None:
         """Run round-limit continuation without tying it to callback query timeout."""
         try:
-            final_response = await self.agent.resolve_round_limit(chat_id, action)
+            await self._dispatch_round_limit_command(
+                message,
+                chat_id,
+                action,
+                command_context,
+            )
         except asyncio.CancelledError:
             logger.warning("Round-limit continuation task cancelled for chat_id=%s", chat_id)
             raise
@@ -789,8 +850,6 @@ class TelegramBot:
                 await status_message.delete()
             except Exception:
                 pass
-
-        await self._send_agent_result(message, final_response)
 
     async def _handle_engram(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -835,39 +894,58 @@ class TelegramBot:
 
     async def _handle_llm_add(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
+    ) -> CommandResult:
         if not await self._require_llm_admin(update):
-            return
+            return CommandResult(outcome="unauthorized")
         if self.profile_admin is None:
-            await update.message.reply_text("model 管理服务未启用。")
-            return
+            return CommandResult(
+                outcome="unavailable",
+                text="Model management is unavailable.",
+                severity="error",
+            )
         key = self._llm_admin_key(update)
         current = self._active_llm_admin_session(key)
         if current is not None:
-            await update.message.reply_text("请先完成当前 model 配置，或发送 /model_cancel。")
-            return
+            return CommandResult(
+                outcome="interaction_in_progress",
+                text="Complete the current model setup or run /model_cancel.",
+            )
         nonce = uuid.uuid4().hex[:12]
         self._llm_admin_sessions[key] = {
             "step": "select_type",
             "nonce": nonce,
             "created_at": time.time(),
         }
-        keyboard = [[
-            InlineKeyboardButton(
-                "OpenAI-compatible",
-                callback_data=f"llm_admin:type_openai:{nonce}",
+        return CommandResult(
+            outcome="model_add_input_requested",
+            title="Add model profile",
+            text="Select model type.",
+            event_refs={"interaction_id": nonce},
+            facts={
+                "operation": "model_add",
+                "stage": "select_type",
+                "options": ("openai", "codex"),
+            },
+            actions=(
+                OutboundAction(
+                    ActionKind.SELECT,
+                    "OpenAI-compatible",
+                    f"llm_admin:type_openai:{nonce}",
+                    params={"interaction_id": nonce, "model_type": "openai"},
+                ),
+                OutboundAction(
+                    ActionKind.SELECT,
+                    "Codex OAuth",
+                    f"llm_admin:type_codex:{nonce}",
+                    params={"interaction_id": nonce, "model_type": "codex"},
+                ),
+                OutboundAction(
+                    ActionKind.CANCEL,
+                    "取消",
+                    f"llm_admin:cancel:{nonce}",
+                    params={"interaction_id": nonce},
+                ),
             ),
-            InlineKeyboardButton(
-                "Codex OAuth",
-                callback_data=f"llm_admin:type_codex:{nonce}",
-            ),
-        ], [
-            InlineKeyboardButton("取消", callback_data=f"llm_admin:cancel:{nonce}"),
-        ]]
-        await self._reply_text(
-            update.message,
-            "选择 model 类型。",
-            reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
     async def _handle_llm_cancel(
@@ -875,7 +953,7 @@ class TelegramBot:
     ) -> CommandResult:
         del context
         if not await self._require_llm_admin(update):
-            return
+            return CommandResult(outcome="unauthorized")
         key = self._llm_admin_key(update)
         removed_any = self._llm_admin_sessions.pop(key, None) is not None
         for nonce, item in list(self._llm_admin_confirmations.items()):
@@ -886,29 +964,35 @@ class TelegramBot:
 
     async def _handle_llm_delete(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
+    ) -> CommandResult:
         if not await self._require_llm_admin(update):
-            return
+            return CommandResult(outcome="unauthorized")
         if self.profile_admin is None:
-            await update.message.reply_text("model 管理服务未启用。")
-            return
+            return CommandResult(
+                outcome="unavailable",
+                text="Model management is unavailable.",
+                severity="error",
+            )
         args = getattr(context, "args", []) or []
         if len(args) != 1:
-            await update.message.reply_text("用法: /model_delete <profile>")
-            return
+            return CommandResult(
+                outcome="invalid_arguments",
+                text="Usage: /model_delete <profile>",
+                severity="error",
+            )
         try:
             summary = await self._model_command_service().inspect_delete(
                 str(args[0]).strip()
             )
         except Exception as exc:
-            await update.message.reply_text(
-                self._format_error_text(
-                    exc,
-                    prefix="无法删除 model",
-                    fallback="无法读取 model profile。",
-                )
+            return CommandResult(
+                outcome="failed",
+                title="Model delete failed",
+                text=user_facing_error_message(
+                    exc, fallback="Model profile could not be deleted."
+                ),
+                severity="error",
             )
-            return
         nonce = uuid.uuid4().hex[:12]
         key = self._llm_admin_key(update)
         self._llm_admin_confirmations[nonce] = {
@@ -917,14 +1001,27 @@ class TelegramBot:
             "key": key,
             "expires_at": time.time() + 60,
         }
-        keyboard = [[
-            InlineKeyboardButton("确认删除", callback_data=f"llm_admin:delete_yes:{nonce}"),
-            InlineKeyboardButton("取消", callback_data=f"llm_admin:delete_no:{nonce}"),
-        ]]
-        await self._reply_text(
-            update.message,
-            f"删除 model profile '{summary.name}'？",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+        return CommandResult(
+            outcome="model_delete_confirmation_requested",
+            title="Delete model profile",
+            text=f"Delete model profile '{summary.name}'?",
+            event_refs={"interaction_id": nonce, "profile": summary.name},
+            facts={"operation": "model_delete", "profile": summary.name},
+            actions=(
+                OutboundAction(
+                    ActionKind.CONFIRM,
+                    "确认删除",
+                    f"llm_admin:delete_yes:{nonce}",
+                    destructive=True,
+                    params={"interaction_id": nonce, "profile": summary.name},
+                ),
+                OutboundAction(
+                    ActionKind.CANCEL,
+                    "取消",
+                    f"llm_admin:delete_no:{nonce}",
+                    params={"interaction_id": nonce, "profile": summary.name},
+                ),
+            ),
         )
 
     async def _handle_llm_admin_message(
@@ -1404,7 +1501,12 @@ class TelegramBot:
                 except Exception:
                     logger.exception("Failed to edit round-limit callback message markup")
 
-                await self._start_round_limit_resolution(query.message, chat_id, action)
+                await self._start_round_limit_resolution(
+                    query.message,
+                    chat_id,
+                    action,
+                    self._command_context_for_update(update),
+                )
                 return
 
             if callback_data == "show_cmd_details" or approval_action == "details":
@@ -1413,6 +1515,7 @@ class TelegramBot:
                     query.message,
                     chat_id,
                     approval_id or None,
+                    self._command_context_for_update(update),
                 )
                 return
             if approval_action == "approve_task":
@@ -1433,10 +1536,34 @@ class TelegramBot:
 
             await self._clear_callback_message_markup(query, "approval decision callback message")
 
+            if action == "APPROVE_TASK":
+                business_handler = approve_task_command_result
+                command_name = "/confirm"
+            elif action == "APPROVE":
+                business_handler = approve_command_result
+                command_name = "/confirm"
+            else:
+                business_handler = reject_command_result
+                command_name = "/reject"
+
+            async def handler(invocation: CommandInvocation) -> CommandResult:
+                return await business_handler(
+                    self.agent,
+                    invocation.context,
+                    invocation.args,
+                )
+
             thinking_msg = await query.message.reply_text("⏳")
             try:
-                _, final_response = await asyncio.wait_for(
-                    self.agent.resume_session(chat_id, action, approval_id=approval_id or None),
+                await asyncio.wait_for(
+                    self._dispatch_callback_command(
+                        query.message,
+                        data=callback_data,
+                        command_name=command_name,
+                        args=(approval_id,) if approval_id else (),
+                        command_context=self._command_context_for_update(update),
+                        handler=handler,
+                    ),
                     timeout=90,
                 )
             finally:
@@ -1444,8 +1571,6 @@ class TelegramBot:
                     await thinking_msg.delete()
                 except Exception:
                     pass
-
-            await self._send_agent_result(query.message, final_response)
         except asyncio.TimeoutError:
             await self._send_long_message(
                 query.message,
@@ -1468,55 +1593,21 @@ class TelegramBot:
         if not self._check_auth(update):
             return CommandResult(outcome="unauthorized")
 
-        args = getattr(context, "args", None) or ()
-        approval_id, full = parse_details_options(args)
-        chat_id = update.effective_chat.id
-        status_message = await update.message.reply_text("⏳")
-        try:
-            details = await get_agent_approval_details(
-                self.agent,
-                chat_id,
-                approval_id=approval_id,
-                include_llm=True,
-            )
-        finally:
-            try:
-                await status_message.delete()
-            except Exception:
-                pass
-        await self._send_approval_detail_result(
-            update.message,
-            details,
-            chat_id=chat_id,
-            full=full,
-        )
-        return CommandResult(
-            outcome="details_shown" if details.get("ok") else "details_unavailable",
-            event_summary="用户通过 Telegram 查看了待审批命令分析。",
+        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
+        return await approval_details_command_result(
+            self.agent,
+            command_context,
+            getattr(context, "args", None) or (),
         )
 
     async def _handle_continue(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> CommandResult:
         """Handle /continue for a round-limit pause."""
-        del context
         if not self._check_auth(update):
             return CommandResult(outcome="unauthorized")
-        chat_id = update.effective_chat.id
-        status_message = await update.message.reply_text("⏳")
-        try:
-            result = await continue_agent_task(self.agent, chat_id, "CONTINUE")
-        finally:
-            try:
-                await status_message.delete()
-            except Exception:
-                pass
-        await self._send_agent_result(update.message, result)
-        return CommandResult(
-            outcome="task_continued",
-            event_summary="用户通过 Telegram 继续了暂停的任务。",
-            visible_to_agent=True,
-        )
+        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
+        return await continue_command_result(self.agent, command_context)
 
     async def _handle_confirm(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1525,38 +1616,29 @@ class TelegramBot:
         if not self._check_auth(update):
             return CommandResult(outcome="unauthorized")
 
-        chat_id = update.effective_chat.id
-        approval_id = context.args[0].strip() if context.args else None
-        thinking_msg = await update.message.reply_text("⏳")
-        try:
-            final_response = await resume_agent_approval(
-                self.agent,
-                chat_id,
-                "APPROVE",
-                approval_id=approval_id,
-            )
-            try:
-                await thinking_msg.delete()
-            except Exception:
-                pass
-            await self._send_agent_result(update.message, final_response)
-            return CommandResult(
-                outcome="approval_confirmed",
-                event_summary="用户通过 Telegram 批准了待审批命令。",
-            )
-        except Exception as exc:
-            logger.exception("Confirm command failed")
-            await update.message.reply_text(
-                self._format_error_text(
-                    exc,
-                    prefix="⚠️ 恢复会话失败",
-                    fallback="恢复会话失败，请稍后重试。",
-                )
-            )
-            return CommandResult(
-                outcome="failed",
-                event_summary="Telegram 命令审批失败。",
-            )
+        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
+        return await approve_command_result(
+            self.agent,
+            command_context,
+            getattr(context, "args", None) or (),
+        )
+
+    async def _handle_confirm_task(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> CommandResult:
+        """Handle /confirm_task for the current task."""
+        if not self._check_auth(update):
+            return CommandResult(outcome="unauthorized")
+
+        command_context = CommandContext(
+            source="telegram",
+            chat_id=update.effective_chat.id,
+        )
+        return await approve_task_command_result(
+            self.agent,
+            command_context,
+            getattr(context, "args", None) or (),
+        )
 
     async def _handle_reject(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1565,39 +1647,39 @@ class TelegramBot:
         if not self._check_auth(update):
             return CommandResult(outcome="unauthorized")
 
-        chat_id = update.effective_chat.id
-        approval_id = context.args[0].strip() if context.args else None
-        thinking_msg = await update.message.reply_text("⏳")
-        try:
-            final_response = await reject_agent_action(
-                self.agent,
-                chat_id,
-                approval_id=approval_id,
-            )
-            try:
-                await thinking_msg.delete()
-            except Exception:
-                pass
-            await self._send_agent_result(update.message, final_response)
-            return CommandResult(
-                outcome="approval_rejected",
-                event_summary="用户通过 Telegram 拒绝了待审批命令。",
-            )
-        except Exception as exc:
-            logger.exception("Reject command failed")
-            await update.message.reply_text(
-                self._format_error_text(
-                    exc,
-                    prefix="⚠️ 恢复会话失败",
-                    fallback="恢复会话失败，请稍后重试。",
-                )
-            )
-            return CommandResult(
-                outcome="failed",
-                event_summary="Telegram 命令拒绝操作失败。",
-            )
+        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
+        return await reject_command_result(
+            self.agent,
+            command_context,
+            getattr(context, "args", None) or (),
+        )
 
     # ----- Utilities -----
+
+    async def _deliver_telegram_rendered(self, message, rendered) -> None:
+        text = "\n".join(
+            part for part in rendered.text_parts if str(part or "").strip()
+        )
+        if not text:
+            return
+        reply_markup = self._rendered_control_markup(rendered)
+        if isinstance(message, TelegramDeliveryTarget):
+            if len(text) > self.max_message_length:
+                text = text[: self.max_message_length - 20] + "\n... (已截断)"
+            await self._send_bot_text(
+                message.bot,
+                message.chat_id,
+                text,
+                reply_markup=reply_markup,
+            )
+            return
+        await self._send_long_message(
+            message,
+            text,
+            markup=MessageMarkup.PLAIN,
+            reply_markup=reply_markup,
+        )
+
 
     async def _send_command_result(
         self,
@@ -1610,29 +1692,13 @@ class TelegramBot:
             None,
             result,
         )
-        rendered = TelegramOutboundRenderer().render(outbound)
-        text = "\n".join(
-            part for part in rendered.text_parts if str(part or "").strip()
-        )
-        if not text:
-            return
-        await self._send_long_message(
-            message,
-            text,
-            markup=MessageMarkup.PLAIN,
-            reply_markup=self._rendered_control_markup(rendered),
-        )
+        await self._platform_adapter.deliver(outbound, target=message)
 
     async def _send_agent_result(self, message, result: AgentResult | str | None) -> None:
         """Render a structured Agent result into Telegram messages."""
         agent_result = coerce_agent_result(result)
-        if agent_result.kind == "pending_approval":
-            await self._send_approval_request(message, agent_result.payload)
-            return
-        if agent_result.kind == "round_limit":
-            await self._send_round_limit_prompt(message, agent_result.payload)
-            return
-        await self._send_long_message(message, agent_result.content)
+        outbound = OutboundMessageBuilder().from_agent_result(agent_result)
+        await self._platform_adapter.deliver(outbound, target=message)
 
     @staticmethod
     def _format_error_text(exc: BaseException, *, prefix: str, fallback: str) -> str:
@@ -2134,18 +2200,31 @@ class TelegramBot:
             return
         try:
             original_text = text
-            reply_markup = None
+            alert_data: dict[str, Any] = {}
+            interaction_id = ""
             if alert_event is not None:
-                token = self._cache_alert_analysis_context(
+                interaction_id = self._cache_alert_analysis_context(
                     chat_id=chat_id,
                     alert_text=original_text,
                     alert_event=alert_event,
                 )
-                reply_markup = self._sentinel_alert_reply_markup(token)
+                raw_alert = (
+                    alert_event.to_dict()
+                    if hasattr(alert_event, "to_dict")
+                    else alert_event
+                )
+                if isinstance(raw_alert, dict):
+                    alert_data = dict(raw_alert)
 
-            if len(text) > self.max_message_length:
-                text = text[:self.max_message_length - 20] + "\n... (已截断)"
-            await self._send_bot_text(self._app.bot, chat_id, text, reply_markup=reply_markup)
+            outbound = build_sentinel_alert(
+                original_text,
+                alert_data,
+                interaction_id=interaction_id,
+            )
+            await self._platform_adapter.deliver(
+                outbound,
+                target=TelegramDeliveryTarget(self._app.bot, chat_id),
+            )
             if alert_event is not None:
                 self._record_visible_context(
                     chat_id,

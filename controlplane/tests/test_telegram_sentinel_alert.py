@@ -2,7 +2,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from chatdome.agent.result import AgentResult
 from chatdome.sentinel.alerter import AlertEvent
+from chatdome.platform_adapters import TelegramPlatformAdapter
 from chatdome.telegram.bot import TelegramBot
 
 
@@ -31,6 +33,9 @@ def _bot() -> TelegramBot:
     bot._alert_analysis_cache = {}
     bot._alert_analysis_cache_max = 200
     bot._send_long_message = AsyncMock()
+    bot._platform_adapter = TelegramPlatformAdapter(
+        bot._deliver_telegram_rendered
+    )
     return bot
 
 
@@ -187,7 +192,6 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_approval_request_is_compact(self):
         bot = _bot()
-        bot._reply_text = AsyncMock()
         message = object()
 
         await bot._send_approval_request(
@@ -201,7 +205,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        text = bot._reply_text.await_args.args[1]
+        text = bot._send_long_message.await_args.args[1]
         self.assertIn("待审批", text)
         self.assertIn("目的：delete file", text)
         self.assertIn("命令分析", text)
@@ -209,7 +213,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("审批编号", text)
         self.assertNotIn("命令指纹", text)
         self.assertNotIn("show_time.sh", text)
-        markup = bot._reply_text.await_args.kwargs["reply_markup"]
+        markup = bot._send_long_message.await_args.kwargs["reply_markup"]
         labels = [button.text for row in markup.inline_keyboard for button in row]
         self.assertEqual(
             labels,
@@ -217,9 +221,9 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await bot._send_approval_request(message, {"approval_id": "AP-2", "reason": "无说明"})
-        fallback_text = bot._reply_text.await_args.args[1]
+        fallback_text = bot._send_long_message.await_args.args[1]
         self.assertIn("目的：信息不可用，请先查看命令分析。", fallback_text)
-        fallback_markup = bot._reply_text.await_args.kwargs["reply_markup"]
+        fallback_markup = bot._send_long_message.await_args.kwargs["reply_markup"]
         fallback_labels = [button.text for row in fallback_markup.inline_keyboard for button in row]
         self.assertEqual(fallback_labels, ["❌ 拒绝", "🔎 命令分析"])
 
@@ -241,7 +245,54 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         await bot._handle_callback_query(update, None)
 
         query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
-        bot._start_approval_detail_analysis.assert_awaited_once_with(query.message, 123, "AP-1")
+        bot._start_approval_detail_analysis.assert_awaited_once()
+        call_args = bot._start_approval_detail_analysis.await_args.args
+        self.assertEqual(call_args[:3], (query.message, 123, "AP-1"))
+        self.assertEqual(call_args[3].source, "telegram")
+        self.assertEqual(call_args[3].chat_id, 123)
+
+    async def test_approval_button_uses_shared_command_pipeline(self):
+        bot = _bot()
+        bot._check_auth = lambda update: True
+        manager = SimpleNamespace(record_control_event=Mock())
+        bot.agent = SimpleNamespace(
+            session_manager=manager,
+            resume_session=AsyncMock(
+                return_value=(None, AgentResult.reply("approved"))
+            ),
+        )
+        thinking = SimpleNamespace(delete=AsyncMock())
+        message = SimpleNamespace(
+            reply_text=AsyncMock(return_value=thinking),
+        )
+        query = SimpleNamespace(
+            answer=AsyncMock(),
+            data="approval:approve:AP-1",
+            message=message,
+            edit_message_reply_markup=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_chat=SimpleNamespace(id=123),
+            effective_user=SimpleNamespace(id=456),
+        )
+
+        await bot._handle_callback_query(update, None)
+
+        bot.agent.resume_session.assert_awaited_once_with(
+            123,
+            "APPROVE",
+            approval_id="AP-1",
+        )
+        bot._send_long_message.assert_awaited_once()
+        self.assertEqual(
+            bot._send_long_message.await_args.args[:2],
+            (message, "approved"),
+        )
+        manager.record_control_event.assert_called_once()
+        event = manager.record_control_event.call_args.args[1]
+        self.assertEqual(event["command"], "/confirm")
+        self.assertEqual(event["outcome"], "approval_confirmed")
 
     async def test_callback_router_dispatches_sentinel_detail(self):
         bot = _bot()

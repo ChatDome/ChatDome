@@ -9,11 +9,15 @@ from chatdome.outbound.models import (
     ApprovalDetailsFacts,
     ApprovalRequestFacts,
     CodexAuthorizationFacts,
+    CommandEchoFacts,
+    CommandHelpFacts,
     EnvironmentFacts,
     ModelProfilesFacts,
     OutboundMessage,
     OutboundMessageKind,
     RenderedMessage,
+    SessionControlFacts,
+    TokenUsageFacts,
 )
 from chatdome.outbound.renderers.common import (
     compact_approval_purpose,
@@ -40,7 +44,12 @@ class TerminalOutboundRenderer:
     def _action_prompt(self, message: OutboundMessage, *, include_details: bool) -> str:
         kinds = {action.kind for action in message.actions}
         if ActionKind.APPROVE in kinds:
-            return "Allow operation? [y/n]  d=details" if include_details else "Allow operation? [y/n]"
+            prompts = ["Allow operation? [y/n]"]
+            if ActionKind.APPROVE_TASK in kinds:
+                prompts.append("t=allow for task")
+            if include_details:
+                prompts.append("d=details")
+            return "  ".join(prompts)
         if ActionKind.SHOW_DETAILS in kinds:
             return "Review command analysis before approval.  n=reject  d=details"
         return "Approval unavailable."
@@ -85,9 +94,10 @@ class TerminalOutboundRenderer:
 
         risk = facts.risk_level or "unknown"
         safety = facts.safety_status or "unknown"
+        full = self.full or bool(message.presentation.get("full"))
         impact = compact_impact(
             facts.impact_analysis,
-            full=self.full,
+            full=full,
             suffix="... Run /details full for full analysis.",
         )
         flags = []
@@ -100,7 +110,7 @@ class TerminalOutboundRenderer:
         lines.append(f"Risk: {risk}    Safety: {safety}")
         if flags:
             lines.append(f"Flags: {', '.join(flags)}")
-        if self.full and reason_adds_context(facts.reason, facts.impact_analysis):
+        if full and reason_adds_context(facts.reason, facts.impact_analysis):
             lines.extend(["", "Reason:", self._indent(facts.reason, max_chars=1600)])
         lines.extend(["", "Command:", "```bash", facts.command or "(empty)", "```"])
         breakdown = self._breakdown_lines(facts)
@@ -115,7 +125,7 @@ class TerminalOutboundRenderer:
 
     def _render_environment(self, facts: EnvironmentFacts) -> RenderedMessage:
         if not facts.available:
-            text = self._status("??", "[i]", facts.error_message)
+            text = self._status("ℹ️", "[i]", facts.error_message)
             return RenderedMessage(text_parts=(f"{text}\nRun: chatdome doctor",))
         lines = [
             "ChatDome Runtime Environment Profile",
@@ -192,8 +202,63 @@ class TerminalOutboundRenderer:
         )
         return RenderedMessage(text_parts=(text,))
 
+    @staticmethod
+    def _render_help(facts: CommandHelpFacts) -> RenderedMessage:
+        lines = ["Commands:"]
+        for command in facts.commands:
+            aliases = f" ({', '.join(command.aliases)})" if command.aliases else ""
+            lines.append(f"  {command.usage}{aliases}  {command.description}")
+        return RenderedMessage(text_parts=("\n".join(lines),))
+
+    def _render_session_control(
+        self,
+        facts: SessionControlFacts,
+    ) -> RenderedMessage:
+        if facts.operation == "clear_session":
+            text = (
+                self._status("✅", "[ok]", "Session cleared.")
+                if facts.changed
+                else self._status("ℹ️", "[i]", "No active session.")
+            )
+        else:
+            text = (
+                self._status("⏹️", "[stop]", "Task stopped.")
+                if facts.changed
+                else self._status("ℹ️", "[i]", "No running task.")
+            )
+        return RenderedMessage(text_parts=(text,))
+
+    @staticmethod
+    def _render_token_usage(facts: TokenUsageFacts) -> RenderedMessage:
+        return RenderedMessage(
+            text_parts=(
+                "\n".join(
+                    [
+                        "Token usage",
+                        f"Prompt: {facts.prompt_tokens:,}",
+                        f"Completion: {facts.completion_tokens:,}",
+                        f"Total: {facts.total_tokens:,}",
+                    ]
+                ),
+            )
+        )
+
+    def _render_command_echo(self, facts: CommandEchoFacts) -> RenderedMessage:
+        state = "enabled" if facts.enabled else "disabled"
+        return RenderedMessage(
+            text_parts=(self._status("🔍", "[cmd]", f"Command echo {state}."),)
+        )
+
 
     def render(self, message: OutboundMessage) -> RenderedMessage:
+        if isinstance(message.facts, CommandHelpFacts):
+            return self._render_help(message.facts)
+        if isinstance(message.facts, SessionControlFacts):
+            return self._render_session_control(message.facts)
+        if isinstance(message.facts, TokenUsageFacts):
+            return self._render_token_usage(message.facts)
+        if isinstance(message.facts, CommandEchoFacts):
+            return self._render_command_echo(message.facts)
         if isinstance(message.facts, EnvironmentFacts):
             return self._render_environment(message.facts)
         if isinstance(message.facts, ModelProfilesFacts):

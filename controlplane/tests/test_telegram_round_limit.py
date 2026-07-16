@@ -17,11 +17,12 @@ class FakeStatusMessage:
 class FakeMessage:
     def __init__(self):
         self.replies = []
+        self.reply_kwargs = []
         self.status_messages = []
 
     async def reply_text(self, text, **kwargs):
-        del kwargs
         self.replies.append(text)
+        self.reply_kwargs.append(kwargs)
         status = FakeStatusMessage()
         self.status_messages.append(status)
         return status
@@ -42,8 +43,28 @@ class BlockingRoundLimitAgent:
 
 
 class TelegramRoundLimitTests(unittest.TestCase):
+    def test_round_limit_prompt_uses_platform_adapter(self):
+        asyncio.run(self._run_round_limit_prompt_uses_platform_adapter())
+
     def test_continue_round_limit_runs_in_background(self):
         asyncio.run(self._run_continue_round_limit_runs_in_background())
+
+    async def _run_round_limit_prompt_uses_platform_adapter(self):
+        agent = BlockingRoundLimitAgent()
+        bot = TelegramBot(ChatDomeConfig(), agent)
+        message = FakeMessage()
+
+        await bot._send_round_limit_prompt(
+            message,
+            {"rounds": 10, "window": 10, "run_id": "RUN-1"},
+        )
+
+        self.assertIn("当前任务已执行 10 轮", message.replies[-1])
+        keyboard = message.reply_kwargs[-1]["reply_markup"].inline_keyboard
+        self.assertEqual(
+            [button.text for button in keyboard[0]],
+            ["▶️ 继续执行", "🛑 放弃任务"],
+        )
 
     async def _run_continue_round_limit_runs_in_background(self):
         agent = BlockingRoundLimitAgent()

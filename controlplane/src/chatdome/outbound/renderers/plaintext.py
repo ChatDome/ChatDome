@@ -27,6 +27,8 @@ class PlainTextOutboundRenderer:
             action_kinds = {action.kind for action in message.actions}
             if approval_id and ActionKind.APPROVE in action_kinds:
                 lines.append(f"回复 /confirm {approval_id} 允许，或 /reject {approval_id} 拒绝。")
+                if ActionKind.APPROVE_TASK in action_kinds:
+                    lines.append(f"回复 /confirm_task {approval_id} 允许当前任务中的同类操作。")
             elif approval_id and ActionKind.REJECT in action_kinds:
                 lines.append(f"回复 /reject {approval_id} 拒绝。")
             if approval_id and facts.details_available:

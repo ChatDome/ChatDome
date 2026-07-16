@@ -9,6 +9,17 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Mapping
 
+from chatdome.outbound.models import (
+    CommandEchoFacts,
+    CommandHelpFacts,
+    CommandHelpItemFacts,
+    OutboundAction,
+    OutboundMessage,
+    OutboundMessageKind,
+    SessionControlFacts,
+    TokenUsageFacts,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,7 +63,9 @@ class CommandResult:
     title: str = ""
     severity: str = "info"
     facts: Any = None
-    outbound: Any = field(default=None, repr=False, compare=False)
+    actions: tuple[OutboundAction, ...] = ()
+    presentation: Mapping[str, Any] = field(default_factory=dict)
+    outbound: OutboundMessage | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -149,6 +162,12 @@ COMMAND_CATALOG: tuple[CommandDef, ...] = (
         args_hint="[approval_id]",
     ),
     CommandDef(
+        "/confirm_task",
+        "Approve a pending command for the current task",
+        "approval",
+        args_hint="[approval_id]",
+    ),
+    CommandDef(
         "/reject",
         "Reject a pending command or paused task",
         "approval",
@@ -183,6 +202,28 @@ def format_command_help(platform: str) -> str:
         aliases = f" ({', '.join(command.aliases)})" if command.aliases else ""
         lines.append(f"  {command.usage}{aliases}  {command.description}")
     return "\n".join(lines)
+
+
+def command_help_result(platform: str) -> CommandResult:
+    """Return one shared help result with platform availability as Facts."""
+
+    facts = CommandHelpFacts(
+        commands=tuple(
+            CommandHelpItemFacts(
+                name=command.name,
+                usage=command.usage,
+                aliases=command.aliases,
+                description=command.description,
+            )
+            for command in command_catalog(platform)
+        )
+    )
+    return CommandResult(
+        outcome="help_shown",
+        title="Commands",
+        text=format_command_help(platform),
+        facts=facts,
+    )
 
 
 
@@ -290,6 +331,26 @@ class CommandRegistry:
             context=context or CommandContext(),
         )
 
+    def create_context(self) -> CommandContext:
+        """Create the context used by a platform input adapter."""
+
+        if self._context_factory is not None:
+            return self._context_factory()
+        return CommandContext()
+
+    async def execute_invocation(
+        self,
+        invocation: CommandInvocation,
+    ) -> CommandResult:
+        """Execute an already adapted invocation and publish its shared result."""
+
+        result = await execute_command(invocation)
+        if self._result_handler is not None:
+            handled = self._result_handler(invocation, result)
+            if inspect.isawaitable(handled):
+                await handled
+        return result
+
     def match_commands(self, text: str) -> list[CommandDef]:
         """Return command candidates for the current input text."""
 
@@ -360,17 +421,12 @@ class CommandRegistry:
     ) -> CommandResult:
         """Execute a registered command through the shared invocation path."""
 
-        if context is None and self._context_factory is not None:
-            context = self._context_factory()
+        if context is None:
+            context = self.create_context()
         invocation = self.parse(line, context=context)
         if invocation is None:
             return CommandResult(handled=False)
-        result = await execute_command(invocation)
-        if self._result_handler is not None:
-            handled = self._result_handler(invocation, result)
-            if inspect.isawaitable(handled):
-                await handled
-        return result
+        return await self.execute_invocation(invocation)
 
     @staticmethod
     def _validate_name(name: str) -> None:
@@ -469,10 +525,11 @@ async def execute_command(
 
     from chatdome.outbound.builders import OutboundMessageBuilder
 
-    result = replace(
+    outbound = result.outbound or OutboundMessageBuilder().from_command_result(
+        invocation,
         result,
-        outbound=OutboundMessageBuilder().from_command_result(invocation, result),
     )
+    result = replace(result, outbound=outbound)
     await _record_command_event(invocation, result)
     logger.info(
         "Control command completed source=%s chat_id=%s command=%s outcome=%s request_id=%s",
@@ -544,6 +601,20 @@ def clear_agent_session(agent: Any, chat_id: int) -> bool:
     return bool(agent.clear_session(chat_id))
 
 
+def clear_session_command_result(agent: Any, context: CommandContext) -> CommandResult:
+    """Clear one session and return platform-neutral result content."""
+
+    cleared = clear_agent_session(agent, context.chat_id)
+    return CommandResult(
+        outcome="session_cleared" if cleared else "no_active_session",
+        event_summary=(
+            "用户清空了当前会话。" if cleared else "当前没有可清空的会话。"
+        ),
+        text="Session cleared." if cleared else "No active session.",
+        facts=SessionControlFacts(operation="clear_session", changed=cleared),
+    )
+
+
 async def stop_active_task(cancel_request: Callable[[], Any] | None) -> bool:
     """Stop a platform-owned task through one callback contract."""
 
@@ -553,6 +624,49 @@ async def stop_active_task(cancel_request: Callable[[], Any] | None) -> bool:
     if inspect.isawaitable(result):
         result = await result
     return bool(result)
+
+
+async def stop_task_command_result(
+    cancel_request: Callable[[], Any] | None,
+) -> CommandResult:
+    """Stop one platform-owned task and return shared result semantics."""
+
+    stopped = await stop_active_task(cancel_request)
+    if stopped:
+        return CommandResult(
+            state="idle",
+            outcome="task_stopped",
+            event_summary="用户中止了当前任务，后续步骤未执行。",
+            visible_to_agent=True,
+            text="Task stopped.",
+            facts=SessionControlFacts(operation="stop_task", changed=True),
+        )
+    return CommandResult(
+        outcome="no_active_task",
+        event_summary="当前没有运行中的任务。",
+        text="No running task.",
+        facts=SessionControlFacts(operation="stop_task", changed=False),
+    )
+
+
+def environment_command_result(
+    profile_path: Any,
+    *,
+    fallback_paths: Iterable[Any] = (),
+) -> CommandResult:
+    """Build one environment result through the shared Facts builder."""
+
+    from chatdome.outbound.builders import EnvironmentFactsBuilder
+
+    facts = EnvironmentFactsBuilder().from_profile(
+        profile_path,
+        fallback_paths=fallback_paths,
+    )
+    return CommandResult(
+        outcome="environment_shown" if facts.available else "unavailable",
+        event_summary="用户查看了运行环境。",
+        facts=facts,
+    )
 
 
 def parse_audit_limit(args: Iterable[str]) -> int:
@@ -611,6 +725,23 @@ def format_user_command_audit_events(events: Iterable[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def audit_command_result(context: CommandContext, args: Iterable[str]) -> CommandResult:
+    """Return recent user command audit events through one shared handler."""
+
+    limit = parse_audit_limit(args)
+    events = get_user_command_audit_events(context.chat_id, limit)
+    return CommandResult(
+        outcome="audit_shown",
+        event_summary=f"用户查看了最近 {len(events)} 条命令审计事件。",
+        text=format_user_command_audit_events(events),
+        facts={
+            "requested_limit": limit,
+            "event_count": len(events),
+            "events": tuple(events),
+        },
+    )
+
+
 async def resume_agent_approval(
     agent: Any,
     chat_id: int,
@@ -645,12 +776,236 @@ async def get_agent_approval_details(
     )
 
 
+def _command_state_for_outbound(message: Any) -> str:
+    if message.kind == OutboundMessageKind.APPROVAL_REQUEST:
+        return "approval_required"
+    if message.kind == OutboundMessageKind.TASK_PAUSED:
+        return "continuation_required"
+    return "idle"
+
+def _with_command_outcome(
+    message: OutboundMessage,
+    outcome: str,
+) -> OutboundMessage:
+    """Attach command state and outcome without changing rendered Agent content."""
+
+    return replace(
+        message,
+        status=_command_state_for_outbound(message),
+        outcome=outcome,
+    )
+
+
+async def approval_details_command_result(
+    agent: Any,
+    context: CommandContext,
+    args: Iterable[str],
+) -> CommandResult:
+    """Load one approval analysis and return it through unified outbound content."""
+
+    from chatdome.outbound.builders import build_approval_details
+
+    approval_id, full = parse_details_options(args)
+    details = await get_agent_approval_details(
+        agent,
+        context.chat_id,
+        approval_id=approval_id,
+        include_llm=True,
+    )
+    outbound = build_approval_details(details)
+    presentation = {"full": full}
+    outbound = replace(outbound, presentation=presentation)
+    available = bool(details.get("ok"))
+    return CommandResult(
+        state="approval_details" if available else "idle",
+        outcome="details_shown" if available else "details_unavailable",
+        event_summary="用户查看了待审批命令分析。",
+        event_refs=outbound.refs,
+        facts=outbound.facts,
+        actions=outbound.actions,
+        presentation=presentation,
+        outbound=outbound,
+    )
+
+
+async def approval_action_command_result(
+    agent: Any,
+    context: CommandContext,
+    action: str,
+    args: Iterable[str],
+) -> CommandResult:
+    """Resolve one approval action through the shared business path."""
+
+    from chatdome.outbound.builders import OutboundMessageBuilder
+
+    normalized_action = str(action or "").strip().upper()
+    if normalized_action not in {"APPROVE", "APPROVE_TASK"}:
+        raise ValueError("unsupported approval action")
+    values = tuple(args)
+    approval_id = str(values[0]).strip() if values else None
+    result = await resume_agent_approval(
+        agent,
+        context.chat_id,
+        normalized_action,
+        approval_id=approval_id,
+    )
+    task_scope = normalized_action == "APPROVE_TASK"
+    outcome = (
+        "approval_task_confirmed" if task_scope else "approval_confirmed"
+    )
+    outbound = _with_command_outcome(
+        OutboundMessageBuilder().from_agent_result(result),
+        outcome,
+    )
+    return CommandResult(
+        state=outbound.status,
+        outcome=outcome,
+        event_summary=(
+            "用户为当前任务批准了待审批命令。"
+            if task_scope
+            else "用户批准了待审批命令。"
+        ),
+        visible_to_agent=True,
+        event_refs={"approval_id": approval_id or ""},
+        outbound=outbound,
+    )
+
+
+async def approve_command_result(
+    agent: Any,
+    context: CommandContext,
+    args: Iterable[str],
+) -> CommandResult:
+    """Approve one pending operation through the shared business path."""
+
+    return await approval_action_command_result(
+        agent,
+        context,
+        "APPROVE",
+        args,
+    )
+
+
+async def approve_task_command_result(
+    agent: Any,
+    context: CommandContext,
+    args: Iterable[str],
+) -> CommandResult:
+    """Approve one pending operation for the current task."""
+
+    return await approval_action_command_result(
+        agent,
+        context,
+        "APPROVE_TASK",
+        args,
+    )
+
+
+async def continue_command_result(
+    agent: Any,
+    context: CommandContext,
+) -> CommandResult:
+    """Continue a round-limited task and return the resulting Agent message."""
+
+    from chatdome.outbound.builders import OutboundMessageBuilder
+
+    result = await continue_agent_task(agent, context.chat_id, "CONTINUE")
+    outbound = _with_command_outcome(
+        OutboundMessageBuilder().from_agent_result(result),
+        "task_continued",
+    )
+    return CommandResult(
+        state=outbound.status,
+        outcome="task_continued",
+        event_summary="用户继续了暂停的任务。",
+        visible_to_agent=True,
+        outbound=outbound,
+    )
+
+
+async def abandon_command_result(
+    agent: Any,
+    context: CommandContext,
+) -> CommandResult:
+    """Abandon a round-limited task through the shared business path."""
+
+    from chatdome.outbound.builders import OutboundMessageBuilder
+
+    result = await continue_agent_task(agent, context.chat_id, "ABANDON")
+    outbound = _with_command_outcome(
+        OutboundMessageBuilder().from_agent_result(result),
+        "task_abandoned",
+    )
+    return CommandResult(
+        state=outbound.status,
+        outcome="task_abandoned",
+        event_summary="用户放弃了暂停任务。",
+        visible_to_agent=True,
+        outbound=outbound,
+    )
+
+
+async def reject_command_result(
+    agent: Any,
+    context: CommandContext,
+    args: Iterable[str],
+) -> CommandResult:
+    """Reject an approval or abandon a paused task through one business path."""
+
+    from chatdome.outbound.builders import OutboundMessageBuilder
+
+    values = tuple(args)
+    approval_id = str(values[0]).strip() if values else None
+    abandons_task = rejection_targets_round_limit(agent, context.chat_id)
+    result = await reject_agent_action(
+        agent,
+        context.chat_id,
+        approval_id=approval_id,
+    )
+    outcome = "task_abandoned" if abandons_task else "approval_rejected"
+    outbound = _with_command_outcome(
+        OutboundMessageBuilder().from_agent_result(result),
+        outcome,
+    )
+    return CommandResult(
+        state=outbound.status,
+        outcome=outcome,
+        event_summary=(
+            "用户放弃了暂停任务。"
+            if abandons_task
+            else "用户拒绝了待审批命令。"
+        ),
+        visible_to_agent=True,
+        event_refs={"approval_id": approval_id or ""},
+        outbound=outbound,
+    )
+
+
 def get_token_usage(chat_id: int) -> dict[str, int]:
     """Return one session's token counters."""
 
     from chatdome.agent.tracker import TokenTracker
 
     return TokenTracker.get_user_stats(chat_id)
+
+
+def token_usage_command_result(context: CommandContext) -> CommandResult:
+    """Return token counters as shared Facts."""
+
+    stats = get_token_usage(context.chat_id)
+    facts = TokenUsageFacts(
+        chat_id=context.chat_id,
+        prompt_tokens=int(stats["prompt_tokens"]),
+        completion_tokens=int(stats["completion_tokens"]),
+        total_tokens=int(stats["total_tokens"]),
+    )
+    return CommandResult(
+        outcome="token_usage_shown",
+        event_summary="用户查看了当前会话的 Token 用量。",
+        title="Token usage",
+        text=f"Prompt: {facts.prompt_tokens:,}\nCompletion: {facts.completion_tokens:,}\nTotal: {facts.total_tokens:,}",
+        facts=facts,
+    )
 
 
 def toggle_command_echo(agent: Any, chat_id: int) -> bool:
@@ -663,6 +1018,22 @@ def toggle_command_echo(agent: Any, chat_id: int) -> bool:
     session.command_echo = not bool(session.command_echo)
     manager.save_session(session)
     return bool(session.command_echo)
+
+
+def command_echo_command_result(
+    agent: Any,
+    context: CommandContext,
+) -> CommandResult:
+    """Toggle command echo and return one shared state result."""
+
+    enabled = toggle_command_echo(agent, context.chat_id)
+    state = "enabled" if enabled else "disabled"
+    return CommandResult(
+        outcome=f"command_echo_{state}",
+        event_summary=f"用户{'开启' if enabled else '关闭'}了命令回显。",
+        text=f"Command echo {state}.",
+        facts=CommandEchoFacts(enabled=enabled),
+    )
 
 
 def parse_details_options(args: Iterable[str]) -> tuple[str | None, bool]:
@@ -681,6 +1052,18 @@ def parse_details_options(args: Iterable[str]) -> tuple[str | None, bool]:
     return approval_id, full
 
 
+def rejection_targets_round_limit(agent: Any, chat_id: int) -> bool:
+    """Return whether rejection currently means abandoning a paused task."""
+
+    manager = getattr(agent, "session_manager", None)
+    session = manager.get_or_create(chat_id) if manager is not None else None
+    return bool(
+        session is not None
+        and getattr(session, "pending_round_limit", False)
+        and not getattr(session, "pending_approval", False)
+    )
+
+
 async def reject_agent_action(
     agent: Any,
     chat_id: int,
@@ -688,13 +1071,7 @@ async def reject_agent_action(
 ) -> Any:
     """Reject an approval or abandon a round-limit pause."""
 
-    manager = getattr(agent, "session_manager", None)
-    session = manager.get_or_create(chat_id) if manager is not None else None
-    if (
-        session is not None
-        and getattr(session, "pending_round_limit", False)
-        and not getattr(session, "pending_approval", False)
-    ):
+    if rejection_targets_round_limit(agent, chat_id):
         return await continue_agent_task(agent, chat_id, "ABANDON")
     return await resume_agent_approval(
         agent,

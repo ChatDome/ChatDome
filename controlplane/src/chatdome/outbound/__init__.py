@@ -5,6 +5,8 @@ from chatdome.outbound.builders import (
     OutboundMessageBuilder,
     build_approval_details,
     build_approval_request,
+    build_notification_message,
+    build_sentinel_alert,
     build_environment_message,
 )
 from chatdome.outbound.models import (
@@ -12,6 +14,9 @@ from chatdome.outbound.models import (
     ApprovalDetailsFacts,
     ApprovalRequestFacts,
     CodexAuthorizationFacts,
+    CommandEchoFacts,
+    CommandHelpFacts,
+    CommandHelpItemFacts,
     EnvironmentFacts,
     ModelProfileFacts,
     ModelProfilesFacts,
@@ -20,6 +25,8 @@ from chatdome.outbound.models import (
     OutboundMessageKind,
     RenderedControl,
     RenderedMessage,
+    SessionControlFacts,
+    TokenUsageFacts,
 )
 
 __all__ = [
@@ -27,6 +34,9 @@ __all__ = [
     "ApprovalDetailsFacts",
     "ApprovalRequestFacts",
     "CodexAuthorizationFacts",
+    "CommandEchoFacts",
+    "CommandHelpFacts",
+    "CommandHelpItemFacts",
     "EnvironmentFacts",
     "ModelProfileFacts",
     "EnvironmentFactsBuilder",
@@ -37,6 +47,10 @@ __all__ = [
     "OutboundMessageKind",
     "RenderedControl",
     "RenderedMessage",
+    "SessionControlFacts",
+    "TokenUsageFacts",
+    "build_notification_message",
+    "build_sentinel_alert",
     "build_approval_details",
     "build_approval_request",
     "build_environment_message",

@@ -57,6 +57,14 @@ def coerce_agent_result(value: Any) -> AgentResult:
     if isinstance(value, AgentResult):
         return value
 
+    kind = str(getattr(value, "kind", "") or "")
+    if kind in {"reply", "pending_approval", "round_limit"}:
+        return AgentResult(
+            kind=kind,
+            content=str(getattr(value, "content", "") or ""),
+            payload=dict(getattr(value, "payload", {}) or {}),
+        )
+
     text = "" if value is None else str(value)
     for prefix, factory in (
         (LEGACY_PENDING_APPROVAL_PREFIX, AgentResult.pending_approval),

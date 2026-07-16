@@ -46,6 +46,7 @@ if CONTROLPLANE_SRC.is_dir():
 
 from chatdome import __version__
 from chatdome.agent.audit import CommandAuditTracker
+from chatdome.agent.result import AgentResult, coerce_agent_result
 from chatdome.agent.session import record_persisted_control_event
 from chatdome.outbound.builders import (
     EnvironmentFactsBuilder,
@@ -55,30 +56,35 @@ from chatdome.outbound.builders import (
 )
 from chatdome.outbound.models import ActionKind
 from chatdome.outbound.renderers.terminal import TerminalOutboundRenderer
+from chatdome.platform_adapters import CLIPlatformAdapter
 from chatdome.slash_commands import (
     CommandContext,
-    clear_agent_session,
+    abandon_command_result,
+    approval_details_command_result,
+    approve_command_result,
+    approve_task_command_result,
+    audit_command_result,
+    clear_session_command_result,
     command_catalog,
-    continue_agent_task,
+    command_echo_command_result,
+    command_help_result,
+    continue_command_result,
+    environment_command_result,
     execute_engram_command,
-    format_command_help,
     format_model_profiles,
     format_user_command_audit_events,
-    get_agent_approval_details,
-    get_token_usage,
     get_user_command_audit_events,
     parse_audit_limit,
     parse_details_options,
-    reject_agent_action,
-    resume_agent_approval,
+    reject_command_result,
     sentinel_history,
     sentinel_mute,
     sentinel_packs,
     sentinel_resume,
     sentinel_status,
     sentinel_trigger,
-    stop_active_task,
-    toggle_command_echo,
+    stop_task_command_result,
+    token_usage_command_result,
 )
 from chatdome.config import AIConfig, validate_profile_name
 from chatdome.errors import ChatDomeError, user_facing_error_message
@@ -636,36 +642,43 @@ def _terminal_model_completion_items(arg_text: str) -> list[CompletionItem]:
         items.append(CompletionItem(text=name, display=name, description=description))
     return items
 
+def _terminal_command_context(runtime_provider: Any | None) -> CommandContext:
+    """Build shared command context for CLI commands and interactions."""
+
+    provider = runtime_provider
+    chat_id = provider.chat_id if provider is not None else -1
+
+    def record_event(event: dict[str, Any]) -> None:
+        _sync_terminal_runtime_paths()
+        runtime = getattr(provider, "runtime", None) if provider is not None else None
+        manager = getattr(getattr(runtime, "agent", None), "session_manager", None)
+        if manager is not None:
+            manager.record_control_event(chat_id, event)
+            return
+        record_persisted_control_event(chat_id, event)
+
+    return CommandContext(
+        source="cli",
+        chat_id=chat_id,
+        actor_id="local",
+        event_recorder=record_event,
+    )
+
 
 def _build_terminal_command_registry(
     runtime_provider: Any | None = None,
     stop_request_handler: Any | None = None,
+    platform_adapter: CLIPlatformAdapter | None = None,
 ) -> CommandRegistry:
     def command_context() -> CommandContext:
-        provider = runtime_provider
-        chat_id = provider.chat_id if provider is not None else -1
-
-        def record_event(event: dict[str, Any]) -> None:
-            _sync_terminal_runtime_paths()
-            runtime = getattr(provider, "runtime", None) if provider is not None else None
-            manager = getattr(getattr(runtime, "agent", None), "session_manager", None)
-            if manager is not None:
-                manager.record_control_event(chat_id, event)
-                return
-            record_persisted_control_event(chat_id, event)
-
-        return CommandContext(
-            source="cli",
-            chat_id=chat_id,
-            actor_id="local",
-            event_recorder=record_event,
-        )
+        return _terminal_command_context(runtime_provider)
 
     async def render_command_result(
         _invocation: CommandInvocation,
         result: CommandResult,
     ) -> None:
-        _render_terminal_outbound(result.outbound)
+        adapter = platform_adapter or _terminal_platform_adapter()
+        await adapter.deliver_result(result)
 
     registry = CommandRegistry(
         context_factory=command_context,
@@ -678,95 +691,36 @@ def _build_terminal_command_registry(
         return runtime_provider
 
     async def help_handler(_invocation: CommandInvocation) -> CommandResult:
-        return CommandResult(
-            outcome="help_shown",
-            title="Commands",
-            text=format_command_help("cli"),
-        )
+        return command_help_result("cli")
 
-    async def clear_handler(_invocation: CommandInvocation) -> CommandResult:
+    async def clear_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        cleared = clear_agent_session(runtime.agent, runtime.chat_id)
-        if cleared:
-            text = _status_label("✅", "[ok]", "Session cleared.")
-            summary = "用户通过 CLI 清空了当前会话。"
-            outcome = "session_cleared"
-        else:
-            text = _status_label("ℹ️", "[i]", "No active session.")
-            summary = "CLI 当前没有可清空的会话。"
-            outcome = "no_active_session"
-        return CommandResult(
-            outcome=outcome,
-            event_summary=summary,
-            text=text,
-        )
+        return clear_session_command_result(runtime.agent, invocation.context)
 
     async def exit_handler(_invocation: CommandInvocation) -> CommandResult:
         return CommandResult(keep_running=False)
 
     async def stop_handler(_invocation: CommandInvocation) -> CommandResult:
-        stopped = await stop_active_task(stop_request_handler)
-        if stopped:
-            return CommandResult(
-                state=ChatSessionState.IDLE.value,
-                outcome="task_stopped",
-                event_summary="用户通过 CLI 中止了当前任务，后续步骤未执行。",
-                visible_to_agent=True,
-                text=_status_label("⏹️", "[stop]", "Task stopped."),
-            )
-        return CommandResult(
-            outcome="no_active_task",
-            event_summary="CLI 当前没有运行中的任务。",
-            text=_status_label("ℹ️", "[i]", "No running task."),
-        )
+        return await stop_task_command_result(stop_request_handler)
 
     async def env_handler(_invocation: CommandInvocation) -> CommandResult:
-        facts = EnvironmentFactsBuilder().from_profile(
+        return environment_command_result(
             ENV_PROFILE_PATH,
             fallback_paths=(LEGACY_ENV_PROFILE_PATH,),
-        )
-        return CommandResult(
-            outcome="environment_shown" if facts.available else "unavailable",
-            event_summary="用户通过 CLI 查看了运行环境。",
-            facts=facts,
         )
 
     async def audit_handler(invocation: CommandInvocation) -> CommandResult:
         _sync_terminal_runtime_paths()
-        provider = runtime_provider
-        chat_id = provider.chat_id if provider is not None else -1
-        limit = parse_audit_limit(invocation.args)
-        events = get_user_command_audit_events(chat_id, limit)
-        return CommandResult(
-            outcome="audit_shown",
-            event_summary=f"用户通过 CLI 查看了最近 {len(events)} 条命令审计事件。",
-            text=format_user_command_audit_events(events),
-        )
+        return audit_command_result(invocation.context, invocation.args)
 
-    async def token_handler(_invocation: CommandInvocation) -> CommandResult:
-        provider = runtime_provider
-        chat_id = provider.chat_id if provider is not None else -1
-        stats = get_token_usage(chat_id)
-        return CommandResult(
-            outcome="token_usage_shown",
-            event_summary="用户通过 CLI 查看了当前会话的 Token 用量。",
-            title="Token usage",
-            text=(
-                "Token usage\n"
-                f"Prompt: {stats['prompt_tokens']:,}\n"
-                f"Completion: {stats['completion_tokens']:,}\n"
-                f"Total: {stats['total_tokens']:,}"
-            ),
-        )
+    async def token_handler(invocation: CommandInvocation) -> CommandResult:
+        return token_usage_command_result(invocation.context)
 
-    async def cmd_echo_handler(_invocation: CommandInvocation) -> CommandResult:
+    async def cmd_echo_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        enabled = toggle_command_echo(runtime.agent, runtime.chat_id)
-        state = "enabled" if enabled else "disabled"
-        return CommandResult(
-            outcome=f"command_echo_{state}",
-            event_summary=f"用户通过 CLI {'开启' if enabled else '关闭'}了命令回显。",
-            text=_status_label("🔍", "[cmd]", f"Command echo {state}."),
+        return command_echo_command_result(
+            runtime.agent,
+            invocation.context,
         )
 
     async def model_handler(invocation: CommandInvocation) -> CommandResult:
@@ -793,28 +747,32 @@ def _build_terminal_command_registry(
 
     async def details_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        approval_id, full = parse_details_options(invocation.args)
-        shown = await _show_terminal_details(runtime, approval_id, full=full)
-        state = ChatSessionState.APPROVAL_DETAILS if shown else ChatSessionState.IDLE
-        return CommandResult(state=state.value)
+        return await approval_details_command_result(
+            runtime.agent, invocation.context, invocation.args
+        )
 
 
     async def confirm_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        approval_id = invocation.args[0] if invocation.args else None
-        state = await _resolve_terminal_confirm(runtime, approval_id)
-        return CommandResult(state=state)
+        return await approve_command_result(
+            runtime.agent, invocation.context, invocation.args
+        )
 
-    async def continue_handler(_invocation: CommandInvocation) -> CommandResult:
+    async def confirm_task_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        state = await _resolve_terminal_continue(runtime)
-        return CommandResult(state=state)
+        return await approve_task_command_result(
+            runtime.agent, invocation.context, invocation.args
+        )
+
+    async def continue_handler(invocation: CommandInvocation) -> CommandResult:
+        runtime = require_provider().get()
+        return await continue_command_result(runtime.agent, invocation.context)
 
     async def reject_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
-        approval_id = invocation.args[0] if invocation.args else None
-        state = await _resolve_terminal_reject(runtime, approval_id)
-        return CommandResult(state=state)
+        return await reject_command_result(
+            runtime.agent, invocation.context, invocation.args
+        )
 
     async def engram_handler(invocation: CommandInvocation) -> CommandResult:
         runtime = require_provider().get()
@@ -1017,6 +975,7 @@ def _build_terminal_command_registry(
         "/model_delete": model_delete_handler, "/model_cancel": model_cancel_handler,
         "/codex_login": codex_login_handler, "/details": details_handler,
         "/confirm": confirm_handler, "/reject": reject_handler,
+        "/confirm_task": confirm_task_handler,
         "/continue": continue_handler,
         "/sentinel_status": sentinel_status_handler,
         "/sentinel_trigger": sentinel_trigger_handler,
@@ -1124,8 +1083,8 @@ def _terminal_message_title(first_line: str) -> str:
     return "ChatDome"
 
 
-_TERMINAL_APPROVAL_ACTION = "Allow operation? [y/n]"
-_TERMINAL_APPROVAL_ACTION_WITH_DETAILS = "Allow operation? [y/n]  d=details"
+_TERMINAL_APPROVAL_ACTION = "Allow operation? [y/n]  t=allow for task"
+_TERMINAL_APPROVAL_ACTION_WITH_DETAILS = "Allow operation? [y/n]  t=allow for task  d=details"
 _TERMINAL_ACTION_LINES = frozenset(
     {
         _TERMINAL_APPROVAL_ACTION,
@@ -1156,46 +1115,52 @@ def _print_chatdome_message(text: str) -> None:
     print(_format_chatdome_block(str(text or "")))
 
 
-def _render_terminal_outbound(message: Any) -> None:
-    if message is None:
-        return
-    rendered = TerminalOutboundRenderer(
-        ascii_mode=_terminal_ascii_mode(),
-    ).render(message)
+def _send_terminal_rendered(_target: Any, rendered: Any) -> None:
     for part in rendered.text_parts:
         if str(part or "").strip():
             _print_chatdome_message(part)
 
 
+def _terminal_platform_adapter(*, full: bool = False) -> CLIPlatformAdapter:
+    return CLIPlatformAdapter(
+        _send_terminal_rendered,
+        ascii_mode=_terminal_ascii_mode(),
+        full=full,
+    )
+
+
+def _render_terminal_outbound(message: Any, *, full: bool = False) -> None:
+    if message is None:
+        return
+    adapter = _terminal_platform_adapter(full=full)
+    _send_terminal_rendered(None, adapter.render(message))
+
+
 def _format_terminal_pending_approval(payload: dict[str, Any]) -> str:
     message = build_approval_request(payload)
-    rendered = TerminalOutboundRenderer(ascii_mode=_terminal_ascii_mode()).render(message)
+    rendered = _terminal_platform_adapter().render(message)
     return "\n".join(rendered.text_parts)
 
 
 def _format_terminal_round_limit(payload: dict[str, Any]) -> str:
-    rounds = int((payload or {}).get("rounds") or 0)
-    title = _status_label("⏸️", "[pause]", f"Task paused after {rounds} rounds.")
-    return f"{title}\nContinue? [y/n]"
+    message = OutboundMessageBuilder().from_agent_result(AgentResult.round_limit(payload))
+    rendered = _terminal_platform_adapter().render(message)
+    return "\n".join(rendered.text_parts)
 
 
 def _print_terminal_agent_result(result: Any) -> str:
-    kind = str(getattr(result, "kind", "reply") or "reply")
-    if kind == "pending_approval":
-        payload = getattr(result, "payload", {}) or {}
-        message = build_approval_request(payload)
-        rendered = TerminalOutboundRenderer(ascii_mode=_terminal_ascii_mode()).render(message)
-        _print_chatdome_message("\n".join(rendered.text_parts))
+    agent_result = coerce_agent_result(result)
+    message = OutboundMessageBuilder().from_agent_result(agent_result)
+    _render_terminal_outbound(message)
+    if agent_result.kind == "pending_approval":
         action_kinds = {action.kind for action in message.actions}
         if ActionKind.APPROVE in action_kinds:
             return ChatSessionState.APPROVAL_REQUIRED.value
         if action_kinds & {ActionKind.REJECT, ActionKind.SHOW_DETAILS}:
             return ChatSessionState.APPROVAL_REVIEW_REQUIRED.value
         return ChatSessionState.ERROR.value
-    if kind == "round_limit":
-        _print_chatdome_message(_format_terminal_round_limit(getattr(result, "payload", {}) or {}))
+    if agent_result.kind == "round_limit":
         return ChatSessionState.CONTINUATION_REQUIRED.value
-    _print_chatdome_message(str(getattr(result, "content", result) or ""))
     return ChatSessionState.IDLE.value
 
 
@@ -1421,41 +1386,159 @@ def _terminal_session(runtime: _TerminalChatRuntime) -> Any:
 def _terminal_details_options(args: tuple[str, ...]) -> tuple[str | None, bool]:
     return parse_details_options(args)
 
+async def _dispatch_terminal_interaction(
+    runtime: _TerminalChatRuntime,
+    command_name: str,
+    args: tuple[str, ...],
+    handler: Any,
+) -> CommandResult:
+    """Run terminal shortcuts through the shared command pipeline."""
 
-async def _show_terminal_details(runtime: _TerminalChatRuntime, approval_id: str | None, *, full: bool = False) -> bool:
-    _print_chatdome_message(_status_label("🔎", "[details]", "Loading approval details..."))
-    details = await get_agent_approval_details(
-        runtime.agent,
-        runtime.chat_id,
-        approval_id=approval_id,
-        include_llm=True,
+    provider = _StaticTerminalRuntimeProvider(runtime)
+    adapter = _terminal_platform_adapter()
+    command = CommandDef(
+        name=command_name,
+        description="",
+        category="interaction",
     )
-    _print_chatdome_message(_format_terminal_approval_details(details, full=full))
-    return bool(details.get("ok"))
-
-
-async def _resolve_terminal_confirm(runtime: _TerminalChatRuntime, approval_id: str | None) -> str:
-    result = await resume_agent_approval(
-        runtime.agent,
-        runtime.chat_id,
-        "APPROVE",
-        approval_id=approval_id,
+    invocation = adapter.receive_command(
+        raw=" ".join((command_name, *args)),
+        command=command,
+        args=args,
+        context=_terminal_command_context(provider),
     )
-    return _print_terminal_agent_result(result)
+    return await adapter.dispatch(
+        invocation,
+        handler=handler,
+    )
+
+
+async def _show_terminal_details(
+    runtime: _TerminalChatRuntime,
+    approval_id: str | None,
+    *,
+    full: bool = False,
+) -> bool:
+    _print_chatdome_message(
+        _status_label("🔎", "[details]", "Loading approval details...")
+    )
+    args = tuple(
+        value
+        for value in (approval_id, "full" if full else None)
+        if value is not None
+    )
+
+    async def handler(invocation: CommandInvocation) -> CommandResult:
+        return await approval_details_command_result(
+            runtime.agent,
+            invocation.context,
+            invocation.args,
+        )
+
+    result = await _dispatch_terminal_interaction(
+        runtime,
+        "/details",
+        args,
+        handler,
+    )
+    return result.outcome == "details_shown"
+
+
+async def _resolve_terminal_confirm(
+    runtime: _TerminalChatRuntime,
+    approval_id: str | None,
+) -> str:
+    args = (approval_id,) if approval_id else ()
+
+    async def handler(invocation: CommandInvocation) -> CommandResult:
+        return await approve_command_result(
+            runtime.agent,
+            invocation.context,
+            invocation.args,
+        )
+
+    result = await _dispatch_terminal_interaction(
+        runtime,
+        "/confirm",
+        args,
+        handler,
+    )
+    return result.state or ChatSessionState.IDLE.value
+
+async def _resolve_terminal_confirm_task(
+    runtime: _TerminalChatRuntime,
+    approval_id: str | None,
+) -> str:
+    args = (approval_id,) if approval_id else ()
+
+    async def handler(invocation: CommandInvocation) -> CommandResult:
+        return await approve_task_command_result(
+            runtime.agent,
+            invocation.context,
+            invocation.args,
+        )
+
+    result = await _dispatch_terminal_interaction(
+        runtime,
+        "/confirm_task",
+        args,
+        handler,
+    )
+    return result.state or ChatSessionState.IDLE.value
 
 
 async def _resolve_terminal_continue(runtime: _TerminalChatRuntime) -> str:
-    result = await continue_agent_task(runtime.agent, runtime.chat_id, "CONTINUE")
-    return _print_terminal_agent_result(result)
+    async def handler(invocation: CommandInvocation) -> CommandResult:
+        return await continue_command_result(
+            runtime.agent,
+            invocation.context,
+        )
 
-
-async def _resolve_terminal_reject(runtime: _TerminalChatRuntime, approval_id: str | None) -> str:
-    result = await reject_agent_action(
-        runtime.agent,
-        runtime.chat_id,
-        approval_id=approval_id,
+    result = await _dispatch_terminal_interaction(
+        runtime,
+        "/continue",
+        (),
+        handler,
     )
-    return _print_terminal_agent_result(result)
+    return result.state or ChatSessionState.IDLE.value
+
+
+async def _resolve_terminal_reject(
+    runtime: _TerminalChatRuntime,
+    approval_id: str | None,
+) -> str:
+    args = (approval_id,) if approval_id else ()
+
+    async def handler(invocation: CommandInvocation) -> CommandResult:
+        return await reject_command_result(
+            runtime.agent,
+            invocation.context,
+            invocation.args,
+        )
+
+    result = await _dispatch_terminal_interaction(
+        runtime,
+        "/reject",
+        args,
+        handler,
+    )
+    return result.state or ChatSessionState.IDLE.value
+
+
+async def _resolve_terminal_abandon(runtime: _TerminalChatRuntime) -> str:
+    async def handler(invocation: CommandInvocation) -> CommandResult:
+        return await abandon_command_result(
+            runtime.agent,
+            invocation.context,
+        )
+
+    result = await _dispatch_terminal_interaction(
+        runtime,
+        "/reject",
+        (),
+        handler,
+    )
+    return result.state or ChatSessionState.IDLE.value
 
 
 async def _handle_terminal_approval_choice(
@@ -1476,6 +1559,12 @@ async def _handle_terminal_approval_choice(
             _print_chatdome_message("Review command analysis before approval.")
             return CommandResult(state=ChatSessionState.APPROVAL_REVIEW_REQUIRED.value)
         state = await _resolve_terminal_confirm(provider.get(), None)
+        return CommandResult(state=state)
+    if value in {"t", "task", "task_allow"}:
+        if not approval_allowed:
+            _print_chatdome_message("Review command analysis before approval.")
+            return CommandResult(state=ChatSessionState.APPROVAL_REVIEW_REQUIRED.value)
+        state = await _resolve_terminal_confirm_task(provider.get(), None)
         return CommandResult(state=state)
     if value in {"n", "no"}:
         state = await _resolve_terminal_reject(provider.get(), None)
@@ -1503,14 +1592,16 @@ async def _handle_terminal_continuation_choice(provider: Any, text: str) -> Comm
         state = await _resolve_terminal_continue(provider.get())
         return CommandResult(state=state)
     if value in {"n", "no"}:
-        state = await _resolve_terminal_reject(provider.get(), None)
+        state = await _resolve_terminal_abandon(provider.get())
         return CommandResult(state=state)
     _print_chatdome_message("Continue? [y/n]")
     return CommandResult(state=ChatSessionState.CONTINUATION_REQUIRED.value)
 
 async def _handle_terminal_command(runtime: _TerminalChatRuntime, line: str) -> bool:
     provider = _StaticTerminalRuntimeProvider(runtime)
-    result = await _build_terminal_command_registry(provider).execute(line)
+    adapter = _terminal_platform_adapter()
+    registry = _build_terminal_command_registry(provider, platform_adapter=adapter)
+    result = await adapter.execute_terminal_input(registry, line)
     if not result.handled:
         result = await _handle_unknown_terminal_command(line)
     return result.keep_running
@@ -1633,12 +1724,17 @@ async def _terminal_chat_loop(args: argparse.Namespace) -> None:
             return False
         return await controller.cancel_active_message()
 
-    registry = _build_terminal_command_registry(provider, stop_request_handler=stop_request)
+    adapter = _terminal_platform_adapter()
+    registry = _build_terminal_command_registry(
+        provider,
+        stop_request_handler=stop_request,
+        platform_adapter=adapter,
+    )
 
     async def approval_handler(text: str) -> CommandResult:
         return await _handle_terminal_approval_choice(
             provider,
-            text,
+            adapter.receive_message(text),
             details_shown=controller.state == ChatSessionState.APPROVAL_DETAILS,
             approval_allowed=controller.state != ChatSessionState.APPROVAL_REVIEW_REQUIRED,
         )
@@ -1649,11 +1745,16 @@ async def _terminal_chat_loop(args: argparse.Namespace) -> None:
 
     controller = ChatSessionController(
         registry,
-        message_handler=lambda text: _send_terminal_user_message(provider, text),
+        message_handler=lambda text: _send_terminal_user_message(
+            provider, adapter.receive_message(text)
+        ),
         unknown_handler=_handle_unknown_terminal_command,
+        command_handler=lambda text: adapter.execute_terminal_input(registry, text),
         stop_handler=provider.stop,
         approval_handler=approval_handler,
-        continuation_handler=lambda text: _handle_terminal_continuation_choice(provider, text),
+        continuation_handler=lambda text: _handle_terminal_continuation_choice(
+            provider, adapter.receive_message(text)
+        ),
         busy_handler=busy_handler,
     )
     controller_ref["controller"] = controller

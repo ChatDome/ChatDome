@@ -453,7 +453,7 @@ class ChatDomeCLITests(unittest.TestCase):
         )
         self.assertIn("Approval required", compact)
         self.assertIn("Purpose: Restart the SSH service to apply its configuration.", compact)
-        self.assertIn("Allow operation? [y/n]  d=details", compact)
+        self.assertIn("Allow operation? [y/n]  t=allow for task  d=details", compact)
         self.assertNotIn("Approval ID", compact)
         self.assertNotIn("systemctl restart sshd", compact)
 
@@ -558,7 +558,7 @@ class ChatDomeCLITests(unittest.TestCase):
         )
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
         self.assertIn("ChatDome · approval", printed)
-        self.assertIn("Allow operation? [y/n]  d=details", printed)
+        self.assertIn("Allow operation? [y/n]  t=allow for task  d=details", printed)
         self.assertIn("Approval details", printed)
         self.assertNotIn("│ Allow operation? [y/n]", printed)
         self.assertIn("approve ok", printed)

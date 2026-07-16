@@ -7,6 +7,7 @@ from chatdome.outbound.builders import (
     OutboundMessageBuilder,
     build_approval_details,
     build_approval_request,
+    build_sentinel_alert,
 )
 from chatdome.outbound.models import ActionKind, OutboundMessageKind
 from chatdome.outbound.policy import OutboundContractError, validate_outbound_message
@@ -35,6 +36,8 @@ class OutboundMessageTests(unittest.TestCase):
         message = build_approval_request(self.request_payload)
 
         self.assertEqual(message.kind, OutboundMessageKind.APPROVAL_REQUEST)
+        self.assertEqual(message.status, "approval_required")
+        self.assertEqual(message.outcome, "approval_requested")
         self.assertEqual(message.refs["approval_id"], "AP-1")
         self.assertEqual(message.facts.reason, "Restart the SSH service.")
         self.assertEqual(message.facts.impact_analysis, self.request_payload["impact_analysis"])
@@ -51,6 +54,7 @@ class OutboundMessageTests(unittest.TestCase):
             },
         )
         self.assertTrue(all(action.token == "AP-1" for action in message.actions))
+        self.assertTrue(all(action.params["approval_id"] == "AP-1" for action in message.actions))
         validate_outbound_message(message)
 
     def test_missing_reason_blocks_approval_controls(self):
@@ -125,6 +129,36 @@ class OutboundMessageTests(unittest.TestCase):
         self.assertIn("命令解析:", terminal)
         self.assertIn("命令解析:", telegram)
 
+    def test_sentinel_alert_uses_notification_facts_and_actions(self):
+        message = build_sentinel_alert(
+            "Critical alert",
+            {"check_id": "open_ports", "severity_label": "critical", "severity": 9},
+            interaction_id="ALERT-1",
+        )
+
+        self.assertEqual(message.kind, OutboundMessageKind.NOTIFICATION)
+        self.assertEqual(message.status, "attention_required")
+        self.assertEqual(message.outcome, "alert_pushed")
+        self.assertEqual(message.refs["interaction_id"], "ALERT-1")
+        self.assertEqual(message.refs["check_id"], "open_ports")
+        self.assertEqual(message.facts["alert"]["severity"], 9)
+        self.assertEqual(
+            [action.kind for action in message.actions],
+            [ActionKind.SHOW_DETAILS, ActionKind.ANALYZE],
+        )
+        self.assertTrue(
+            all(action.params["interaction_id"] == "ALERT-1" for action in message.actions)
+        )
+        rendered = TelegramOutboundRenderer().render(message)
+        self.assertEqual(
+            [control.data for control in rendered.controls],
+            [
+                "sentinel_alert_detail:ALERT-1",
+                "sentinel_alert_analysis:ALERT-1",
+            ],
+        )
+        self.assertTrue(all(control.row == 0 for control in rendered.controls))
+
     def test_round_limit_maps_to_task_paused(self):
         message = OutboundMessageBuilder().from_agent_result(
             AgentResult.round_limit({"rounds": 10, "window": 10, "run_id": "RUN-1"})
@@ -135,6 +169,9 @@ class OutboundMessageTests(unittest.TestCase):
             [action.kind for action in message.actions],
             [ActionKind.CONTINUE, ActionKind.STOP],
         )
+        self.assertEqual(message.status, "continuation_required")
+        self.assertEqual(message.outcome, "round_limit")
+        self.assertTrue(all(action.params["run_id"] == "RUN-1" for action in message.actions))
 
 
 if __name__ == "__main__":

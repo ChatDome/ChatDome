@@ -38,6 +38,7 @@ class ChatSessionController:
         registry: CommandRegistry,
         *,
         message_handler: Callable[[str], Any],
+        command_handler: Callable[[str], Any] | None = None,
         unknown_handler: Callable[[str], Any] | None = None,
         stop_handler: Callable[[], Any] | None = None,
         approval_handler: Callable[[str], Any] | None = None,
@@ -47,6 +48,7 @@ class ChatSessionController:
     ) -> None:
         self._registry = registry
         self._message_handler = message_handler
+        self._command_handler = command_handler or registry.execute
         self._unknown_handler = unknown_handler
         self._stop_handler = stop_handler
         self._approval_handler = approval_handler
@@ -87,7 +89,10 @@ class ChatSessionController:
                 result = await self._run_busy_handler(text)
                 self._apply_result_state(result)
                 return result.keep_running
-            result = await self._registry.execute(text)
+            result = self._command_handler(text)
+            if inspect.isawaitable(result):
+                result = await result
+            result = self._coerce_result(result)
             if not result.handled:
                 result = await self._run_unknown_handler(text)
             self._apply_result_state(result)

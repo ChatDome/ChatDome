@@ -4,17 +4,26 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+from chatdome.agent.result import AgentResult
 from chatdome.config import AIConfig, ChatDomeConfig
 from chatdome.llm.codex_oauth_service import CodexOAuthService
 from chatdome.llm.profile_admin import ProfileActor, ProfileMutationResult
 from chatdome.model_commands import ModelCommandService
 from chatdome.outbound.builders import EnvironmentFactsBuilder
-from chatdome.outbound.models import EnvironmentFacts, OutboundMessageKind
+from chatdome.outbound.models import (
+    ActionKind,
+    EnvironmentFacts,
+    OutboundAction,
+    OutboundMessageKind,
+)
+from chatdome.platform_adapters import CLIPlatformAdapter, TelegramPlatformAdapter
 from chatdome.slash_commands import (
     CommandContext,
     CommandDef,
     CommandRegistry,
     CommandResult,
+    command_catalog,
+    continue_command_result,
 )
 
 
@@ -195,6 +204,29 @@ def test_environment_facts_builder_parses_one_shared_profile(tmp_path: Path) -> 
     assert facts.missing_commands == ("powershell",)
 
 
+def test_agent_followup_keeps_command_outcome_in_outbound_message() -> None:
+    class FakeAgent:
+        async def resolve_round_limit(self, _chat_id, _action):
+            return AgentResult.reply("continued")
+
+    result = asyncio.run(
+        continue_command_result(FakeAgent(), CommandContext(source="cli", chat_id=1))
+    )
+
+    assert result.outcome == "task_continued"
+    assert result.outbound.outcome == "task_continued"
+    assert result.outbound.status == "idle"
+
+
+def test_cli_and_telegram_share_task_approval_command() -> None:
+    cli_names = {command.name for command in command_catalog("cli")}
+    telegram_names = {command.name for command in command_catalog("telegram")}
+
+    assert "/confirm_task" in cli_names
+    assert "/confirm_task" in telegram_names
+    assert cli_names - {"/exit"} == telegram_names
+
+
 def test_command_registry_converts_result_before_platform_handler() -> None:
     delivered = []
 
@@ -216,3 +248,80 @@ def test_command_registry_converts_result_before_platform_handler() -> None:
     assert result.outbound is delivered[0]
     assert result.outbound.kind == OutboundMessageKind.OPERATION_RESULT
     assert result.outbound.body == "completed"
+
+
+def test_platform_adapters_share_invocation_and_outbound_content() -> None:
+    delivered = {"cli": [], "telegram": []}
+
+    def cli_sender(_target, rendered):
+        delivered["cli"].append(rendered)
+
+    async def telegram_sender(_target, rendered):
+        delivered["telegram"].append(rendered)
+
+    cli = CLIPlatformAdapter(cli_sender)
+    telegram = TelegramPlatformAdapter(telegram_sender)
+    command = CommandDef("/test", "test", "test")
+
+    async def handler(_invocation):
+        return CommandResult(
+            state="waiting",
+            outcome="selection_required",
+            title="Select",
+            text="Select one option.",
+            event_refs={"interaction_id": "I-1"},
+            facts={"options": ("a", "b")},
+            actions=(
+                OutboundAction(ActionKind.SELECT, "A", "select:a"),
+                OutboundAction(ActionKind.CANCEL, "Cancel", "cancel"),
+            ),
+        )
+
+    cli_invocation = cli.receive_command(
+        raw="/test",
+        command=command,
+        args=(),
+        context=CommandContext(source="cli"),
+    )
+    telegram_invocation = telegram.receive_command(
+        raw="/test",
+        command=command,
+        args=(),
+        context=CommandContext(source="telegram"),
+    )
+    cli_result = asyncio.run(cli.dispatch(cli_invocation, handler=handler))
+    telegram_result = asyncio.run(
+        telegram.dispatch(telegram_invocation, handler=handler, target=object())
+    )
+
+    for result in (cli_result, telegram_result):
+        assert result.outbound.status == "waiting"
+        assert result.outbound.outcome == "selection_required"
+        assert result.outbound.refs["interaction_id"] == "I-1"
+        assert result.outbound.facts == {"options": ("a", "b")}
+        assert [action.kind for action in result.outbound.actions] == [
+            ActionKind.SELECT,
+            ActionKind.CANCEL,
+        ]
+    assert delivered["cli"][0].text_parts == ("Select one option.",)
+    assert [control.data for control in delivered["telegram"][0].controls] == [
+        "select:a",
+        "cancel",
+    ]
+
+
+def test_cli_platform_adapter_executes_terminal_input_through_registry() -> None:
+    delivered = []
+    adapter = CLIPlatformAdapter(
+        lambda _target, rendered: delivered.extend(rendered.text_parts)
+    )
+    registry = CommandRegistry(
+        [CommandDef("/test", "test", "test", handler=lambda _: CommandResult(text="done"))],
+        context_factory=lambda: CommandContext(source="cli"),
+        result_handler=lambda _invocation, result: adapter.deliver_result(result),
+    )
+
+    result = asyncio.run(adapter.execute_terminal_input(registry, "/test"))
+
+    assert result.handled
+    assert delivered == ["done"]
