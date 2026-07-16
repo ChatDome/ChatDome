@@ -89,6 +89,9 @@ UNRESTRICTED_COMMAND_POLICY = """\
 
 CONTEXT_MANAGEMENT_POLICY = """\
 上下文管理规则：
+- 每个普通用户消息由 ChatDome 标记为独立的 CURRENT TURN；当前回合中的用户文本是本轮任务意图的唯一默认来源。
+- CURRENT TURN 之前的消息、压缩摘要、Memory Vault 和 Engram 仅作为历史参考，不代表用户要求继续执行其中的任务。
+- 只有 CURRENT TURN 明确要求继续、接着或执行先前方案时，才可恢复历史任务；问候、测试和纯确认消息不得触发工具。
 - 当前 messages 中的明确事实优先于历史检索结果、Memory Vault 和 Engram。
 - 当前告警、当前工具输出和用户本轮给出的事实优先级最高；历史记忆只能作为参考，不能覆盖当前证据。
 - Memory Vault 是被压缩的历史摘要，Engram 是长期环境事实、行为模式、偏好、约束或拓扑；使用时必须结合当前证据判断。

@@ -19,6 +19,7 @@ from chatdome.agent.prompts import build_system_prompt, build_tools
 from chatdome.agent.result import AgentResult, coerce_agent_result
 from chatdome.agent.session import SessionManager
 from chatdome.agent.tools import ToolDispatcher
+from chatdome.agent.turns import TurnContext, create_turn_context, social_reply
 from chatdome.config import AgentConfig
 from chatdome.errors import LLMProfileNotReady, user_facing_error_message
 from chatdome.executor.sandbox import CommandSandbox
@@ -98,6 +99,7 @@ class Agent:
         chat_id: int,
         session: Any,
         snapshot: LLMSnapshot,
+        turn_context: TurnContext | None = None,
     ) -> AgentResult:
         """Call _run_loop while tolerating older test doubles without snapshot."""
         try:
@@ -105,6 +107,10 @@ class Agent:
         except (TypeError, ValueError):
             params = {}
         if "snapshot" in params:
+            if "turn_context" in params:
+                return coerce_agent_result(
+                    await self._run_loop(chat_id, session, snapshot, turn_context=turn_context)
+                )
             return coerce_agent_result(await self._run_loop(chat_id, session, snapshot))
         return coerce_agent_result(await self._run_loop(chat_id, session))
 
@@ -335,7 +341,14 @@ class Agent:
                 f"\u8bf7\u56de\u590d\u2018\u7ee7\u7eed\u2019\u4ee5\u518d\u6267\u884c {window_limit} \u8f6e\uff0c\u6216\u56de\u590d\u2018\u653e\u5f03\u2019\u7ed3\u675f\u5f53\u524d\u4efb\u52a1\u3002"
             )
 
-        session.add_user_message(user_message)
+        turn_context = create_turn_context(user_message)
+        session.add_user_message(user_message, turn_id=turn_context.turn_id)
+
+        if not turn_context.tools_allowed:
+            final_text = social_reply(user_message)
+            session.add_assistant_message(final_text)
+            self._persist_session(session)
+            return AgentResult.reply(final_text)
 
         async def run_task() -> AgentResult:
             try:
@@ -345,7 +358,12 @@ class Agent:
 
             await session.summarize_and_trim_history(snapshot.client, self.config.max_history_tokens)
             self._persist_session(session)
-            return await self._run_loop_compat(chat_id, session, snapshot)
+            return await self._run_loop_compat(
+                chat_id,
+                session,
+                snapshot,
+                turn_context=turn_context,
+            )
 
         return await self._run_session_task_scope(chat_id, session, run_task)
 
@@ -813,6 +831,8 @@ class Agent:
         chat_id: int,
         session: Any,
         snapshot: LLMSnapshot | None = None,
+        *,
+        turn_context: TurnContext | None = None,
     ) -> AgentResult:
         """Drive the ReAct loop forward."""
 
@@ -830,8 +850,13 @@ class Agent:
             )
 
             try:
+                llm_messages = (
+                    session.build_llm_messages(turn_context)
+                    if hasattr(session, "build_llm_messages")
+                    else list(session.messages)
+                )
                 response = await llm.chat_completion(
-                    messages=list(session.messages),
+                    messages=llm_messages,
                     tools=self.tools,
                 )
             except Exception as e:

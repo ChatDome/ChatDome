@@ -537,7 +537,7 @@ class PendingApprovalFollowupTests(unittest.TestCase):
                 "chatdome.agent.session.compression_log_path",
                 return_value=compression_path,
             ), patch("chatdome.agent.tracker.TokenTracker.record_usage"):
-                response = asyncio.run(agent.handle_message(123, "hello"))
+                response = asyncio.run(agent.handle_message(123, "分析当前状态"))
 
         self.assertEqual(response.kind, "reply")
         self.assertEqual(response.content, "final answer")
