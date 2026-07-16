@@ -19,7 +19,7 @@ from chatdome.agent.prompts import build_system_prompt, build_tools
 from chatdome.agent.result import AgentResult, coerce_agent_result
 from chatdome.agent.session import SessionManager
 from chatdome.agent.tools import ToolDispatcher
-from chatdome.agent.turns import TurnContext, create_turn_context, social_reply
+from chatdome.agent.turns import TurnContext, create_turn_context
 from chatdome.config import AgentConfig
 from chatdome.errors import LLMProfileNotReady, user_facing_error_message
 from chatdome.executor.sandbox import CommandSandbox
@@ -343,12 +343,6 @@ class Agent:
 
         turn_context = create_turn_context(user_message)
         session.add_user_message(user_message, turn_id=turn_context.turn_id)
-
-        if not turn_context.tools_allowed:
-            final_text = social_reply(user_message)
-            session.add_assistant_message(final_text)
-            self._persist_session(session)
-            return AgentResult.reply(final_text)
 
         async def run_task() -> AgentResult:
             try:

@@ -408,7 +408,6 @@ class AgentSession:
             ):
                 message["content"] = frame_current_turn(
                     str(item.get("content", "") or ""),
-                    turn_context.intent,
                 )
             messages.append(message)
         return messages

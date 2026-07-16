@@ -4,10 +4,9 @@ import asyncio
 from types import SimpleNamespace
 
 from chatdome.agent.core import Agent
-from chatdome.agent.result import AgentResult
 from chatdome.agent.session import AgentSession
-from chatdome.agent.turns import TurnIntent, classify_turn, create_turn_context
-from chatdome.llm.client import LLMResponse, ToolCall
+from chatdome.agent.turns import create_turn_context
+from chatdome.llm.client import LLMResponse
 
 
 class _SessionManager:
@@ -44,26 +43,24 @@ def _agent(session: AgentSession, llm: _LLM) -> Agent:
     return agent
 
 
-def test_social_turn_is_answered_without_llm_or_tools():
+def test_short_turn_reaches_llm_with_current_turn_boundary():
     session = AgentSession(chat_id=1, messages=[
         {"role": "system", "content": "system"},
         {"role": "user", "content": "查看升级日志"},
         {"role": "assistant", "content": "准备查询日志"},
     ])
-    llm = _LLM(
-        LLMResponse(
-            content=None,
-            tool_calls=[ToolCall(id="call-1", name="run_shell_command", arguments="{}")],
-        )
-    )
+    llm = _LLM(LLMResponse(content="你好。"))
     agent = _agent(session, llm)
 
     result = asyncio.run(agent.handle_message(1, "hello"))
 
-    assert result == AgentResult.reply("你好。请发送需要处理的问题。")
-    assert llm.calls == []
+    assert result.content == "你好。"
+    assert len(llm.calls) == 1
+    current_message = llm.calls[0]["messages"][-1]["content"]
+    assert "[CHATDOME CURRENT TURN]" in current_message
+    assert '"current_user_message": "hello"' in current_message
     assert session.messages[-2]["content"] == "hello"
-    assert session.messages[-1]["content"] == "你好。请发送需要处理的问题。"
+    assert session.messages[-1]["content"] == "你好。"
 
 
 def test_llm_view_marks_current_turn_and_keeps_raw_session_message():
@@ -79,22 +76,20 @@ def test_llm_view_marks_current_turn_and_keeps_raw_session_message():
 
     assert session.messages[-1]["content"] == "检查当前磁盘使用率"
     assert "[CHATDOME CURRENT TURN]" in messages[-1]["content"]
-    assert '"explicit_history_continuation": false' in messages[-1]["content"]
     assert "检查当前磁盘使用率" in messages[-1]["content"]
     assert "_chatdome_turn_id" not in messages[-1]
     assert messages[1]["content"] == "查看升级日志"
 
 
-def test_explicit_continuation_is_marked_and_allows_tools():
-    assert classify_turn("继续查看刚才的日志") is TurnIntent.CONTINUATION
+def test_continuation_text_is_preserved_without_keyword_classification():
     context = create_turn_context("继续查看刚才的日志")
-    assert context.tools_allowed
 
     session = AgentSession(chat_id=1, messages=[{"role": "system", "content": "system"}])
     session.add_user_message(context.raw_message, turn_id=context.turn_id)
     messages = session.build_llm_messages(context)
 
-    assert '"explicit_history_continuation": true' in messages[-1]["content"]
+    assert '"current_user_message": "继续查看刚才的日志"' in messages[-1]["content"]
+    assert "explicit_history_continuation" not in messages[-1]["content"]
 
 
 def test_actionable_turn_reaches_llm_with_boundary():
