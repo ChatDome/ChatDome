@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import inspect
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Iterable
 from dataclasses import dataclass
+from typing import Any, Callable, Iterable, Mapping
 
 from chatdome.outbound.models import OutboundMessage, RenderedMessage
 from chatdome.outbound.renderers.telegram import TelegramOutboundRenderer
@@ -45,6 +45,9 @@ class PlatformAdapter(ABC):
         args: Iterable[str],
         context: CommandContext,
         raw_name: str | None = None,
+        action: str = "",
+        interaction_id: str = "",
+        params: Mapping[str, Any] | None = None,
     ) -> CommandInvocation:
         """Convert one platform command event into the shared invocation contract."""
 
@@ -56,6 +59,9 @@ class PlatformAdapter(ABC):
             arg_text=" ".join(values),
             command=command,
             context=context,
+            action=str(action or "").strip(),
+            interaction_id=str(interaction_id or "").strip(),
+            params=dict(params or {}),
         )
 
     @abstractmethod
@@ -175,6 +181,9 @@ class TelegramPlatformAdapter(PlatformAdapter):
         command: CommandDef,
         args: Iterable[str],
         context: CommandContext,
+        action: str = "",
+        interaction_id: str = "",
+        params: Mapping[str, Any] | None = None,
     ) -> CommandInvocation:
         """Convert one Telegram button callback into a shared invocation."""
 
@@ -184,6 +193,9 @@ class TelegramPlatformAdapter(PlatformAdapter):
             command=command,
             args=args,
             context=context,
+            action=action,
+            interaction_id=interaction_id,
+            params=params,
         )
 
     def render(self, message: OutboundMessage) -> RenderedMessage:

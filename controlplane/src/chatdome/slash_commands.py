@@ -46,6 +46,7 @@ class CommandContext:
         repr=False,
         compare=False,
     )
+    transport: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -239,6 +240,85 @@ class CommandInvocation:
     arg_text: str
     command: CommandDef
     context: CommandContext = field(default_factory=CommandContext)
+    action: str = ""
+    interaction_id: str = ""
+    params: Mapping[str, Any] = field(default_factory=dict)
+
+
+def command_handler_name(
+    command: CommandDef,
+    *,
+    prefix: str = "",
+    suffix: str = "",
+) -> str:
+    """Return the convention-based handler name for one canonical command."""
+
+    key = command.name.removeprefix("/").replace("-", "_")
+    return f"{prefix}{key}{suffix}"
+
+
+def resolve_command_handler(
+    command: CommandDef,
+    target: Any,
+    *,
+    prefix: str = "",
+    suffix: str = "",
+) -> Callable[..., Any]:
+    """Resolve a command handler by the shared command-name convention."""
+
+    name = command_handler_name(command, prefix=prefix, suffix=suffix)
+    if isinstance(target, Mapping):
+        handler = target.get(name)
+    else:
+        handler = getattr(target, name, None)
+    if not callable(handler):
+        raise RuntimeError(f"command handler is not configured: {command.name}")
+    return handler
+
+
+async def dispatch_command_handler(
+    invocation: "CommandInvocation",
+    target: Any,
+    *handler_args: Any,
+    prefix: str = "",
+    suffix: str = "",
+) -> Any:
+    """Invoke a convention-bound command handler for any platform adapter."""
+
+    handler = resolve_command_handler(
+        invocation.command,
+        target,
+        prefix=prefix,
+        suffix=suffix,
+    )
+    result = handler(*(handler_args or (invocation,)))
+    if inspect.isawaitable(result):
+        result = await result
+    return result
+
+
+def bind_command_catalog(
+    registry: "CommandRegistry",
+    platform: str,
+    handler: Callable[["CommandInvocation"], Any],
+    *,
+    completers: Mapping[
+        str,
+        Callable[[str], Iterable[CompletionItem | str]],
+    ]
+    | None = None,
+) -> None:
+    """Bind one canonical catalog to a platform through a single dispatcher."""
+
+    command_completers = completers or {}
+    for command in command_catalog(platform):
+        registry.register(
+            replace(
+                command,
+                handler=handler,
+                completer=command_completers.get(command.name),
+            )
+        )
 
 
 class CommandRegistry:

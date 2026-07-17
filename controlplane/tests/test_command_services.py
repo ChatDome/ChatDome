@@ -325,3 +325,21 @@ def test_cli_platform_adapter_executes_terminal_input_through_registry() -> None
 
     assert result.handled
     assert delivered == ["done"]
+
+
+def test_telegram_callback_builds_structured_command_invocation() -> None:
+    adapter = TelegramPlatformAdapter(lambda _target, _rendered: None)
+    invocation = adapter.receive_callback(
+        data="llm_admin:save_yes:interaction-1",
+        command=CommandDef("/model_add", "add", "model"),
+        args=(),
+        context=CommandContext(source="telegram"),
+        action="save_yes",
+        interaction_id="interaction-1",
+        params={"operation": "model_admin"},
+    )
+
+    assert invocation.command.name == "/model_add"
+    assert invocation.action == "save_yes"
+    assert invocation.interaction_id == "interaction-1"
+    assert invocation.params == {"operation": "model_admin"}

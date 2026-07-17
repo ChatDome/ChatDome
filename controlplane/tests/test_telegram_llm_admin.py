@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from types import SimpleNamespace
 
@@ -62,6 +63,12 @@ class FakeManager:
 class FakeAgent:
     def __init__(self, config):
         self.llm_manager = FakeManager(config)
+        self.session_manager = SimpleNamespace(events=[])
+
+        def record_control_event(chat_id, event):
+            self.session_manager.events.append((chat_id, event))
+
+        self.session_manager.record_control_event = record_control_event
 
 
 class FakeProfileAdmin:
@@ -223,6 +230,15 @@ class TelegramLLMAdminTests(unittest.TestCase):
         self.assertEqual(service.created[0][0].name, "new-profile")
         self.assertEqual(service.created[0][0].api_key, "sk-secret-value")
         self.assertNotIn((1, 2), bot._llm_admin_sessions)
+        recorded = json.dumps(bot.agent.session_manager.events, ensure_ascii=False)
+        self.assertNotIn("sk-secret-value", recorded)
+        self.assertTrue(
+            any(
+                event["command"] == "/model_add"
+                and event["outcome"] == "model_added"
+                for _, event in bot.agent.session_manager.events
+            )
+        )
 
     def test_llm_cancel_clears_session_secret_and_confirmation(self):
         bot, _ = self.make_bot()
@@ -272,6 +288,13 @@ class TelegramLLMAdminTests(unittest.TestCase):
 
         self.assertEqual(service.deleted[0][0], "other")
         self.assertNotIn(nonce, bot._llm_admin_confirmations)
+        self.assertTrue(
+            any(
+                event["command"] == "/model_delete"
+                and event["outcome"] == "model_deleted"
+                for _, event in bot.agent.session_manager.events
+            )
+        )
 
     def test_codex_persistence_has_no_cli_subprocess_method(self):
         bot, _ = self.make_bot()

@@ -64,11 +64,12 @@ from chatdome.slash_commands import (
     approve_command_result,
     approve_task_command_result,
     audit_command_result,
+    bind_command_catalog,
     clear_session_command_result,
-    command_catalog,
     command_echo_command_result,
     command_help_result,
     continue_command_result,
+    dispatch_command_handler,
     environment_command_result,
     execute_engram_command,
     format_model_profiles,
@@ -966,37 +967,21 @@ def _build_terminal_command_registry(
                 severity="error",
             )
 
-    handlers = {
-        "/help": help_handler, "/clear": clear_handler, "/exit": exit_handler,
-        "/stop": stop_handler, "/env": env_handler, "/audit": audit_handler,
-        "/token": token_handler, "/cmd_echo": cmd_echo_handler,
-        "/engram": engram_handler, "/model": model_handler,
-        "/model_list": model_list_handler, "/model_add": model_add_handler,
-        "/model_delete": model_delete_handler, "/model_cancel": model_cancel_handler,
-        "/codex_login": codex_login_handler, "/details": details_handler,
-        "/confirm": confirm_handler, "/reject": reject_handler,
-        "/confirm_task": confirm_task_handler,
-        "/continue": continue_handler,
-        "/sentinel_status": sentinel_status_handler,
-        "/sentinel_trigger": sentinel_trigger_handler,
-        "/sentinel_history": sentinel_history_handler,
-        "/sentinel_packs": sentinel_packs_handler,
-        "/sentinel_mute": sentinel_mute_handler,
-        "/sentinel_resume": sentinel_resume_handler,
-    }
-    for command in command_catalog("cli"):
-        completer = (
-            _terminal_model_completion_items
-            if command.name == "/model"
-            else None
+    handler_namespace = dict(locals())
+
+    async def dispatch_handler(invocation: CommandInvocation) -> CommandResult:
+        return await dispatch_command_handler(
+            invocation,
+            handler_namespace,
+            suffix="_handler",
         )
-        registry.register(
-            replace(
-                command,
-                handler=handlers[command.name],
-                completer=completer,
-            )
-        )
+
+    bind_command_catalog(
+        registry,
+        "cli",
+        dispatch_handler,
+        completers={"/model": _terminal_model_completion_items},
+    )
     return registry
 
 

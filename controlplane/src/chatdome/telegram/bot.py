@@ -13,6 +13,7 @@ import logging
 import re
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -58,17 +59,19 @@ from chatdome.slash_commands import (
     CommandContext,
     CommandDef,
     CommandInvocation,
+    CommandRegistry,
     CommandResult,
     abandon_command_result,
     approval_details_command_result,
     approve_command_result,
     approve_task_command_result,
     audit_command_result,
+    bind_command_catalog,
     clear_session_command_result,
-    command_catalog,
     command_echo_command_result,
     command_help_result,
     continue_command_result,
+    dispatch_command_handler,
     environment_command_result,
     execute_engram_command,
     format_command_help,
@@ -133,6 +136,19 @@ class TelegramBot:
         # Default policy: plain text output; markdown can be enabled per message.
         self._formatter = TelegramMessageFormatter(enable_markdown=True)
         self._platform_adapter = TelegramPlatformAdapter(self._deliver_telegram_rendered)
+        self._command_registry = self._get_command_registry()
+
+    def _get_command_registry(self) -> CommandRegistry:
+        registry = getattr(self, "_command_registry", None)
+        if registry is None:
+            registry = CommandRegistry()
+            bind_command_catalog(
+                registry,
+                "telegram",
+                self._dispatch_registered_command,
+            )
+            self._command_registry = registry
+        return registry
 
     def set_sentinel(self, scheduler: Any, pack_loader: Any = None) -> None:
         """Inject Sentinel scheduler after construction (avoids circular deps)."""
@@ -199,40 +215,11 @@ class TelegramBot:
 
         self._app = builder.post_init(self.post_init).post_stop(self.post_stop).build()
 
-        callbacks = {
-            "/help": self._handle_help,
-            "/clear": self._handle_clear,
-            "/stop": self._handle_stop,
-            "/details": self._handle_details,
-            "/continue": self._handle_continue,
-            "/confirm": self._handle_confirm,
-            "/confirm_task": self._handle_confirm_task,
-            "/reject": self._handle_reject,
-            "/cmd_echo": self._handle_cmd_echo,
-            "/env": self._handle_env,
-            "/token": self._handle_token,
-            "/audit": self._handle_audit,
-            "/sentinel_status": self._handle_sentinel_status,
-            "/sentinel_trigger": self._handle_sentinel_trigger,
-            "/sentinel_history": self._handle_sentinel_history,
-            "/sentinel_packs": self._handle_sentinel_packs,
-            "/sentinel_mute": self._handle_sentinel_mute,
-            "/sentinel_resume": self._handle_sentinel_resume,
-            "/engram": self._handle_engram,
-            "/model": self._handle_llm,
-            "/model_list": self._handle_llm_list,
-            "/model_add": self._handle_llm_add,
-            "/model_delete": self._handle_llm_delete,
-            "/model_cancel": self._handle_llm_cancel,
-            "/codex_login": self._handle_codex_login,
-        }
-        for command in command_catalog("telegram"):
-            callback = callbacks[command.name]
+        for command in self._get_command_registry().commands:
             for exposed_name in (command.name, *command.aliases):
                 self._app.add_handler(
                     self._command_handler(
                         exposed_name.removeprefix("/"),
-                        callback,
                         command=command,
                     )
                 )
@@ -280,7 +267,11 @@ class TelegramBot:
             self._log_value(callback_data),
         )
 
-    def _command_context_for_update(self, update: Update) -> CommandContext:
+    def _command_context_for_update(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE | None = None,
+    ) -> CommandContext:
         """Build shared command context for Telegram messages and callbacks."""
 
         chat = getattr(update, "effective_chat", None)
@@ -298,12 +289,28 @@ class TelegramBot:
             chat_id=chat_id,
             actor_id=actor_id,
             event_recorder=record_event,
+            transport=SimpleNamespace(update=update, context=context),
+        )
+
+    async def _dispatch_registered_command(
+        self,
+        invocation: CommandInvocation,
+    ) -> CommandResult:
+        transport = invocation.context.transport
+        if transport is None:
+            raise RuntimeError("telegram command transport is unavailable")
+        return await dispatch_command_handler(
+            invocation,
+            self,
+            transport.update,
+            transport.context,
+            prefix="_handle_",
         )
 
     def _command_handler(
         self,
         command_name: str,
-        callback: Any,
+        callback: Any | None = None,
         *,
         command: CommandDef | None = None,
     ) -> CommandHandler:
@@ -317,7 +324,7 @@ class TelegramBot:
                 getattr(message, "text", "") or f"/{command_name}"
             ).strip()
             args = tuple(str(item) for item in (getattr(context, "args", None) or ()))
-            command_context = self._command_context_for_update(update)
+            command_context = self._command_context_for_update(update, context)
 
             command_def = command or CommandDef(
                 name=f"/{command_name}",
@@ -332,12 +339,13 @@ class TelegramBot:
                 context=command_context,
             )
 
-            async def invoke(_invocation: CommandInvocation) -> Any:
-                return await callback(update, context)
-
             await self._platform_adapter.dispatch(
                 invocation,
-                handler=invoke,
+                handler=(
+                    (lambda _invocation: callback(update, context))
+                    if callback is not None
+                    else None
+                ),
                 target=update.message,
             )
 
@@ -352,10 +360,13 @@ class TelegramBot:
         args: tuple[str, ...] = (),
         command_context: CommandContext,
         handler: Any,
+        action: str = "",
+        interaction_id: str = "",
+        params: dict[str, Any] | None = None,
     ) -> CommandResult:
         """Run a Telegram button action through the shared command pipeline."""
 
-        command = CommandDef(
+        command = self._get_command_registry().resolve_name(command_name) or CommandDef(
             name=command_name,
             description="",
             category="interaction",
@@ -365,6 +376,9 @@ class TelegramBot:
             command=command,
             args=args,
             context=command_context,
+            action=action,
+            interaction_id=interaction_id,
+            params=params,
         )
         return await self._platform_adapter.dispatch(
             invocation,
@@ -885,6 +899,31 @@ class TelegramBot:
         }
         return labels.get(status, status)
 
+    async def _handle_model(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> CommandResult:
+        return await self._handle_llm(update, context)
+
+    async def _handle_model_list(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> CommandResult:
+        return await self._handle_llm_list(update, context)
+
+    async def _handle_model_add(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> CommandResult:
+        return await self._handle_llm_add(update, context)
+
+    async def _handle_model_delete(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> CommandResult:
+        return await self._handle_llm_delete(update, context)
+
+    async def _handle_model_cancel(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> CommandResult:
+        return await self._handle_llm_cancel(update, context)
+
     async def _handle_llm_list(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> CommandResult:
@@ -1029,7 +1068,6 @@ class TelegramBot:
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> bool:
-        del context
         key = self._llm_admin_key(update)
         session = self._llm_admin_sessions.get(key)
         if session is None:
@@ -1041,75 +1079,11 @@ class TelegramBot:
             return True
 
         text = str(update.message.text or "").strip()
-        step = session.get("step")
-        if step == "name":
-            try:
-                name = validate_profile_name(text)
-                summary = await self.profile_admin.get_profile_summary(name)
-            except Exception as exc:
-                await update.message.reply_text(
-                    self._format_error_text(
-                        exc,
-                        prefix="Profile 名称无效",
-                        fallback="请输入有效的 profile 名称。",
-                    )
-                )
-                return True
-            session["name"] = name
-            session["existing"] = summary
-            if summary is not None:
-                session["step"] = "confirm_overwrite"
-                session["expected_fingerprint"] = summary.fingerprint
-                keyboard = [[
-                    InlineKeyboardButton(
-                        "继续覆盖",
-                        callback_data=f"llm_admin:overwrite_yes:{session['nonce']}",
-                    ),
-                    InlineKeyboardButton(
-                        "取消",
-                        callback_data=f"llm_admin:overwrite_no:{session['nonce']}",
-                    ),
-                ]]
-                await self._reply_text(
-                    update.message,
-                    (
-                        f"已存在 {summary.name}: {summary.provider}/{summary.api_mode}, "
-                        f"model={summary.model}, address={summary.base_url}"
-                    ),
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-                return True
-            await self._advance_llm_admin_after_name(update.message, session)
-            return True
-
-        if step == "model":
-            existing = session.get("existing")
-            session["model"] = (
-                existing.model if text == "-" and existing is not None else text
-            )
-            session["step"] = "base_url"
-            default = existing.base_url if existing is not None else "https://api.openai.com/v1"
-            await update.message.reply_text(
-                f"输入 Base URL。发送 - 使用当前值: {default}"
-            )
-            return True
-
-        if step == "base_url":
-            existing = session.get("existing")
-            session["base_url"] = (
-                existing.base_url if text == "-" and existing is not None else text
-            )
-            session["step"] = "api_key"
-            if existing is not None and existing.api_mode == "openai_api":
-                await update.message.reply_text("输入 API Key，或发送 - 保留现有 Key。")
-            else:
-                await update.message.reply_text("输入 API Key。敏感环境请使用本地菜单。")
-            return True
-
+        step = str(session.get("step") or "")
         if step == "api_key":
             existing = session.get("existing")
             if text == "-" and existing is not None and existing.api_mode == "openai_api":
-                api_key = ""
+                session["pending_api_key"] = ""
             else:
                 try:
                     await update.message.delete()
@@ -1119,57 +1093,221 @@ class TelegramBot:
                         "无法删除 API Key 消息。请删除该消息并使用本地菜单。"
                     )
                     return True
-                api_key = text
+                session["pending_api_key"] = text
+            safe_params: dict[str, Any] = {}
+        else:
+            safe_params = {"input": text}
+
+        async def handler(invocation: CommandInvocation) -> CommandResult:
+            return await self._execute_llm_admin_input(invocation, update)
+
+        await self._dispatch_callback_command(
+            update.message,
+            data=f"llm_admin:input_{step}:{session['nonce']}",
+            command_name="/model_add",
+            command_context=self._command_context_for_update(update, context),
+            handler=handler,
+            action=f"input_{step}",
+            interaction_id=str(session["nonce"]),
+            params=safe_params,
+        )
+        return True
+
+    async def _execute_llm_admin_input(
+        self,
+        invocation: CommandInvocation,
+        update: Update,
+    ) -> CommandResult:
+        key = self._llm_admin_key(update)
+        session = self._active_llm_admin_session(key)
+        nonce = invocation.interaction_id
+        event_refs = {"interaction_id": nonce}
+        if session is None or session.get("nonce") != nonce:
+            return CommandResult(
+                outcome="interaction_expired",
+                text="model 配置已失效，请重新运行 /model_add。",
+                severity="error",
+                event_refs=event_refs,
+            )
+
+        step = str(session.get("step") or "")
+        if invocation.action != f"input_{step}":
+            return CommandResult(
+                outcome="invalid_interaction_state",
+                text="model 配置状态无效，请重新开始。",
+                severity="error",
+                event_refs=event_refs,
+            )
+
+        text = str(invocation.params.get("input") or "").strip()
+        if step == "name":
+            try:
+                name = validate_profile_name(text)
+                summary = await self.profile_admin.get_profile_summary(name)
+            except Exception as exc:
+                return CommandResult(
+                    outcome="invalid_arguments",
+                    title="Profile 名称无效",
+                    text=user_facing_error_message(
+                        exc,
+                        fallback="请输入有效的 profile 名称。",
+                    ),
+                    severity="error",
+                    event_refs=event_refs,
+                )
+            session["name"] = name
+            session["existing"] = summary
+            if summary is not None:
+                session["step"] = "confirm_overwrite"
+                session["expected_fingerprint"] = summary.fingerprint
+                return CommandResult(
+                    outcome="model_overwrite_confirmation_requested",
+                    title="Overwrite model profile",
+                    text=(
+                        f"已存在 {summary.name}: {summary.provider}/{summary.api_mode}, "
+                        f"model={summary.model}, address={summary.base_url}"
+                    ),
+                    event_refs=event_refs,
+                    facts={
+                        "operation": "model_add",
+                        "stage": "confirm_overwrite",
+                        "profile": summary.name,
+                    },
+                    actions=(
+                        OutboundAction(
+                            ActionKind.CONFIRM,
+                            "继续覆盖",
+                            f"llm_admin:overwrite_yes:{nonce}",
+                            params={"interaction_id": nonce},
+                        ),
+                        OutboundAction(
+                            ActionKind.CANCEL,
+                            "取消",
+                            f"llm_admin:overwrite_no:{nonce}",
+                            params={"interaction_id": nonce},
+                        ),
+                    ),
+                )
+            return self._llm_admin_after_name_result(session)
+
+        if step == "model":
+            existing = session.get("existing")
+            session["model"] = (
+                existing.model if text == "-" and existing is not None else text
+            )
+            session["step"] = "base_url"
+            default = existing.base_url if existing is not None else "https://api.openai.com/v1"
+            return CommandResult(
+                outcome="model_add_input_requested",
+                title="Add model profile",
+                text=f"输入 Base URL。发送 - 使用当前值: {default}",
+                event_refs=event_refs,
+                facts={"operation": "model_add", "stage": "base_url"},
+            )
+
+        if step == "base_url":
+            existing = session.get("existing")
+            session["base_url"] = (
+                existing.base_url if text == "-" and existing is not None else text
+            )
+            session["step"] = "api_key"
+            if existing is not None and existing.api_mode == "openai_api":
+                prompt = "输入 API Key，或发送 - 保留现有 Key。"
+            else:
+                prompt = "输入 API Key。敏感环境请使用本地菜单。"
+            return CommandResult(
+                outcome="model_add_input_requested",
+                title="Add model profile",
+                text=prompt,
+                event_refs=event_refs,
+                facts={"operation": "model_add", "stage": "api_key"},
+            )
+
+        if step == "api_key":
+            existing = session.get("existing")
+            api_key = str(session.pop("pending_api_key", ""))
             session["api_key"] = api_key
             session["step"] = "confirm_save"
             action = "更新" if existing is not None else "新增"
-            keyboard = [[
-                InlineKeyboardButton(
-                    f"确认{action}",
-                    callback_data=f"llm_admin:save_yes:{session['nonce']}",
-                ),
-                InlineKeyboardButton(
-                    "取消",
-                    callback_data=f"llm_admin:save_no:{session['nonce']}",
-                ),
-            ]]
-            await self._reply_text(
-                update.message,
-                (
+            return CommandResult(
+                outcome="model_save_confirmation_requested",
+                title="Save model profile",
+                text=(
                     f"{action} {session['name']}？\n"
                     f"模型: {session['model']}\n"
                     f"地址: {session['base_url']}\n"
                     f"API Key: {'unchanged' if not api_key else 'configured'}"
                 ),
-                reply_markup=InlineKeyboardMarkup(keyboard),
+                event_refs=event_refs,
+                facts={
+                    "operation": "model_add",
+                    "stage": "confirm_save",
+                    "profile": session["name"],
+                    "api_key_status": "unchanged" if not api_key else "configured",
+                },
+                actions=(
+                    OutboundAction(
+                        ActionKind.CONFIRM,
+                        f"确认{action}",
+                        f"llm_admin:save_yes:{nonce}",
+                        params={"interaction_id": nonce},
+                    ),
+                    OutboundAction(
+                        ActionKind.CANCEL,
+                        "取消",
+                        f"llm_admin:save_no:{nonce}",
+                        params={"interaction_id": nonce},
+                    ),
+                ),
             )
-            return True
 
-        await update.message.reply_text("使用按钮继续，或发送 /model_cancel。")
-        return True
+        return CommandResult(
+            outcome="interaction_in_progress",
+            text="使用按钮继续，或发送 /model_cancel。",
+            event_refs=event_refs,
+        )
 
-    async def _advance_llm_admin_after_name(self, message, session: dict[str, Any]) -> None:
+    @staticmethod
+    def _llm_admin_after_name_result(session: dict[str, Any]) -> CommandResult:
+        nonce = str(session["nonce"])
+        event_refs = {"interaction_id": nonce}
         if session.get("type") == "openai":
             session["step"] = "model"
             existing = session.get("existing")
             default = existing.model if existing is not None else "gpt-4o"
-            await message.reply_text(f"输入模型名称。发送 - 使用当前值: {default}")
-            return
+            return CommandResult(
+                outcome="model_add_input_requested",
+                title="Add model profile",
+                text=f"输入模型名称。发送 - 使用当前值: {default}",
+                event_refs=event_refs,
+                facts={"operation": "model_add", "stage": "model"},
+            )
+
         session["step"] = "codex_confirm"
-        keyboard = [[
-            InlineKeyboardButton(
-                "开始 Codex 授权",
-                callback_data=f"llm_admin:codex_start:{session['nonce']}",
+        return CommandResult(
+            outcome="codex_authorization_confirmation_requested",
+            title="Codex OAuth",
+            text=f"为 profile '{session['name']}' 启动 Codex OAuth？",
+            event_refs=event_refs,
+            facts={
+                "operation": "model_add",
+                "stage": "codex_confirmation",
+                "profile": session["name"],
+            },
+            actions=(
+                OutboundAction(
+                    ActionKind.CONFIRM,
+                    "开始 Codex 授权",
+                    f"llm_admin:codex_start:{nonce}",
+                    params={"interaction_id": nonce},
+                ),
+                OutboundAction(
+                    ActionKind.CANCEL,
+                    "取消",
+                    f"llm_admin:cancel:{nonce}",
+                    params={"interaction_id": nonce},
+                ),
             ),
-            InlineKeyboardButton(
-                "取消",
-                callback_data=f"llm_admin:cancel:{session['nonce']}",
-            ),
-        ]]
-        await self._reply_text(
-            message,
-            f"为 profile '{session['name']}' 启动 Codex OAuth？",
-            reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
     async def _handle_llm(
@@ -1324,7 +1462,51 @@ class TelegramBot:
             await query.message.reply_text("Model 操作已失效，请重新开始。")
             return
         _, action, nonce = parts
+        command_name = {
+            "delete_yes": "/model_delete",
+            "delete_no": "/model_cancel",
+            "cancel": "/model_cancel",
+            "overwrite_no": "/model_cancel",
+            "save_no": "/model_cancel",
+            "codex_start": "/codex_login",
+        }.get(action, "/model_add")
+
+        async def handler(invocation: CommandInvocation) -> CommandResult:
+            return await self._execute_llm_admin_action(
+                invocation,
+                update,
+                context,
+            )
+
+        await self._dispatch_callback_command(
+            query.message,
+            data=callback_data,
+            command_name=command_name,
+            command_context=self._command_context_for_update(update, context),
+            handler=handler,
+            action=action,
+            interaction_id=nonce,
+            params={"operation": "model_admin"},
+        )
+
+    async def _execute_llm_admin_action(
+        self,
+        invocation: CommandInvocation,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> CommandResult:
+        query = update.callback_query
+        if query is None or query.message is None:
+            return CommandResult(
+                outcome="interaction_expired",
+                text="Model 操作已失效，请重新开始。",
+                severity="error",
+            )
+
+        action = invocation.action
+        nonce = invocation.interaction_id
         key = self._llm_admin_key(update)
+        event_refs = {"interaction_id": nonce}
 
         if action in {"delete_yes", "delete_no"}:
             item = self._llm_admin_confirmations.pop(nonce, None)
@@ -1333,63 +1515,91 @@ class TelegramBot:
                 or item.get("key") != key
                 or float(item.get("expires_at", 0)) < time.time()
             ):
-                await query.message.reply_text("删除确认已失效，请重新运行 /model_delete。")
-                return
-            await query.edit_message_reply_markup(reply_markup=None)
+                return CommandResult(
+                    outcome="interaction_expired",
+                    text="删除确认已失效，请重新运行 /model_delete。",
+                    severity="error",
+                    event_refs=event_refs,
+                )
+            await self._clear_callback_message_markup(
+                query,
+                "model delete callback message",
+            )
             if action == "delete_no":
-                await query.message.reply_text("已取消删除。")
-                return
+                return self._model_command_service().cancel(True)
             try:
                 result = await self._model_command_service().delete(
                     item["profile_name"],
                     self._profile_actor(update),
                 )
+                return replace(result, event_refs=event_refs)
             except Exception as exc:
-                await query.message.reply_text(
-                    self._format_error_text(
+                return CommandResult(
+                    outcome="failed",
+                    title="Model delete failed",
+                    text=user_facing_error_message(
                         exc,
-                        prefix="删除 model 失败",
                         fallback="删除 model 失败，请重试。",
-                    )
+                    ),
+                    severity="error",
+                    event_refs=event_refs,
                 )
-                return
-            await self._send_command_result(query.message, result)
-            return
 
         session = self._active_llm_admin_session(key)
         if session is None or session.get("nonce") != nonce:
-            await query.message.reply_text("model 配置已失效，请重新运行 /model_add。")
-            return
+            return CommandResult(
+                outcome="interaction_expired",
+                text="model 配置已失效，请重新运行 /model_add。",
+                severity="error",
+                event_refs=event_refs,
+            )
 
-        if action == "type_openai":
-            session["type"] = "openai"
+        if action in {"type_openai", "type_codex"}:
+            session["type"] = action.removeprefix("type_")
             session["step"] = "name"
-            await query.edit_message_reply_markup(reply_markup=None)
-            await query.message.reply_text("输入 profile 名称。")
-            return
-        if action == "type_codex":
-            session["type"] = "codex"
-            session["step"] = "name"
-            await query.edit_message_reply_markup(reply_markup=None)
-            await query.message.reply_text("输入 profile 名称。")
-            return
+            await self._clear_callback_message_markup(
+                query,
+                "model type callback message",
+            )
+            return CommandResult(
+                outcome="model_add_input_requested",
+                title="Add model profile",
+                text="输入 profile 名称。",
+                event_refs=event_refs,
+                facts={
+                    "operation": "model_add",
+                    "stage": "name",
+                    "model_type": session["type"],
+                },
+            )
         if action in {"cancel", "overwrite_no", "save_no"}:
             self._llm_admin_sessions.pop(key, None)
-            await query.edit_message_reply_markup(reply_markup=None)
-            await query.message.reply_text("已取消 model 配置。")
-            return
+            await self._clear_callback_message_markup(
+                query,
+                "model cancel callback message",
+            )
+            return self._model_command_service().cancel(True)
         if action == "overwrite_yes":
             session["overwrite"] = True
-            await query.edit_message_reply_markup(reply_markup=None)
-            await self._advance_llm_admin_after_name(query.message, session)
-            return
+            await self._clear_callback_message_markup(
+                query,
+                "model overwrite callback message",
+            )
+            return self._llm_admin_after_name_result(session)
         if action == "save_yes":
             if session.get("step") != "confirm_save":
-                await query.message.reply_text("model 配置状态无效，请重新开始。")
-                return
+                return CommandResult(
+                    outcome="invalid_interaction_state",
+                    text="model 配置状态无效，请重新开始。",
+                    severity="error",
+                    event_refs=event_refs,
+                )
             saved = dict(session)
             self._llm_admin_sessions.pop(key, None)
-            await query.edit_message_reply_markup(reply_markup=None)
+            await self._clear_callback_message_markup(
+                query,
+                "model save callback message",
+            )
             try:
                 result = await self._model_command_service().create_openai(
                     CreateOpenAIProfileRequest(
@@ -1398,25 +1608,31 @@ class TelegramBot:
                         base_url=saved["base_url"],
                         api_key=saved.get("api_key", ""),
                         overwrite_existing=bool(saved.get("existing")),
-                        expected_profile_fingerprint=saved.get("expected_fingerprint"),
+                        expected_profile_fingerprint=saved.get(
+                            "expected_fingerprint"
+                        ),
                     ),
                     self._profile_actor(update),
                 )
+                return replace(result, event_refs=event_refs)
             except Exception as exc:
-                await query.message.reply_text(
-                    self._format_error_text(
+                return CommandResult(
+                    outcome="failed",
+                    title="Model add failed",
+                    text=user_facing_error_message(
                         exc,
-                        prefix="保存 model 失败",
                         fallback="保存 model 失败，请重新开始。",
-                    )
+                    ),
+                    severity="error",
+                    event_refs=event_refs,
                 )
-                return
-            await self._send_command_result(query.message, result)
-            return
         if action == "codex_start":
             saved = dict(session)
             self._llm_admin_sessions.pop(key, None)
-            await query.edit_message_reply_markup(reply_markup=None)
+            await self._clear_callback_message_markup(
+                query,
+                "model Codex callback message",
+            )
             proxy_update = SimpleNamespace(
                 effective_chat=update.effective_chat,
                 effective_user=update.effective_user,
@@ -1430,10 +1646,14 @@ class TelegramBot:
                 chatdome_expected_fingerprint=saved.get("expected_fingerprint"),
             )
             result = await self._handle_codex_login(proxy_update, proxy_context)
-            await self._send_command_result(query.message, result)
-            return
+            return result or CommandResult(outcome="codex_authorization_started")
 
-        await query.message.reply_text("Model 操作已失效，请重新开始。")
+        return CommandResult(
+            outcome="invalid_interaction",
+            text="Model 操作已失效，请重新开始。",
+            severity="error",
+            event_refs=event_refs,
+        )
 
     async def _clear_callback_message_markup(self, query, context_label: str = "callback message") -> None:
         await self._set_callback_message_markup(query, None, context_label)

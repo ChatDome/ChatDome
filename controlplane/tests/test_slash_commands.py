@@ -9,7 +9,9 @@ from chatdome.slash_commands import (
     CommandDef,
     CommandRegistry,
     CommandResult,
+    bind_command_catalog,
     command_catalog,
+    resolve_command_handler,
     toggle_command_echo,
 )
 
@@ -189,3 +191,34 @@ def test_cli_and_telegram_share_one_command_catalog() -> None:
     }
     assert "/start" in cli_aliases
     assert "/llm_add" in cli_aliases
+
+
+def test_platform_catalogs_bind_to_one_convention_dispatcher() -> None:
+    calls = []
+
+    async def help_handler(invocation):
+        calls.append(invocation.command.name)
+        return CommandResult(outcome="help_shown")
+
+    namespace = {"help_handler": help_handler}
+
+    async def dispatcher(invocation):
+        handler = resolve_command_handler(
+            invocation.command,
+            namespace,
+            suffix="_handler",
+        )
+        return await handler(invocation)
+
+    registries = []
+    for platform in ("cli", "telegram"):
+        registry = CommandRegistry()
+        bind_command_catalog(registry, platform, dispatcher)
+        registries.append(registry)
+        assert all(command.handler is dispatcher for command in registry.commands)
+
+    for registry in registries:
+        result = asyncio.run(registry.execute("/help"))
+        assert result.outcome == "help_shown"
+
+    assert calls == ["/help", "/help"]
