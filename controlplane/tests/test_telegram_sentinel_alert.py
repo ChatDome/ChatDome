@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -329,6 +330,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         )
         thinking = SimpleNamespace(delete=AsyncMock())
         message = SimpleNamespace(
+            text="⚠️ 待审批\n目的：检查系统日志\n是否允许本次操作？",
             reply_text=AsyncMock(return_value=thinking),
         )
         query = SimpleNamespace(
@@ -336,6 +338,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
             data="approval:approve:AP-1",
             message=message,
             edit_message_reply_markup=AsyncMock(),
+            edit_message_text=AsyncMock(),
         )
         update = SimpleNamespace(
             callback_query=query,
@@ -344,7 +347,13 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await bot._handle_callback_query(update, None)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
 
+        query.edit_message_text.assert_awaited_once_with(
+            text="✅ 已批准\n目的：检查系统日志",
+            reply_markup=None,
+        )
         bot.agent.resume_session.assert_awaited_once_with(
             123,
             "APPROVE",

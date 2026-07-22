@@ -884,9 +884,13 @@ async def approval_action_command_result(
         approval_id=approval_id,
     )
     task_scope = normalized_action == "APPROVE_TASK"
-    outcome = (
-        "approval_task_confirmed" if task_scope else "approval_confirmed"
-    )
+    approval_status = str(getattr(result, "payload", {}).get("approval_status", ""))
+    if approval_status == "processing":
+        outcome = "approval_processing"
+    elif approval_status == "unavailable":
+        outcome = "approval_unavailable"
+    else:
+        outcome = "approval_task_confirmed" if task_scope else "approval_confirmed"
     outbound = _with_command_outcome(
         OutboundMessageBuilder().from_agent_result(result),
         outcome,

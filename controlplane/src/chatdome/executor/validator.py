@@ -69,10 +69,10 @@ RISKY_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bwget\b"), "wget — 下载"),
 
     # Interpreters
-    (re.compile(r"\bpython\b"), "python — 解释器"),
-    (re.compile(r"\bperl\b"), "perl — 解释器"),
-    (re.compile(r"\bruby\b"), "ruby — 解释器"),
-    (re.compile(r"\bnode\b"), "node — 解释器"),
+    (re.compile(r"(?:^|[|;&]\s*)python(?:\s|$)"), "python — 解释器"),
+    (re.compile(r"(?:^|[|;&]\s*)perl(?:\s|$)"), "perl — 解释器"),
+    (re.compile(r"(?:^|[|;&]\s*)ruby(?:\s|$)"), "ruby — 解释器"),
+    (re.compile(r"(?:^|[|;&]\s*)node(?:\s|$)"), "node — 解释器"),
 
     # Redirects and pipe-to-shell
     (re.compile(r">\s"), "重定向写入"),

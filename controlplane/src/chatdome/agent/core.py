@@ -399,8 +399,19 @@ class Agent:
     ) -> tuple[str, AgentResult]:
         """Resume a suspended session after user approval/rejection. Returns (raw_result, agent_result)."""
         session = self.session_manager.get_or_create(chat_id)
+        if session.approval_processing:
+            processing_id = session.processing_approval_id or "当前命令"
+            return "", AgentResult(
+                kind="reply",
+                content=f"ℹ️ {processing_id} 已完成审批，正在处理中。",
+                payload={"approval_status": "processing"},
+            )
         if not session.pending_approval or not session.pending_tool_call_id:
-            return "", AgentResult.reply("ℹ️ 当前没有等待确认的命令。")
+            return "", AgentResult(
+                kind="reply",
+                content="ℹ️ 当前没有等待确认的命令。",
+                payload={"approval_status": "unavailable"},
+            )
 
         tool_call_id = session.pending_tool_call_id
         command = session.pending_command or ""
@@ -526,7 +537,15 @@ class Agent:
             final_answer = await self._run_loop_compat(chat_id, session, snapshot)
             return raw_result, final_answer
 
-        return await self._run_session_task_scope(chat_id, session, resume_task)
+        session.approval_processing = True
+        session.processing_approval_id = pending_approval_id or None
+        self._persist_session(session)
+        try:
+            return await self._run_session_task_scope(chat_id, session, resume_task)
+        finally:
+            session.approval_processing = False
+            session.processing_approval_id = None
+            self._persist_session(session)
 
     async def get_pending_approval_details(
         self,

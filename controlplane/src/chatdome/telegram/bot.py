@@ -101,6 +101,7 @@ class TelegramBot:
         self._sentinel: Any = None   # SentinelScheduler, injected via set_sentinel()
         self._pack_loader: Any = None
         self._approval_detail_tasks: dict[str, asyncio.Task] = {}
+        self._approval_resolution_tasks: dict[int, asyncio.Task] = {}
         self._round_limit_tasks: dict[int, asyncio.Task] = {}
         self._message_tasks: dict[int, asyncio.Task] = {}
         self._command_targets: dict[str, Any] = {}
@@ -419,7 +420,11 @@ class TelegramBot:
     # ----- Platform task control -----
 
     def _active_task_for_chat(self, chat_id: int) -> asyncio.Task | None:
-        for tasks in (self._message_tasks, self._round_limit_tasks):
+        for tasks in (
+            self._message_tasks,
+            self._approval_resolution_tasks,
+            self._round_limit_tasks,
+        ):
             task = tasks.get(chat_id)
             if task is None:
                 continue
@@ -428,6 +433,80 @@ class TelegramBot:
                 continue
             return task
         return None
+
+    @staticmethod
+    def _approval_decision_text(message: Any, action: str) -> str:
+        """Keep the approval purpose visible after replacing the action card."""
+        source = str(getattr(message, "text", "") or getattr(message, "caption", "") or "")
+        purpose = next(
+            (line.strip() for line in source.splitlines() if line.strip().startswith("目的：")),
+            "目的：信息不可用",
+        )
+        title = "❌ 已拒绝" if action == "REJECT" else "✅ 已批准"
+        return f"{title}\n{purpose}"
+
+    async def _start_approval_resolution(
+        self,
+        message: Any,
+        chat_id: int,
+        *,
+        data: str,
+        command_name: str,
+        args: tuple[str, ...],
+        command_context: CommandContext,
+    ) -> None:
+        existing_task = self._approval_resolution_tasks.get(chat_id)
+        if existing_task and not existing_task.done():
+            return
+
+        coroutine = self._run_approval_resolution(
+            message=message,
+            chat_id=chat_id,
+            data=data,
+            command_name=command_name,
+            args=args,
+            command_context=command_context,
+        )
+        task = self._app.create_task(coroutine) if self._app is not None else asyncio.create_task(coroutine)
+        self._approval_resolution_tasks[chat_id] = task
+
+        def _drop_finished_task(done_task: asyncio.Task) -> None:
+            if self._approval_resolution_tasks.get(chat_id) is done_task:
+                self._approval_resolution_tasks.pop(chat_id, None)
+
+        task.add_done_callback(_drop_finished_task)
+
+    async def _run_approval_resolution(
+        self,
+        *,
+        message: Any,
+        chat_id: int,
+        data: str,
+        command_name: str,
+        args: tuple[str, ...],
+        command_context: CommandContext,
+    ) -> None:
+        try:
+            await self._dispatch_callback_command(
+                message,
+                data=data,
+                command_name=command_name,
+                args=args,
+                command_context=command_context,
+            )
+        except asyncio.CancelledError:
+            logger.info("Approval resolution stopped for chat_id=%s", chat_id)
+            raise
+        except Exception as e:
+            logger.exception("Approval resolution failed for chat_id=%s", chat_id)
+            await self._send_long_message(
+                message,
+                self._format_error_text(
+                    e,
+                    prefix="命令处理失败",
+                    fallback="命令处理失败，请重新发起任务。",
+                ),
+            )
 
     async def _cancel_active_task_for_chat(self, chat_id: int) -> bool:
         task = self._active_task_for_chat(chat_id)
@@ -1056,36 +1135,29 @@ class TelegramBot:
             else:
                 await self._send_long_message(query.message, "Unknown action button. Please retry.")
                 return
-
-            await self._clear_callback_message_markup(query, "approval decision callback message")
-
             command_name = {
                 "APPROVE_TASK": "/confirm_task",
                 "APPROVE": "/confirm",
                 "REJECT": "/reject",
             }[action]
 
-            thinking_msg = await query.message.reply_text("⏳")
-            try:
-                await asyncio.wait_for(
-                    self._dispatch_callback_command(
-                        query.message,
-                        data=callback_data,
-                        command_name=command_name,
-                        args=(approval_id,) if approval_id else (),
-                        command_context=self._command_context_for_update(update),
-                    ),
-                    timeout=90,
-                )
-            finally:
-                try:
-                    await thinking_msg.delete()
-                except Exception:
-                    pass
+            await query.edit_message_text(
+                text=self._approval_decision_text(query.message, action),
+                reply_markup=None,
+            )
+            await self._start_approval_resolution(
+                query.message,
+                chat_id,
+                data=callback_data,
+                command_name=command_name,
+                args=(approval_id,) if approval_id else (),
+                command_context=self._command_context_for_update(update),
+            )
+            return
         except asyncio.TimeoutError:
             await self._send_long_message(
                 query.message,
-                "操作处理超时，当前任务状态已保留。请稍后重试，或发送 /confirm 继续处理待确认命令。",
+                "按钮操作超时，请重试。",
             )
         except Exception as e:
             logger.exception("Callback query handling failed")

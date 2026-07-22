@@ -286,6 +286,8 @@ class AgentSession:
     pending_reason: str | None = None
     pending_risk_level: str | None = None
     pending_analysis: dict[str, Any] | None = None
+    approval_processing: bool = False
+    processing_approval_id: str | None = None
     task_auto_approve: bool = False
     pending_round_limit: bool = False
     pending_round_count: int = 0
@@ -315,6 +317,8 @@ class AgentSession:
             "pending_reason": self.pending_reason,
             "pending_risk_level": self.pending_risk_level,
             "pending_analysis": self.pending_analysis,
+            "approval_processing": self.approval_processing,
+            "processing_approval_id": self.processing_approval_id,
             "task_auto_approve": self.task_auto_approve,
             "pending_round_limit": self.pending_round_limit,
             "pending_round_count": self.pending_round_count,
@@ -365,6 +369,8 @@ class AgentSession:
             pending_analysis=payload.get("pending_analysis")
             if isinstance(payload.get("pending_analysis"), dict)
             else None,
+            approval_processing=False,
+            processing_approval_id=None,
             task_auto_approve=bool(payload.get("task_auto_approve", False)),
             pending_round_limit=bool(payload.get("pending_round_limit", False)),
             pending_round_count=int(payload.get("pending_round_count", 0)),
