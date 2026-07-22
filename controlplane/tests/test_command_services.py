@@ -4,10 +4,17 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from chatdome.agent.result import AgentResult
 from chatdome.config import AIConfig, ChatDomeConfig
+from chatdome.errors import LLMProfileDeleteForbidden
 from chatdome.llm.codex_oauth_service import CodexOAuthService
-from chatdome.llm.profile_admin import ProfileActor, ProfileMutationResult
+from chatdome.llm.profile_admin import (
+    ProfileActor,
+    ProfileMutationResult,
+    ProfileSummary,
+)
 from chatdome.model_commands import ModelCommandService
 from chatdome.outbound.builders import EnvironmentFactsBuilder
 from chatdome.outbound.models import (
@@ -55,9 +62,10 @@ class FakeProfileAdmin:
         self.created_codex = []
         self.switched = []
         self.deleted = []
+        self.summaries = {}
 
-    async def get_profile_summary(self, _name):
-        return None
+    async def get_profile_summary(self, name):
+        return self.summaries.get(name)
 
     async def create_codex(self, request, actor):
         self.created_codex.append((request, actor))
@@ -171,8 +179,50 @@ def test_model_command_service_returns_shared_facts_and_results() -> None:
     assert len(listed.facts.profiles) == 2
     assert switched.outcome == "model_switched"
     assert switched.facts.name == "other"
+    assert switched.event_summary == "用户切换了 model profile other。"
     assert deleted.outcome == "model_deleted"
+    assert deleted.event_summary == "用户删除了 model profile base。"
     assert len(sync_calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    (
+        ("created", "用户新增了 model profile demo。"),
+        ("updated", "用户更新了 model profile demo。"),
+        ("deleted", "用户删除了 model profile demo。"),
+    ),
+)
+def test_model_mutation_event_summary_is_readable(
+    action: str,
+    expected: str,
+) -> None:
+    result = ModelCommandService._mutation_result(
+        ProfileMutationResult(action, "demo", "demo", 1),
+        outcome="model_changed",
+    )
+
+    assert result.event_summary == expected
+
+
+def test_active_model_delete_error_is_readable() -> None:
+    admin = FakeProfileAdmin()
+    admin.summaries["base"] = ProfileSummary(
+        name="base",
+        provider="openai",
+        api_mode="openai_api",
+        model="gpt-4o",
+        base_url="https://api.openai.com/v1",
+        fingerprint="fp",
+        active=True,
+        has_api_key=True,
+    )
+    service = ModelCommandService(FakeManager(), admin)
+
+    with pytest.raises(LLMProfileDeleteForbidden) as caught:
+        asyncio.run(service.inspect_delete("base"))
+
+    assert caught.value.to_user_message().splitlines()[0] == "请先切换 LLM，再删除该 profile。"
 
 
 def test_environment_facts_builder_parses_one_shared_profile(tmp_path: Path) -> None:

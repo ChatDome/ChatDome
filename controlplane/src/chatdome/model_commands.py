@@ -95,7 +95,7 @@ class ModelCommandService:
             text = f"{text}\n{detail}"
         return CommandResult(
             outcome="model_switched",
-            event_summary=f"????? model profile {result.profile_name}?",
+            event_summary=f"用户切换了 model profile {result.profile_name}。",
             title="Model switched",
             text=text,
             facts=selected or facts,
@@ -121,7 +121,7 @@ class ModelCommandService:
         if summary.active:
             raise LLMProfileDeleteForbidden(
                 f"Cannot delete active model profile: {profile_name}",
-                user_message="???? model????? profile?",
+                user_message="请先切换 LLM，再删除该 profile。",
             )
         return summary
 
@@ -164,10 +164,16 @@ class ModelCommandService:
             "updated": "updated",
             "deleted": "deleted",
         }
+        event_action_labels = {
+            "created": "新增",
+            "updated": "更新",
+            "deleted": "删除",
+        }
         action = action_labels.get(result.action, result.action)
+        event_action = event_action_labels.get(result.action, result.action)
         return CommandResult(
             outcome=outcome,
-            event_summary=f"??{action}? model profile {result.profile_name}?",
+            event_summary=f"用户{event_action}了 model profile {result.profile_name}。",
             title="Model profile",
             text=f"Model profile {action}: {result.profile_name}",
         )
