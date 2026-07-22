@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from chatdome.agent.result import AgentResult
+from chatdome.config import ChatDomeConfig
 from chatdome.sentinel.alerter import AlertEvent
 from chatdome.platform_adapters import TelegramPlatformAdapter
 from chatdome.telegram.bot import TelegramBot
@@ -28,10 +29,11 @@ def _event() -> AlertEvent:
 
 
 def _bot() -> TelegramBot:
-    bot = object.__new__(TelegramBot)
-    bot.max_message_length = 4000
-    bot._alert_analysis_cache = {}
-    bot._alert_analysis_cache_max = 200
+    agent = SimpleNamespace(
+        session_manager=None,
+        llm_manager=None,
+    )
+    bot = TelegramBot(ChatDomeConfig(), agent)
     bot._send_long_message = AsyncMock()
     bot._platform_adapter = TelegramPlatformAdapter(
         bot._deliver_telegram_rendered
@@ -62,55 +64,112 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(detail_data.encode("utf-8")), 64)
         self.assertLessEqual(len(analysis_data.encode("utf-8")), 64)
 
-    async def test_detail_handler_formats_cached_event_for_matching_chat(self):
-        bot = _bot()
-        bot._alert_analysis_cache["token"] = {
-            "chat_id": 123,
-            "event": _event().to_dict(),
-        }
-        query = SimpleNamespace(message=object())
+    @staticmethod
+    def _callback_update(query, chat_id: int = 123):
+        return SimpleNamespace(
+            callback_query=query,
+            effective_chat=SimpleNamespace(id=chat_id, type="private"),
+            effective_user=SimpleNamespace(id=456),
+            effective_message=query.message,
+        )
 
-        await bot._handle_sentinel_alert_detail(query, 123, "token")
+    async def test_detail_action_uses_shared_handler_for_matching_chat(self):
+        bot = _bot()
+        token = bot._command_service.remember_sentinel_alert(
+            chat_id=123,
+            alert_text="alert",
+            alert_event=_event(),
+        )
+        query = SimpleNamespace(message=object(), edit_message_reply_markup=AsyncMock())
+
+        await bot._dispatch_sentinel_alert_action(
+            self._callback_update(query),
+            None,
+            query,
+            "sentinel_alert_detail",
+            token,
+        )
 
         detail = bot._send_long_message.await_args.args[1]
         self.assertIn("威胁阶段: 新威胁首次出现", detail)
         self.assertIn("状态迁移: 未监控 → 新威胁首次出现", detail)
         self.assertNotIn("state_transition (", detail)
 
-    async def test_detail_handler_rejects_missing_or_cross_chat_token_and_removes_buttons(self):
-        for cached, chat_id in ((None, 123), ({"chat_id": 456, "event": _event().to_dict()}, 123)):
-            with self.subTest(cached=cached):
+    async def test_detail_action_rejects_missing_or_cross_chat_token(self):
+        for cross_chat in (False, True):
+            with self.subTest(cross_chat=cross_chat):
                 bot = _bot()
-                if cached is not None:
-                    bot._alert_analysis_cache["token"] = cached
-                query = SimpleNamespace(message=object(), edit_message_reply_markup=AsyncMock())
+                token = "missing"
+                if cross_chat:
+                    token = bot._command_service.remember_sentinel_alert(
+                        chat_id=456,
+                        alert_text="alert",
+                        alert_event=_event(),
+                    )
+                query = SimpleNamespace(
+                    message=object(),
+                    edit_message_reply_markup=AsyncMock(),
+                )
 
-                await bot._handle_sentinel_alert_detail(query, chat_id, "token")
+                await bot._dispatch_sentinel_alert_action(
+                    self._callback_update(query),
+                    None,
+                    query,
+                    "sentinel_alert_detail",
+                    token,
+                )
 
                 query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
                 text = bot._send_long_message.await_args.args[1]
-                self.assertEqual(text, "告警详情已过期。使用 /sentinel_history 查看告警记录。")
+                self.assertEqual(
+                    text,
+                    "告警详情已过期。使用 /sentinel_history 查看告警记录。",
+                )
 
-    async def test_detail_handler_handles_non_mapping_event(self):
+    async def test_detail_action_handles_non_mapping_event(self):
         bot = _bot()
-        bot._alert_analysis_cache["token"] = {"chat_id": 123, "event": "invalid"}
-        query = SimpleNamespace(message=object())
+        token = bot._command_service.remember_sentinel_alert(
+            chat_id=123,
+            alert_text="alert",
+            alert_event="invalid",
+        )
+        query = SimpleNamespace(message=object(), edit_message_reply_markup=AsyncMock())
 
-        await bot._handle_sentinel_alert_detail(query, 123, "token")
+        await bot._dispatch_sentinel_alert_action(
+            self._callback_update(query),
+            None,
+            query,
+            "sentinel_alert_detail",
+            token,
+        )
 
         self.assertEqual(bot._send_long_message.await_args.args[1], "暂无详细状态信息。")
 
-    async def test_analysis_handler_rejects_expired_context_and_removes_buttons(self):
+    async def test_analysis_action_rejects_expired_context_and_removes_buttons(self):
         bot = _bot()
-        query = SimpleNamespace(message=object(), edit_message_reply_markup=AsyncMock())
+        thinking = SimpleNamespace(delete=AsyncMock())
+        message = SimpleNamespace(reply_text=AsyncMock(return_value=thinking))
+        query = SimpleNamespace(message=message, edit_message_reply_markup=AsyncMock())
 
-        await bot._handle_sentinel_alert_analysis(query, 123, "missing")
+        await bot._dispatch_sentinel_alert_action(
+            self._callback_update(query),
+            None,
+            query,
+            "sentinel_alert_analysis",
+            "missing",
+        )
 
-        query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
-        text = bot._send_long_message.await_args.args[1]
-        self.assertEqual(text, "这条告警上下文已过期，请查看 /sentinel_history 或等待下一次告警。")
+        self.assertEqual(
+            query.edit_message_reply_markup.await_args.kwargs["reply_markup"],
+            None,
+        )
+        self.assertEqual(
+            bot._send_long_message.await_args.args[1],
+            "告警上下文已过期。使用 /sentinel_history 查看告警记录。",
+        )
+        thinking.delete.assert_awaited_once()
 
-    async def test_analysis_handler_removes_only_analysis_button_for_matching_chat(self):
+    async def test_analysis_action_runs_shared_handler_and_preserves_platform_ui(self):
         class FakeClient:
             model = "fake-model"
 
@@ -123,35 +182,42 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         bot = _bot()
-        bot._alert_analysis_cache["token"] = {
-            "chat_id": 123,
-            "alert_text": "alert card",
-            "event": _event().to_dict(),
-        }
-        bot._read_environment_profile_for_llm = Mock(return_value="env")
-        bot._record_visible_context = Mock()
+        manager = SimpleNamespace(record_control_event=Mock())
         bot.agent = SimpleNamespace(
-            get_active_llm_snapshot=AsyncMock(return_value=SimpleNamespace(client=FakeClient()))
+            session_manager=manager,
+            llm_manager=None,
+            get_active_llm_snapshot=AsyncMock(
+                return_value=SimpleNamespace(client=FakeClient())
+            ),
         )
-        thinking_msg = SimpleNamespace(delete=AsyncMock())
-        message = SimpleNamespace(reply_text=AsyncMock(return_value=thinking_msg))
+        token = bot._command_service.remember_sentinel_alert(
+            chat_id=123,
+            alert_text="alert card",
+            alert_event=_event(),
+        )
+        thinking = SimpleNamespace(delete=AsyncMock())
+        message = SimpleNamespace(reply_text=AsyncMock(return_value=thinking))
         query = SimpleNamespace(message=message, edit_message_reply_markup=AsyncMock())
 
         with patch("chatdome.agent.tracker.TokenTracker.record_usage") as record_usage:
-            await bot._handle_sentinel_alert_analysis(query, 123, "token")
+            await bot._dispatch_sentinel_alert_action(
+                self._callback_update(query),
+                None,
+                query,
+                "sentinel_alert_analysis",
+                token,
+            )
 
-        query.edit_message_reply_markup.assert_awaited_once()
         reply_markup = query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
         keyboard = reply_markup.inline_keyboard
-        self.assertEqual(len(keyboard), 1)
         self.assertEqual([button.text for button in keyboard[0]], ["📋 查看详情"])
-        self.assertEqual(keyboard[0][0].callback_data, "sentinel_alert_detail:token")
         message.reply_text.assert_awaited_once_with("⏳")
-        thinking_msg.delete.assert_awaited_once()
-        bot._send_long_message.assert_awaited_once_with(message, "分析内容")
+        thinking.delete.assert_awaited_once()
+        self.assertEqual(bot._send_long_message.await_args.args[:2], (message, "分析内容"))
         record_usage.assert_called_once()
-        bot._record_visible_context.assert_called_once()
-
+        event = manager.record_control_event.call_args.args[1]
+        self.assertEqual(event["command"], "/sentinel_alert_analysis")
+        self.assertEqual(event["outcome"], "sentinel_alert_analysis_completed")
     def test_approval_detail_text_groups_command_breakdown(self):
         details = {
             "ok": True,
@@ -297,7 +363,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
     async def test_callback_router_dispatches_sentinel_detail(self):
         bot = _bot()
         bot._check_auth = lambda update: True
-        bot._handle_sentinel_alert_detail = AsyncMock()
+        bot._dispatch_sentinel_alert_action = AsyncMock()
         query = SimpleNamespace(
             answer=AsyncMock(),
             data="sentinel_alert_detail:token",
@@ -317,7 +383,13 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("chat_id=123", log_line)
         self.assertIn("user_id=456", log_line)
         self.assertIn('callback_data="sentinel_alert_detail:token"', log_line)
-        bot._handle_sentinel_alert_detail.assert_awaited_once_with(query, 123, "token")
+        bot._dispatch_sentinel_alert_action.assert_awaited_once_with(
+            update,
+            None,
+            query,
+            "sentinel_alert_detail",
+            "token",
+        )
 
 
 if __name__ == "__main__":

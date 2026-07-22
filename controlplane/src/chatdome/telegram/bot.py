@@ -8,14 +8,11 @@ Routes messages through authentication → AI Agent → reply.
 from __future__ import annotations
 
 import asyncio
-import json
+import inspect
 import logging
 import re
-import time
-import uuid
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -31,6 +28,10 @@ from telegram.ext import (
 
 from chatdome.agent.core import Agent
 from chatdome.agent.result import AgentResult, coerce_agent_result
+from chatdome.command_handlers import (
+    CommandHandlerRuntime,
+    CommandHandlerService,
+)
 from chatdome.outbound.builders import (
     EnvironmentFactsBuilder,
     OutboundMessageBuilder,
@@ -39,18 +40,13 @@ from chatdome.outbound.builders import (
     build_notification_message,
     build_sentinel_alert,
 )
-from chatdome.outbound.models import ActionKind, OutboundAction
 from chatdome.outbound.renderers.telegram import TelegramOutboundRenderer, group_controls
 from chatdome.platform_adapters import (
     TelegramDeliveryTarget,
     TelegramPlatformAdapter,
 )
-from chatdome.config import AIConfig, ChatDomeConfig, validate_profile_name
-from chatdome.errors import (
-    LLMProfileNotFound,
-    LLMProfileNotReady,
-    user_facing_error_message,
-)
+from chatdome.config import AIConfig, ChatDomeConfig
+from chatdome.errors import user_facing_error_message
 from chatdome.telegram.auth import Authenticator
 from chatdome.telegram.formatting import MessageMarkup, TelegramMessageFormatter
 from chatdome.runtime_paths import environment_profile_path
@@ -61,33 +57,11 @@ from chatdome.slash_commands import (
     CommandInvocation,
     CommandRegistry,
     CommandResult,
-    abandon_command_result,
-    approval_details_command_result,
-    approve_command_result,
-    approve_task_command_result,
-    audit_command_result,
     bind_command_catalog,
-    clear_session_command_result,
-    command_echo_command_result,
-    command_help_result,
-    continue_command_result,
-    dispatch_command_handler,
-    environment_command_result,
-    execute_engram_command,
     format_command_help,
-    reject_command_result,
-    sentinel_history,
-    sentinel_mute,
-    sentinel_packs,
-    sentinel_resume,
-    sentinel_status,
-    sentinel_trigger,
-    stop_task_command_result,
-    token_usage_command_result,
 )
 from chatdome.llm.codex_oauth_service import CodexOAuthService
 from chatdome.llm.profile_admin import (
-    CreateOpenAIProfileRequest,
     LLMProfileAdminService,
     ProfileActor,
 )
@@ -126,16 +100,14 @@ class TelegramBot:
         self._environment_profile_path = environment_profile_path()
         self._sentinel: Any = None   # SentinelScheduler, injected via set_sentinel()
         self._pack_loader: Any = None
-        self._alert_analysis_cache: dict[str, dict[str, Any]] = {}
-        self._alert_analysis_cache_max = 200
         self._approval_detail_tasks: dict[str, asyncio.Task] = {}
         self._round_limit_tasks: dict[int, asyncio.Task] = {}
         self._message_tasks: dict[int, asyncio.Task] = {}
-        self._llm_admin_sessions: dict[tuple[int, int], dict[str, Any]] = {}
-        self._llm_admin_confirmations: dict[str, dict[str, Any]] = {}
+        self._command_targets: dict[str, Any] = {}
         # Default policy: plain text output; markdown can be enabled per message.
         self._formatter = TelegramMessageFormatter(enable_markdown=True)
         self._platform_adapter = TelegramPlatformAdapter(self._deliver_telegram_rendered)
+        self._command_service = CommandHandlerService(self._command_runtime)
         self._command_registry = self._get_command_registry()
 
     def _get_command_registry(self) -> CommandRegistry:
@@ -145,7 +117,7 @@ class TelegramBot:
             bind_command_catalog(
                 registry,
                 "telegram",
-                self._dispatch_registered_command,
+                self._command_service.handle,
             )
             self._command_registry = registry
         return registry
@@ -284,33 +256,100 @@ class TelegramBot:
             if manager is not None:
                 manager.record_control_event(chat_id, event)
 
-        return CommandContext(
+        command_context = CommandContext(
             source="telegram",
             chat_id=chat_id,
             actor_id=actor_id,
             event_recorder=record_event,
-            transport=SimpleNamespace(update=update, context=context),
+            capabilities=(
+                frozenset({"model_admin"})
+                if self._is_model_admin(update) else frozenset()
+            ),
+        )
+        target = getattr(update, "effective_message", None)
+        if target is not None:
+            self._command_targets[command_context.request_id] = target
+        return command_context
+
+    def _is_model_admin(self, update: Update | None) -> bool:
+        if update is None or update.effective_chat is None:
+            return False
+        chat = update.effective_chat
+        config = getattr(self, "config", None)
+        if config is None:
+            return False
+        telegram_config = config.telegram
+        admin_ids = set(
+            telegram_config.admin_chat_ids
+            or telegram_config.allowed_chat_ids
+            or []
+        )
+        return bool(
+            self._check_auth(update)
+            and getattr(chat, "type", "") == "private"
+            and chat.id in admin_ids
         )
 
-    async def _dispatch_registered_command(
+    async def _sync_model_manager(self) -> None:
+        manager = self._get_llm_manager()
+        reloader = getattr(manager, "reload_profiles", None)
+        if callable(reloader):
+            value = reloader(self.config.ai_profiles, self.config.active_ai_profile)
+            if inspect.isawaitable(value):
+                await value
+
+    def _command_runtime(
         self,
         invocation: CommandInvocation,
-    ) -> CommandResult:
-        transport = invocation.context.transport
-        if transport is None:
-            raise RuntimeError("telegram command transport is unavailable")
-        return await dispatch_command_handler(
-            invocation,
-            self,
-            transport.update,
-            transport.context,
-            prefix="_handle_",
+    ) -> CommandHandlerRuntime:
+        target = self._command_targets.pop(invocation.context.request_id, None)
+
+        async def publish_deferred(result: CommandResult) -> None:
+            delivery_target = target
+            if delivery_target is None and self._app is not None:
+                delivery_target = TelegramDeliveryTarget(
+                    self._app.bot,
+                    invocation.context.chat_id,
+                )
+            await self._platform_adapter.deliver_result(
+                result,
+                target=delivery_target,
+            )
+
+        def schedule_task(awaitable):
+            if self._app is not None:
+                return self._app.create_task(awaitable)
+            return asyncio.create_task(awaitable)
+
+        return CommandHandlerRuntime(
+            agent=self.agent,
+            model_service=self._model_command_service(),
+            codex_oauth=self._codex_oauth,
+            config=self.config,
+            sentinel=self._sentinel,
+            pack_loader=self._pack_loader,
+            profile_actor=ProfileActor(
+                source="telegram",
+                chat_id=invocation.context.chat_id,
+                user_id=(
+                    int(invocation.context.actor_id)
+                    if str(invocation.context.actor_id).isdigit()
+                    else 0
+                ),
+            ),
+            cancel_request=lambda: self._cancel_active_task_for_chat(
+                invocation.context.chat_id
+            ),
+            sync_model=self._sync_model_manager,
+            publish_deferred=publish_deferred,
+            schedule_task=schedule_task,
+            defer_commands=True,
+            model_admin_allowed="model_admin" in invocation.context.capabilities,
         )
 
     def _command_handler(
         self,
         command_name: str,
-        callback: Any | None = None,
         *,
         command: CommandDef | None = None,
     ) -> CommandHandler:
@@ -324,28 +363,20 @@ class TelegramBot:
                 getattr(message, "text", "") or f"/{command_name}"
             ).strip()
             args = tuple(str(item) for item in (getattr(context, "args", None) or ()))
-            command_context = self._command_context_for_update(update, context)
-
-            command_def = command or CommandDef(
-                name=f"/{command_name}",
-                description="",
-                category="telegram",
+            command_def = command or self._get_command_registry().resolve_name(
+                f"/{command_name}"
             )
+            if command_def is None:
+                raise RuntimeError(f"command is not registered: /{command_name}")
             invocation = self._platform_adapter.receive_command(
                 raw=raw,
                 raw_name=f"/{command_name}",
                 command=command_def,
                 args=args,
-                context=command_context,
+                context=self._command_context_for_update(update, context),
             )
-
             await self._platform_adapter.dispatch(
                 invocation,
-                handler=(
-                    (lambda _invocation: callback(update, context))
-                    if callback is not None
-                    else None
-                ),
                 target=update.message,
             )
 
@@ -359,18 +390,18 @@ class TelegramBot:
         command_name: str,
         args: tuple[str, ...] = (),
         command_context: CommandContext,
-        handler: Any,
         action: str = "",
         interaction_id: str = "",
         params: dict[str, Any] | None = None,
     ) -> CommandResult:
-        """Run a Telegram button action through the shared command pipeline."""
+        """Run a Telegram semantic action through the canonical command service."""
 
-        command = self._get_command_registry().resolve_name(command_name) or CommandDef(
-            name=command_name,
-            description="",
-            category="interaction",
+        command = (
+            self._get_command_registry().resolve_name(command_name)
+            or self._command_service.action_definition(action)
         )
+        if command is None:
+            raise RuntimeError(f"command is not registered: {command_name}")
         invocation = self._platform_adapter.receive_callback(
             data=data,
             command=command,
@@ -382,29 +413,10 @@ class TelegramBot:
         )
         return await self._platform_adapter.dispatch(
             invocation,
-            handler=handler,
             target=target,
         )
 
-    # ----- Command handlers -----
-
-    async def _handle_help(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Handle /help and /start commands."""
-        del update, context
-        return command_help_result("telegram")
-
-    async def _handle_clear(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Handle /clear command — reset conversation context."""
-        del context
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-
-        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
-        return clear_session_command_result(self.agent, command_context)
+    # ----- Platform task control -----
 
     def _active_task_for_chat(self, chat_id: int) -> asyncio.Task | None:
         for tasks in (self._message_tasks, self._round_limit_tasks):
@@ -430,63 +442,7 @@ class TelegramBot:
             logger.debug("Task ended while stopping chat_id=%s", chat_id, exc_info=True)
         return True
 
-    async def _handle_stop(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Handle /stop command."""
-        del context
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-
-        chat_id = update.effective_chat.id
-        return await stop_task_command_result(
-            lambda: self._cancel_active_task_for_chat(chat_id)
-        )
-
-    async def _handle_cmd_echo(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Handle /cmd-echo command — toggle command echo mode."""
-        del context
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-
-        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
-        return command_echo_command_result(self.agent, command_context)
-
-    async def _handle_token(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Handle /token command — query local token usage statistics."""
-        del context
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-
-        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
-        return token_usage_command_result(command_context)
-
-    async def _handle_env(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Handle /env command — show runtime environment profile summary."""
-        del update, context
-        return environment_command_result(
-            self._environment_profile_path,
-        )
-
-    async def _handle_audit(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Handle /audit command - show recent command audit events."""
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-
-        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
-        return audit_command_result(
-            command_context,
-            getattr(context, "args", None) or (),
-        )
-
+    # ----- Message handler -----
     # ----- Message handler -----
 
     async def _handle_message(
@@ -655,12 +611,6 @@ class TelegramBot:
         )
         args = (approval_id,) if approval_id else ()
 
-        async def handler(invocation: CommandInvocation) -> CommandResult:
-            return await approval_details_command_result(
-                self.agent,
-                invocation.context,
-                invocation.args,
-            )
 
         try:
             result = await self._dispatch_callback_command(
@@ -669,7 +619,6 @@ class TelegramBot:
                 command_name="/details",
                 args=args,
                 command_context=context,
-                handler=handler,
             )
         except Exception as e:
             logger.exception("Failed to load approval details in background")
@@ -758,20 +707,10 @@ class TelegramBot:
         """Resolve one round-limit button through the shared command pipeline."""
 
         normalized_action = str(action or "").strip().upper()
-        if normalized_action == "CONTINUE":
-            command_name = "/continue"
-
-            async def handler(invocation: CommandInvocation) -> CommandResult:
-                return await continue_command_result(self.agent, invocation.context)
-
-        elif normalized_action == "ABANDON":
-            command_name = "/reject"
-
-            async def handler(invocation: CommandInvocation) -> CommandResult:
-                return await abandon_command_result(self.agent, invocation.context)
-
-        else:
+        if normalized_action not in {"CONTINUE", "ABANDON"}:
             raise ValueError("unsupported round-limit action")
+        command_name = "/continue" if normalized_action == "CONTINUE" else "/reject"
+        semantic_action = "" if normalized_action == "CONTINUE" else "abandon"
 
         return await self._dispatch_callback_command(
             message,
@@ -779,7 +718,7 @@ class TelegramBot:
             command_name=command_name,
             command_context=command_context
             or CommandContext(source="telegram", chat_id=chat_id),
-            handler=handler,
+            action=semantic_action,
         )
 
     async def _start_round_limit_resolution(
@@ -865,13 +804,6 @@ class TelegramBot:
             except Exception:
                 pass
 
-    async def _handle_engram(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Handle /engram command."""
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-        return execute_engram_command(self.agent, context.args or ())
 
     def _get_llm_manager(self):
         return getattr(self.agent, "llm_manager", None)
@@ -880,463 +812,13 @@ class TelegramBot:
         return ModelCommandService(
             self._get_llm_manager(),
             self.profile_admin,
+            runtime_sync=self._sync_model_manager,
         )
 
     def _format_llm_profile_list(self) -> str:
         result = self._model_command_service().list_profiles()
         outbound = OutboundMessageBuilder().from_command_result(None, result)
         return "\n".join(TelegramOutboundRenderer().render(outbound).text_parts)
-
-    @staticmethod
-    def _format_llm_status(status: str) -> str:
-        labels = {
-            "ready": "ready，可切换",
-            "missing_key": "missing_key，config.yaml 中未配置 api_key",
-            "token_file_present": "token_file_present，已找到 Codex token 文件",
-            "not_authenticated": "not_authenticated，需要 /codex_login",
-            "invalid_key_ref": "invalid_key_ref，已废弃 env: 写法，请直接写入 config.yaml",
-            "unsupported": "unsupported，不支持的 api_mode",
-        }
-        return labels.get(status, status)
-
-    async def _handle_model(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        return await self._handle_llm(update, context)
-
-    async def _handle_model_list(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        return await self._handle_llm_list(update, context)
-
-    async def _handle_model_add(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        return await self._handle_llm_add(update, context)
-
-    async def _handle_model_delete(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        return await self._handle_llm_delete(update, context)
-
-    async def _handle_model_cancel(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        return await self._handle_llm_cancel(update, context)
-
-    async def _handle_llm_list(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Handle /model_list command."""
-        del update, context
-        return self._model_command_service().list_profiles()
-
-    async def _handle_llm_add(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        if not await self._require_llm_admin(update):
-            return CommandResult(outcome="unauthorized")
-        if self.profile_admin is None:
-            return CommandResult(
-                outcome="unavailable",
-                text="Model management is unavailable.",
-                severity="error",
-            )
-        key = self._llm_admin_key(update)
-        current = self._active_llm_admin_session(key)
-        if current is not None:
-            return CommandResult(
-                outcome="interaction_in_progress",
-                text="Complete the current model setup or run /model_cancel.",
-            )
-        nonce = uuid.uuid4().hex[:12]
-        self._llm_admin_sessions[key] = {
-            "step": "select_type",
-            "nonce": nonce,
-            "created_at": time.time(),
-        }
-        return CommandResult(
-            outcome="model_add_input_requested",
-            title="Add model profile",
-            text="Select model type.",
-            event_refs={"interaction_id": nonce},
-            facts={
-                "operation": "model_add",
-                "stage": "select_type",
-                "options": ("openai", "codex"),
-            },
-            actions=(
-                OutboundAction(
-                    ActionKind.SELECT,
-                    "OpenAI-compatible",
-                    f"llm_admin:type_openai:{nonce}",
-                    params={"interaction_id": nonce, "model_type": "openai"},
-                ),
-                OutboundAction(
-                    ActionKind.SELECT,
-                    "Codex OAuth",
-                    f"llm_admin:type_codex:{nonce}",
-                    params={"interaction_id": nonce, "model_type": "codex"},
-                ),
-                OutboundAction(
-                    ActionKind.CANCEL,
-                    "取消",
-                    f"llm_admin:cancel:{nonce}",
-                    params={"interaction_id": nonce},
-                ),
-            ),
-        )
-
-    async def _handle_llm_cancel(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        del context
-        if not await self._require_llm_admin(update):
-            return CommandResult(outcome="unauthorized")
-        key = self._llm_admin_key(update)
-        removed_any = self._llm_admin_sessions.pop(key, None) is not None
-        for nonce, item in list(self._llm_admin_confirmations.items()):
-            if item.get("key") == key:
-                self._llm_admin_confirmations.pop(nonce, None)
-                removed_any = True
-        return self._model_command_service().cancel(removed_any)
-
-    async def _handle_llm_delete(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        if not await self._require_llm_admin(update):
-            return CommandResult(outcome="unauthorized")
-        if self.profile_admin is None:
-            return CommandResult(
-                outcome="unavailable",
-                text="Model management is unavailable.",
-                severity="error",
-            )
-        args = getattr(context, "args", []) or []
-        if len(args) != 1:
-            return CommandResult(
-                outcome="invalid_arguments",
-                text="Usage: /model_delete <profile>",
-                severity="error",
-            )
-        try:
-            summary = await self._model_command_service().inspect_delete(
-                str(args[0]).strip()
-            )
-        except Exception as exc:
-            return CommandResult(
-                outcome="failed",
-                title="Model delete failed",
-                text=user_facing_error_message(
-                    exc, fallback="Model profile could not be deleted."
-                ),
-                severity="error",
-            )
-        nonce = uuid.uuid4().hex[:12]
-        key = self._llm_admin_key(update)
-        self._llm_admin_confirmations[nonce] = {
-            "kind": "delete",
-            "profile_name": summary.name,
-            "key": key,
-            "expires_at": time.time() + 60,
-        }
-        return CommandResult(
-            outcome="model_delete_confirmation_requested",
-            title="Delete model profile",
-            text=f"Delete model profile '{summary.name}'?",
-            event_refs={"interaction_id": nonce, "profile": summary.name},
-            facts={"operation": "model_delete", "profile": summary.name},
-            actions=(
-                OutboundAction(
-                    ActionKind.CONFIRM,
-                    "确认删除",
-                    f"llm_admin:delete_yes:{nonce}",
-                    destructive=True,
-                    params={"interaction_id": nonce, "profile": summary.name},
-                ),
-                OutboundAction(
-                    ActionKind.CANCEL,
-                    "取消",
-                    f"llm_admin:delete_no:{nonce}",
-                    params={"interaction_id": nonce, "profile": summary.name},
-                ),
-            ),
-        )
-
-    async def _handle_llm_admin_message(
-        self,
-        update: Update,
-        context: ContextTypes.DEFAULT_TYPE,
-    ) -> bool:
-        key = self._llm_admin_key(update)
-        session = self._llm_admin_sessions.get(key)
-        if session is None:
-            return False
-        if self._active_llm_admin_session(key) is None:
-            await update.message.reply_text("model 配置已超时，请重新运行 /model_add。")
-            return True
-        if not await self._require_llm_admin(update):
-            return True
-
-        text = str(update.message.text or "").strip()
-        step = str(session.get("step") or "")
-        if step == "api_key":
-            existing = session.get("existing")
-            if text == "-" and existing is not None and existing.api_mode == "openai_api":
-                session["pending_api_key"] = ""
-            else:
-                try:
-                    await update.message.delete()
-                except Exception:
-                    self._llm_admin_sessions.pop(key, None)
-                    await update.message.reply_text(
-                        "无法删除 API Key 消息。请删除该消息并使用本地菜单。"
-                    )
-                    return True
-                session["pending_api_key"] = text
-            safe_params: dict[str, Any] = {}
-        else:
-            safe_params = {"input": text}
-
-        async def handler(invocation: CommandInvocation) -> CommandResult:
-            return await self._execute_llm_admin_input(invocation, update)
-
-        await self._dispatch_callback_command(
-            update.message,
-            data=f"llm_admin:input_{step}:{session['nonce']}",
-            command_name="/model_add",
-            command_context=self._command_context_for_update(update, context),
-            handler=handler,
-            action=f"input_{step}",
-            interaction_id=str(session["nonce"]),
-            params=safe_params,
-        )
-        return True
-
-    async def _execute_llm_admin_input(
-        self,
-        invocation: CommandInvocation,
-        update: Update,
-    ) -> CommandResult:
-        key = self._llm_admin_key(update)
-        session = self._active_llm_admin_session(key)
-        nonce = invocation.interaction_id
-        event_refs = {"interaction_id": nonce}
-        if session is None or session.get("nonce") != nonce:
-            return CommandResult(
-                outcome="interaction_expired",
-                text="model 配置已失效，请重新运行 /model_add。",
-                severity="error",
-                event_refs=event_refs,
-            )
-
-        step = str(session.get("step") or "")
-        if invocation.action != f"input_{step}":
-            return CommandResult(
-                outcome="invalid_interaction_state",
-                text="model 配置状态无效，请重新开始。",
-                severity="error",
-                event_refs=event_refs,
-            )
-
-        text = str(invocation.params.get("input") or "").strip()
-        if step == "name":
-            try:
-                name = validate_profile_name(text)
-                summary = await self.profile_admin.get_profile_summary(name)
-            except Exception as exc:
-                return CommandResult(
-                    outcome="invalid_arguments",
-                    title="Profile 名称无效",
-                    text=user_facing_error_message(
-                        exc,
-                        fallback="请输入有效的 profile 名称。",
-                    ),
-                    severity="error",
-                    event_refs=event_refs,
-                )
-            session["name"] = name
-            session["existing"] = summary
-            if summary is not None:
-                session["step"] = "confirm_overwrite"
-                session["expected_fingerprint"] = summary.fingerprint
-                return CommandResult(
-                    outcome="model_overwrite_confirmation_requested",
-                    title="Overwrite model profile",
-                    text=(
-                        f"已存在 {summary.name}: {summary.provider}/{summary.api_mode}, "
-                        f"model={summary.model}, address={summary.base_url}"
-                    ),
-                    event_refs=event_refs,
-                    facts={
-                        "operation": "model_add",
-                        "stage": "confirm_overwrite",
-                        "profile": summary.name,
-                    },
-                    actions=(
-                        OutboundAction(
-                            ActionKind.CONFIRM,
-                            "继续覆盖",
-                            f"llm_admin:overwrite_yes:{nonce}",
-                            params={"interaction_id": nonce},
-                        ),
-                        OutboundAction(
-                            ActionKind.CANCEL,
-                            "取消",
-                            f"llm_admin:overwrite_no:{nonce}",
-                            params={"interaction_id": nonce},
-                        ),
-                    ),
-                )
-            return self._llm_admin_after_name_result(session)
-
-        if step == "model":
-            existing = session.get("existing")
-            session["model"] = (
-                existing.model if text == "-" and existing is not None else text
-            )
-            session["step"] = "base_url"
-            default = existing.base_url if existing is not None else "https://api.openai.com/v1"
-            return CommandResult(
-                outcome="model_add_input_requested",
-                title="Add model profile",
-                text=f"输入 Base URL。发送 - 使用当前值: {default}",
-                event_refs=event_refs,
-                facts={"operation": "model_add", "stage": "base_url"},
-            )
-
-        if step == "base_url":
-            existing = session.get("existing")
-            session["base_url"] = (
-                existing.base_url if text == "-" and existing is not None else text
-            )
-            session["step"] = "api_key"
-            if existing is not None and existing.api_mode == "openai_api":
-                prompt = "输入 API Key，或发送 - 保留现有 Key。"
-            else:
-                prompt = "输入 API Key。敏感环境请使用本地菜单。"
-            return CommandResult(
-                outcome="model_add_input_requested",
-                title="Add model profile",
-                text=prompt,
-                event_refs=event_refs,
-                facts={"operation": "model_add", "stage": "api_key"},
-            )
-
-        if step == "api_key":
-            existing = session.get("existing")
-            api_key = str(session.pop("pending_api_key", ""))
-            session["api_key"] = api_key
-            session["step"] = "confirm_save"
-            action = "更新" if existing is not None else "新增"
-            return CommandResult(
-                outcome="model_save_confirmation_requested",
-                title="Save model profile",
-                text=(
-                    f"{action} {session['name']}？\n"
-                    f"模型: {session['model']}\n"
-                    f"地址: {session['base_url']}\n"
-                    f"API Key: {'unchanged' if not api_key else 'configured'}"
-                ),
-                event_refs=event_refs,
-                facts={
-                    "operation": "model_add",
-                    "stage": "confirm_save",
-                    "profile": session["name"],
-                    "api_key_status": "unchanged" if not api_key else "configured",
-                },
-                actions=(
-                    OutboundAction(
-                        ActionKind.CONFIRM,
-                        f"确认{action}",
-                        f"llm_admin:save_yes:{nonce}",
-                        params={"interaction_id": nonce},
-                    ),
-                    OutboundAction(
-                        ActionKind.CANCEL,
-                        "取消",
-                        f"llm_admin:save_no:{nonce}",
-                        params={"interaction_id": nonce},
-                    ),
-                ),
-            )
-
-        return CommandResult(
-            outcome="interaction_in_progress",
-            text="使用按钮继续，或发送 /model_cancel。",
-            event_refs=event_refs,
-        )
-
-    @staticmethod
-    def _llm_admin_after_name_result(session: dict[str, Any]) -> CommandResult:
-        nonce = str(session["nonce"])
-        event_refs = {"interaction_id": nonce}
-        if session.get("type") == "openai":
-            session["step"] = "model"
-            existing = session.get("existing")
-            default = existing.model if existing is not None else "gpt-4o"
-            return CommandResult(
-                outcome="model_add_input_requested",
-                title="Add model profile",
-                text=f"输入模型名称。发送 - 使用当前值: {default}",
-                event_refs=event_refs,
-                facts={"operation": "model_add", "stage": "model"},
-            )
-
-        session["step"] = "codex_confirm"
-        return CommandResult(
-            outcome="codex_authorization_confirmation_requested",
-            title="Codex OAuth",
-            text=f"为 profile '{session['name']}' 启动 Codex OAuth？",
-            event_refs=event_refs,
-            facts={
-                "operation": "model_add",
-                "stage": "codex_confirmation",
-                "profile": session["name"],
-            },
-            actions=(
-                OutboundAction(
-                    ActionKind.CONFIRM,
-                    "开始 Codex 授权",
-                    f"llm_admin:codex_start:{nonce}",
-                    params={"interaction_id": nonce},
-                ),
-                OutboundAction(
-                    ActionKind.CANCEL,
-                    "取消",
-                    f"llm_admin:cancel:{nonce}",
-                    params={"interaction_id": nonce},
-                ),
-            ),
-        )
-
-    async def _handle_llm(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """List profiles or persistently switch the active model."""
-        args = getattr(context, "args", []) or []
-        service = self._model_command_service()
-        if not args:
-            return service.list_profiles()
-        if not await self._require_llm_admin(update):
-            return CommandResult(outcome="unauthorized")
-
-        try:
-            return await service.switch(
-                str(args[0]).strip(),
-                self._profile_actor(update),
-            )
-        except Exception as exc:
-            logger.warning("Model profile switch failed: %s", exc)
-            return CommandResult(
-                outcome="failed",
-                title="Model switch failed",
-                text=user_facing_error_message(
-                    exc,
-                    fallback="model 切换失败，请检查配置后重试。",
-                ),
-                severity="error",
-            )
 
     @staticmethod
     def _default_codex_profile(profile_name: str) -> AIConfig:
@@ -1356,95 +838,43 @@ class TelegramBot:
             active_profile=active_profile,
         )
 
-    async def _handle_codex_login(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Start the shared Codex OAuth device flow."""
-        if not await self._require_llm_admin(update):
-            return CommandResult(outcome="unauthorized")
+    async def _handle_llm_admin_message(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> bool:
+        command_context = self._command_context_for_update(update, context)
+        pending = self._command_service.model_workflow.pending_input(command_context)
+        if pending is None:
+            self._command_targets.pop(command_context.request_id, None)
+            return False
 
-        requested_profile = (getattr(context, "args", []) or [""])[0]
-        manager = self._get_llm_manager()
-        active_profile = (
-            manager.get_active_profile_name() if manager is not None else ""
-        )
-        try:
-            force_codex = bool(getattr(context, "chatdome_force_codex", False))
-            forced_profile = (
-                self._default_codex_profile(requested_profile)
-                if force_codex
-                else None
-            )
-            session = await self._codex_oauth.begin(
-                self.config,
-                self._profile_actor(update),
-                requested_profile=requested_profile,
-                active_profile=active_profile,
-                forced_profile=forced_profile,
-                overwrite_existing=(
-                    bool(getattr(context, "chatdome_codex_overwrite", False))
-                    if force_codex
-                    else None
-                ),
-                expected_profile_fingerprint=getattr(
-                    context,
-                    "chatdome_expected_fingerprint",
-                    None,
-                ),
-            )
-        except Exception as exc:
-            return CommandResult(
-                outcome="failed",
-                title="Codex OAuth failed",
-                text=user_facing_error_message(
-                    exc,
-                    fallback="无法启动 Codex 认证，请检查 model profile 配置。",
-                ),
-                severity="error",
-            )
-
-        async def complete_authorization() -> None:
-            try:
-                await self._codex_oauth.complete(session)
-                result = CommandResult(
-                    outcome="codex_authenticated",
-                    event_summary=(
-                        f"用户完成了 Codex profile {session.profile_name} 认证。"
-                    ),
-                    title="Codex OAuth",
-                    text=f"Codex profile 已可使用: {session.profile_name}",
-                )
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logger.error(
-                    "Codex device login polling background task failed: %s",
-                    exc,
-                )
-                result = CommandResult(
-                    outcome="failed",
-                    title="Codex OAuth failed",
-                    text=user_facing_error_message(
-                        exc,
-                        fallback="Codex 认证失败，请重新运行 /codex_login。",
-                    ),
-                    severity="error",
-                )
-            await self._send_command_result(update.message, result)
-
-        if self._app is not None:
-            self._app.create_task(complete_authorization())
+        nonce, action = pending
+        text = str(update.message.text or "").strip()
+        params: dict[str, Any]
+        if action == "input_api_key":
+            if text != "-":
+                try:
+                    await update.message.delete()
+                except Exception:
+                    await update.message.reply_text(
+                        "删除 API Key 消息后，使用本地终端完成配置。"
+                    )
+                    return True
+            params = {"secret": text}
         else:
-            asyncio.create_task(complete_authorization())
+            params = {"input": text}
 
-        return CommandResult(
-            outcome="codex_authorization_pending",
-            event_summary=(
-                f"用户为 Codex profile {session.profile_name} 启动了认证。"
-            ),
-            title="Codex OAuth",
-            facts=session.authorization,
+        await self._dispatch_callback_command(
+            update.message,
+            data=f"llm_admin:{action}:{nonce}",
+            command_name="/model_add",
+            command_context=command_context,
+            action=action,
+            interaction_id=nonce,
+            params=params,
         )
+        return True
 
     async def _handle_llm_admin_callback(
         self,
@@ -1455,206 +885,76 @@ class TelegramBot:
         query = update.callback_query
         if query is None or query.message is None:
             return
-        if not await self._require_llm_admin(update):
-            return
         parts = callback_data.split(":", 2)
         if len(parts) != 3:
             await query.message.reply_text("Model 操作已失效，请重新开始。")
             return
         _, action, nonce = parts
-        command_name = {
-            "delete_yes": "/model_delete",
-            "delete_no": "/model_cancel",
-            "cancel": "/model_cancel",
-            "overwrite_no": "/model_cancel",
-            "save_no": "/model_cancel",
-            "codex_start": "/codex_login",
-        }.get(action, "/model_add")
-
-        async def handler(invocation: CommandInvocation) -> CommandResult:
-            return await self._execute_llm_admin_action(
-                invocation,
-                update,
-                context,
-            )
-
+        command_name = (
+            "/model_delete"
+            if action in {"delete_yes", "delete_no"}
+            else "/model_add"
+        )
+        await self._clear_callback_message_markup(
+            query,
+            "model command callback message",
+        )
         await self._dispatch_callback_command(
             query.message,
             data=callback_data,
             command_name=command_name,
             command_context=self._command_context_for_update(update, context),
-            handler=handler,
             action=action,
             interaction_id=nonce,
-            params={"operation": "model_admin"},
+            params={
+                "command": command_name,
+                "action": action,
+                "interaction_id": nonce,
+            },
         )
 
-    async def _execute_llm_admin_action(
+    async def _dispatch_sentinel_alert_action(
         self,
-        invocation: CommandInvocation,
         update: Update,
-        context: ContextTypes.DEFAULT_TYPE,
-    ) -> CommandResult:
-        query = update.callback_query
-        if query is None or query.message is None:
-            return CommandResult(
-                outcome="interaction_expired",
-                text="Model 操作已失效，请重新开始。",
-                severity="error",
-            )
+        context: ContextTypes.DEFAULT_TYPE | None,
+        query: Any,
+        action: str,
+        alert_token: str,
+    ) -> None:
+        """Adapt Telegram callback UI around one shared semantic action."""
 
-        action = invocation.action
-        nonce = invocation.interaction_id
-        key = self._llm_admin_key(update)
-        event_refs = {"interaction_id": nonce}
-
-        if action in {"delete_yes", "delete_no"}:
-            item = self._llm_admin_confirmations.pop(nonce, None)
-            if (
-                item is None
-                or item.get("key") != key
-                or float(item.get("expires_at", 0)) < time.time()
-            ):
-                return CommandResult(
-                    outcome="interaction_expired",
-                    text="删除确认已失效，请重新运行 /model_delete。",
-                    severity="error",
-                    event_refs=event_refs,
-                )
-            await self._clear_callback_message_markup(
+        thinking_message = None
+        if action == "sentinel_alert_analysis":
+            await self._set_callback_message_markup(
                 query,
-                "model delete callback message",
+                self._sentinel_alert_reply_markup(
+                    alert_token,
+                    include_analysis=False,
+                ),
+                "sentinel alert analysis",
             )
-            if action == "delete_no":
-                return self._model_command_service().cancel(True)
-            try:
-                result = await self._model_command_service().delete(
-                    item["profile_name"],
-                    self._profile_actor(update),
+            thinking_message = await query.message.reply_text("⏳")
+        try:
+            result = await self._dispatch_callback_command(
+                query.message,
+                data=f"{action}:{alert_token}",
+                command_name=f"/{action}",
+                command_context=self._command_context_for_update(update, context),
+                action=action,
+                interaction_id=alert_token,
+                params={"action": action, "alert_token": alert_token},
+            )
+            if result.outcome == "sentinel_alert_expired":
+                await self._clear_callback_message_markup(
+                    query,
+                    "expired sentinel alert action",
                 )
-                return replace(result, event_refs=event_refs)
-            except Exception as exc:
-                return CommandResult(
-                    outcome="failed",
-                    title="Model delete failed",
-                    text=user_facing_error_message(
-                        exc,
-                        fallback="删除 model 失败，请重试。",
-                    ),
-                    severity="error",
-                    event_refs=event_refs,
-                )
-
-        session = self._active_llm_admin_session(key)
-        if session is None or session.get("nonce") != nonce:
-            return CommandResult(
-                outcome="interaction_expired",
-                text="model 配置已失效，请重新运行 /model_add。",
-                severity="error",
-                event_refs=event_refs,
-            )
-
-        if action in {"type_openai", "type_codex"}:
-            session["type"] = action.removeprefix("type_")
-            session["step"] = "name"
-            await self._clear_callback_message_markup(
-                query,
-                "model type callback message",
-            )
-            return CommandResult(
-                outcome="model_add_input_requested",
-                title="Add model profile",
-                text="输入 profile 名称。",
-                event_refs=event_refs,
-                facts={
-                    "operation": "model_add",
-                    "stage": "name",
-                    "model_type": session["type"],
-                },
-            )
-        if action in {"cancel", "overwrite_no", "save_no"}:
-            self._llm_admin_sessions.pop(key, None)
-            await self._clear_callback_message_markup(
-                query,
-                "model cancel callback message",
-            )
-            return self._model_command_service().cancel(True)
-        if action == "overwrite_yes":
-            session["overwrite"] = True
-            await self._clear_callback_message_markup(
-                query,
-                "model overwrite callback message",
-            )
-            return self._llm_admin_after_name_result(session)
-        if action == "save_yes":
-            if session.get("step") != "confirm_save":
-                return CommandResult(
-                    outcome="invalid_interaction_state",
-                    text="model 配置状态无效，请重新开始。",
-                    severity="error",
-                    event_refs=event_refs,
-                )
-            saved = dict(session)
-            self._llm_admin_sessions.pop(key, None)
-            await self._clear_callback_message_markup(
-                query,
-                "model save callback message",
-            )
-            try:
-                result = await self._model_command_service().create_openai(
-                    CreateOpenAIProfileRequest(
-                        name=saved["name"],
-                        model=saved["model"],
-                        base_url=saved["base_url"],
-                        api_key=saved.get("api_key", ""),
-                        overwrite_existing=bool(saved.get("existing")),
-                        expected_profile_fingerprint=saved.get(
-                            "expected_fingerprint"
-                        ),
-                    ),
-                    self._profile_actor(update),
-                )
-                return replace(result, event_refs=event_refs)
-            except Exception as exc:
-                return CommandResult(
-                    outcome="failed",
-                    title="Model add failed",
-                    text=user_facing_error_message(
-                        exc,
-                        fallback="保存 model 失败，请重新开始。",
-                    ),
-                    severity="error",
-                    event_refs=event_refs,
-                )
-        if action == "codex_start":
-            saved = dict(session)
-            self._llm_admin_sessions.pop(key, None)
-            await self._clear_callback_message_markup(
-                query,
-                "model Codex callback message",
-            )
-            proxy_update = SimpleNamespace(
-                effective_chat=update.effective_chat,
-                effective_user=update.effective_user,
-                message=query.message,
-            )
-            proxy_context = SimpleNamespace(
-                args=[saved["name"]],
-                bot=context.bot,
-                chatdome_force_codex=True,
-                chatdome_codex_overwrite=saved.get("existing") is not None,
-                chatdome_expected_fingerprint=saved.get("expected_fingerprint"),
-            )
-            result = await self._handle_codex_login(proxy_update, proxy_context)
-            return result or CommandResult(outcome="codex_authorization_started")
-
-        return CommandResult(
-            outcome="invalid_interaction",
-            text="Model 操作已失效，请重新开始。",
-            severity="error",
-            event_refs=event_refs,
-        )
-
+        finally:
+            if thinking_message is not None:
+                try:
+                    await thinking_message.delete()
+                except Exception:
+                    logger.debug("Failed to delete Sentinel analysis progress message")
     async def _clear_callback_message_markup(self, query, context_label: str = "callback message") -> None:
         await self._set_callback_message_markup(query, None, context_label)
 
@@ -1696,14 +996,17 @@ class TelegramBot:
                 await self._handle_llm_admin_callback(update, context, callback_data)
                 return
 
-            if callback_data.startswith("sentinel_alert_analysis:"):
-                alert_token = callback_data.split(":", 1)[1].strip()
-                await self._handle_sentinel_alert_analysis(query, chat_id, alert_token)
-                return
-
-            if callback_data.startswith("sentinel_alert_detail:"):
-                alert_token = callback_data.split(":", 1)[1].strip()
-                await self._handle_sentinel_alert_detail(query, chat_id, alert_token)
+            if callback_data.startswith(
+                ("sentinel_alert_analysis:", "sentinel_alert_detail:")
+            ):
+                action, alert_token = callback_data.split(":", 1)
+                await self._dispatch_sentinel_alert_action(
+                    update,
+                    context,
+                    query,
+                    action,
+                    alert_token.strip(),
+                )
                 return
 
             approval_action = ""
@@ -1756,22 +1059,11 @@ class TelegramBot:
 
             await self._clear_callback_message_markup(query, "approval decision callback message")
 
-            if action == "APPROVE_TASK":
-                business_handler = approve_task_command_result
-                command_name = "/confirm"
-            elif action == "APPROVE":
-                business_handler = approve_command_result
-                command_name = "/confirm"
-            else:
-                business_handler = reject_command_result
-                command_name = "/reject"
-
-            async def handler(invocation: CommandInvocation) -> CommandResult:
-                return await business_handler(
-                    self.agent,
-                    invocation.context,
-                    invocation.args,
-                )
+            command_name = {
+                "APPROVE_TASK": "/confirm_task",
+                "APPROVE": "/confirm",
+                "REJECT": "/reject",
+            }[action]
 
             thinking_msg = await query.message.reply_text("⏳")
             try:
@@ -1782,7 +1074,6 @@ class TelegramBot:
                         command_name=command_name,
                         args=(approval_id,) if approval_id else (),
                         command_context=self._command_context_for_update(update),
-                        handler=handler,
                     ),
                     timeout=90,
                 )
@@ -1806,73 +1097,6 @@ class TelegramBot:
                 )
             )
 
-    async def _handle_details(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Handle /details for the current pending approval."""
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-
-        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
-        return await approval_details_command_result(
-            self.agent,
-            command_context,
-            getattr(context, "args", None) or (),
-        )
-
-    async def _handle_continue(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Handle /continue for a round-limit pause."""
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
-        return await continue_command_result(self.agent, command_context)
-
-    async def _handle_confirm(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Handle /confirm command for high-risk executions."""
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-
-        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
-        return await approve_command_result(
-            self.agent,
-            command_context,
-            getattr(context, "args", None) or (),
-        )
-
-    async def _handle_confirm_task(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Handle /confirm_task for the current task."""
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-
-        command_context = CommandContext(
-            source="telegram",
-            chat_id=update.effective_chat.id,
-        )
-        return await approve_task_command_result(
-            self.agent,
-            command_context,
-            getattr(context, "args", None) or (),
-        )
-
-    async def _handle_reject(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        """Handle /reject command for pending high-risk execution."""
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-
-        command_context = CommandContext(source="telegram", chat_id=update.effective_chat.id)
-        return await reject_command_result(
-            self.agent,
-            command_context,
-            getattr(context, "args", None) or (),
-        )
 
     # ----- Utilities -----
 
@@ -2048,43 +1272,6 @@ class TelegramBot:
         except Exception:
             logger.exception("Failed to record Telegram visible context")
 
-    def _cache_alert_analysis_context(
-        self,
-        *,
-        chat_id: int,
-        alert_text: str,
-        alert_event: Any | None,
-    ) -> str:
-        token = uuid.uuid4().hex[:16]
-        event_payload: Any = None
-        if alert_event is not None:
-            if hasattr(alert_event, "to_dict"):
-                try:
-                    event_payload = alert_event.to_dict()
-                except Exception:
-                    logger.exception("Failed to serialize alert event for analysis")
-                    event_payload = str(alert_event)
-            elif isinstance(alert_event, dict):
-                event_payload = alert_event
-            else:
-                event_payload = str(alert_event)
-
-        self._alert_analysis_cache[token] = {
-            "chat_id": chat_id,
-            "alert_text": alert_text,
-            "event": event_payload,
-            "created_at": time.time(),
-        }
-
-        while len(self._alert_analysis_cache) > self._alert_analysis_cache_max:
-            oldest_token = min(
-                self._alert_analysis_cache,
-                key=lambda key: float(self._alert_analysis_cache[key].get("created_at", 0.0)),
-            )
-            self._alert_analysis_cache.pop(oldest_token, None)
-
-        return token
-
     @staticmethod
     def _sentinel_alert_reply_markup(alert_token: str, *, include_analysis: bool = True) -> InlineKeyboardMarkup:
         row = [
@@ -2102,185 +1289,6 @@ class TelegramBot:
             )
         return InlineKeyboardMarkup([row])
 
-    def _read_environment_profile_for_llm(self, max_chars: int = 6000) -> str:
-        path = self._environment_profile_path
-        try:
-            text = path.read_text(encoding="utf-8").strip()
-        except FileNotFoundError:
-            return f"未找到环境档案: {path}"
-        except OSError as exc:
-            return f"读取环境档案失败: {exc}"
-
-        if not text:
-            return f"环境档案为空: {path}"
-        if len(text) > max_chars:
-            return text[:max_chars] + "\n... (已截断)"
-        return text
-
-    async def _handle_sentinel_alert_analysis(self, query, chat_id: int, alert_token: str) -> None:
-        cached = self._alert_analysis_cache.get(alert_token)
-        if not cached or cached.get("chat_id") != chat_id:
-            await self._clear_callback_message_markup(query, "expired sentinel alert analysis")
-            await self._send_long_message(
-                query.message,
-                "这条告警上下文已过期，请查看 /sentinel_history 或等待下一次告警。",
-            )
-            return
-
-        await self._set_callback_message_markup(
-            query,
-            self._sentinel_alert_reply_markup(alert_token, include_analysis=False),
-            "sentinel alert analysis",
-        )
-        thinking_msg = await query.message.reply_text("⏳")
-        try:
-            env_text = self._read_environment_profile_for_llm()
-            alert_text = str(cached.get("alert_text") or "")
-            event_payload = cached.get("event")
-            if isinstance(event_payload, str):
-                event_text = event_payload
-            else:
-                event_text = json.dumps(event_payload or {}, ensure_ascii=False, indent=2)
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是 ChatDome 的主机安全告警分析助手。"
-                        "只基于提供的环境信息和告警信息分析，不要声称已经执行过命令。"
-                        "输出中文，面向运维人员，简洁、具体、可执行。"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "请分析这条 Sentinel 告警。\n\n"
-                        "要求:\n"
-                        "- 先给出一句风险判断。\n"
-                        "- 点出最值得关注的 IP、用户、端口、时间点和可能原因。\n"
-                        "- 给出下一步核实/处置建议，优先使用只读排查命令；如果需要变更操作，请明确提示需要人工确认。\n"
-                        "- 不要复述卡片里的全部原始内容。\n\n"
-                        f"环境信息:\n{env_text}\n\n"
-                        f"告警卡片:\n{alert_text}\n\n"
-                        f"结构化告警:\n{event_text}"
-                    ),
-                },
-            ]
-            snapshot = await self.agent.get_active_llm_snapshot()
-            response = await asyncio.wait_for(
-                snapshot.client.chat_completion(messages=messages, tools=None),
-                timeout=90,
-            )
-
-            try:
-                from chatdome.agent.tracker import TokenTracker
-                TokenTracker.record_usage(
-                    chat_id=chat_id,
-                    model=getattr(snapshot.client, "model", "unknown"),
-                    action="sentinel_alert_analysis",
-                    prompt_tokens=response.prompt_tokens,
-                    completion_tokens=response.completion_tokens,
-                    total_tokens=response.total_tokens,
-                )
-            except Exception:
-                logger.exception("Failed to record Sentinel alert analysis token usage")
-
-            content = (response.content or "").strip() or "LLM 未返回有效分析。"
-        except TimeoutError:
-            logger.exception("Sentinel alert analysis timed out")
-            content = "告警分析超时，请稍后重试。"
-        except Exception as exc:
-            logger.exception("Sentinel alert analysis failed")
-            content = self._format_error_text(
-                exc,
-                prefix="告警分析失败",
-                fallback="告警分析失败，请稍后重试。",
-            )
-        finally:
-            try:
-                await thinking_msg.delete()
-            except Exception:
-                pass
-
-        await self._send_long_message(query.message, content)
-        self._record_visible_context(
-            chat_id,
-            event_type="sentinel_alert_analysis",
-            user_action="点击告警分析",
-            assistant_summary=content,
-            refs=self._alert_event_reference_fields(cached.get("event")),
-        )
-
-    async def _handle_sentinel_alert_detail(self, query, chat_id: int, alert_token: str) -> None:
-        cached = self._alert_analysis_cache.get(alert_token)
-        if not cached or cached.get("chat_id") != chat_id:
-            await self._clear_callback_message_markup(query, "expired sentinel alert detail")
-            await self._send_long_message(
-                query.message,
-                "告警详情已过期。使用 /sentinel_history 查看告警记录。",
-            )
-            return
-
-        from chatdome.sentinel.alerter import format_alert_detail
-
-        event_data = cached.get("event")
-        detail_text = (
-            format_alert_detail(event_data)
-            if isinstance(event_data, dict)
-            else "暂无详细状态信息。"
-        )
-        await self._send_long_message(query.message, detail_text)
-        self._record_visible_context(
-            chat_id,
-            event_type="sentinel_alert_detail",
-            user_action="查看告警详情",
-            assistant_summary=detail_text,
-            refs=self._alert_event_reference_fields(event_data),
-        )
-
-    @staticmethod
-    def _llm_admin_key(update: Update) -> tuple[int, int]:
-        chat_id = update.effective_chat.id if update.effective_chat else 0
-        user_id = update.effective_user.id if update.effective_user else 0
-        return int(chat_id), int(user_id)
-
-    def _active_llm_admin_session(
-        self,
-        key: tuple[int, int],
-    ) -> dict[str, Any] | None:
-        session = self._llm_admin_sessions.get(key)
-        if session is None:
-            return None
-        if time.time() - float(session.get("created_at", 0)) > 300:
-            self._llm_admin_sessions.pop(key, None)
-            return None
-        return session
-
-    @staticmethod
-    def _profile_actor(update: Update) -> ProfileActor:
-        return ProfileActor(
-            source="telegram",
-            chat_id=update.effective_chat.id if update.effective_chat else 0,
-            user_id=update.effective_user.id if update.effective_user else 0,
-        )
-
-    async def _require_llm_admin(self, update: Update) -> bool:
-        chat = update.effective_chat
-        if chat is None or not self._check_auth(update):
-            return False
-        admin_ids = set(
-            self.config.telegram.admin_chat_ids
-            or self.config.telegram.allowed_chat_ids
-            or []
-        )
-        if getattr(chat, "type", "") == "private" and chat.id in admin_ids:
-            return True
-        message = update.effective_message
-        if message is not None:
-            await message.reply_text(
-                "当前会话没有 model 管理权限。请配置 telegram.admin_chat_ids 或 telegram.allowed_chat_ids。"
-            )
-        return False
 
     def _check_auth(self, update: Update) -> bool:
         """Check if the message sender is authorized."""
@@ -2346,73 +1354,6 @@ class TelegramBot:
         outbound = OutboundMessageBuilder().from_command_result(None, result)
         return "\n".join(TelegramOutboundRenderer().render(outbound).text_parts)
 
-    # ----- Sentinel command handlers -----
-
-    async def _handle_sentinel_mute(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-        return sentinel_mute(
-            self._sentinel,
-            context.args or (),
-            chat_id=update.effective_chat.id,
-            source="telegram",
-        )
-
-    async def _handle_sentinel_resume(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        del context
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-        return sentinel_resume(
-            self._sentinel,
-            chat_id=update.effective_chat.id,
-        )
-
-    async def _handle_sentinel_status(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        del context
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-        return sentinel_status(self._sentinel, self._pack_loader)
-
-    async def _handle_sentinel_trigger(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        del context
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-        status_msg = await update.message.reply_text("⏳")
-        try:
-            result = await sentinel_trigger(self._sentinel)
-        finally:
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-        return result
-
-    async def _handle_sentinel_history(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        del context
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-        result = sentinel_history(self._sentinel)
-        return result
-
-    async def _handle_sentinel_packs(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> CommandResult:
-        del context
-        if not self._check_auth(update):
-            return CommandResult(outcome="unauthorized")
-        result = sentinel_packs(self._pack_loader)
-        return result
-
     async def send_alert(self, chat_id: int, text: str, alert_event: Any | None = None) -> None:
         """Send an alert message to a specific chat. Used by Sentinel Alerter."""
         if self._app is None:
@@ -2423,7 +1364,7 @@ class TelegramBot:
             alert_data: dict[str, Any] = {}
             interaction_id = ""
             if alert_event is not None:
-                interaction_id = self._cache_alert_analysis_context(
+                interaction_id = self._command_service.remember_sentinel_alert(
                     chat_id=chat_id,
                     alert_text=original_text,
                     alert_event=alert_event,

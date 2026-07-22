@@ -11,7 +11,6 @@ from chatdome.slash_commands import (
     CommandResult,
     bind_command_catalog,
     command_catalog,
-    resolve_command_handler,
     toggle_command_echo,
 )
 
@@ -52,9 +51,13 @@ def test_registry_uses_shared_context_logging_and_event_recording(caplog) -> Non
         {
             "event_id": events[0]["event_id"],
             "event_type": "control_command",
+            "request_id": events[0]["request_id"],
+            "phase": "final",
             "source": "cli",
             "actor_id": "local",
             "command": "/stop",
+            "action": "",
+            "interaction_id": "",
             "argument_count": 1,
             "outcome": "task_stopped",
             "display_text": "用户中止了任务。",
@@ -63,7 +66,7 @@ def test_registry_uses_shared_context_logging_and_event_recording(caplog) -> Non
         }
     ]
     assert "Control command received" in caplog.text
-    assert "Control command completed" in caplog.text
+    assert "Control command lifecycle" in caplog.text
     assert "sk-abcdefghijklmnop" not in caplog.text
     assert "sk-abcdefghijklmnop" not in json.dumps(events, ensure_ascii=False)
 
@@ -193,29 +196,19 @@ def test_cli_and_telegram_share_one_command_catalog() -> None:
     assert "/llm_add" in cli_aliases
 
 
-def test_platform_catalogs_bind_to_one_convention_dispatcher() -> None:
+def test_platform_catalogs_bind_to_one_shared_handler() -> None:
     calls = []
 
-    async def help_handler(invocation):
+    async def shared_handler(invocation):
         calls.append(invocation.command.name)
         return CommandResult(outcome="help_shown")
-
-    namespace = {"help_handler": help_handler}
-
-    async def dispatcher(invocation):
-        handler = resolve_command_handler(
-            invocation.command,
-            namespace,
-            suffix="_handler",
-        )
-        return await handler(invocation)
 
     registries = []
     for platform in ("cli", "telegram"):
         registry = CommandRegistry()
-        bind_command_catalog(registry, platform, dispatcher)
+        bind_command_catalog(registry, platform, shared_handler)
         registries.append(registry)
-        assert all(command.handler is dispatcher for command in registry.commands)
+        assert all(command.handler is shared_handler for command in registry.commands)
 
     for registry in registries:
         result = asyncio.run(registry.execute("/help"))

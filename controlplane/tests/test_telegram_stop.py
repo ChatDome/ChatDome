@@ -88,7 +88,10 @@ class TelegramStopTests(unittest.TestCase):
         self.assertEqual(second_message.replies[-1], "任务正在运行。\n发送 /stop 中止。")
 
         stop_message = FakeMessage("/stop")
-        handler = bot._command_handler("stop", bot._handle_stop)
+        handler = bot._command_handler(
+            "stop",
+            command=bot._get_command_registry().resolve_name("/stop"),
+        )
         await handler.callback(FakeUpdate(stop_message), SimpleNamespace(args=[]))
         await asyncio.wait_for(agent.cancelled.wait(), timeout=1)
         await asyncio.sleep(0)
@@ -108,7 +111,18 @@ class TelegramStopTests(unittest.TestCase):
         bot = TelegramBot(ChatDomeConfig(), BlockingAgent())
         stop_message = FakeMessage("/stop")
 
-        result = await bot._handle_stop(FakeUpdate(stop_message), SimpleNamespace())
+        update = FakeUpdate(stop_message)
+        command = bot._get_command_registry().resolve_name("/stop")
+        invocation = bot._platform_adapter.receive_command(
+            raw="/stop",
+            command=command,
+            args=(),
+            context=bot._command_context_for_update(
+                update,
+                SimpleNamespace(args=[]),
+            ),
+        )
+        result = await bot._get_command_registry().execute_invocation(invocation)
 
         self.assertEqual(result.outcome, "no_active_task")
         self.assertEqual(result.text, "No running task.")

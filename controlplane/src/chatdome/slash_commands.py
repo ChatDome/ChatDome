@@ -46,7 +46,7 @@ class CommandContext:
         repr=False,
         compare=False,
     )
-    transport: Any = field(default=None, repr=False, compare=False)
+    capabilities: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -67,6 +67,7 @@ class CommandResult:
     actions: tuple[OutboundAction, ...] = ()
     presentation: Mapping[str, Any] = field(default_factory=dict)
     outbound: OutboundMessage | None = field(default=None, repr=False, compare=False)
+    lifecycle_phase: str = "final"
 
 
 @dataclass(frozen=True)
@@ -245,56 +246,6 @@ class CommandInvocation:
     params: Mapping[str, Any] = field(default_factory=dict)
 
 
-def command_handler_name(
-    command: CommandDef,
-    *,
-    prefix: str = "",
-    suffix: str = "",
-) -> str:
-    """Return the convention-based handler name for one canonical command."""
-
-    key = command.name.removeprefix("/").replace("-", "_")
-    return f"{prefix}{key}{suffix}"
-
-
-def resolve_command_handler(
-    command: CommandDef,
-    target: Any,
-    *,
-    prefix: str = "",
-    suffix: str = "",
-) -> Callable[..., Any]:
-    """Resolve a command handler by the shared command-name convention."""
-
-    name = command_handler_name(command, prefix=prefix, suffix=suffix)
-    if isinstance(target, Mapping):
-        handler = target.get(name)
-    else:
-        handler = getattr(target, name, None)
-    if not callable(handler):
-        raise RuntimeError(f"command handler is not configured: {command.name}")
-    return handler
-
-
-async def dispatch_command_handler(
-    invocation: "CommandInvocation",
-    target: Any,
-    *handler_args: Any,
-    prefix: str = "",
-    suffix: str = "",
-) -> Any:
-    """Invoke a convention-bound command handler for any platform adapter."""
-
-    handler = resolve_command_handler(
-        invocation.command,
-        target,
-        prefix=prefix,
-        suffix=suffix,
-    )
-    result = handler(*(handler_args or (invocation,)))
-    if inspect.isawaitable(result):
-        result = await result
-    return result
 
 
 def bind_command_catalog(
@@ -543,11 +494,10 @@ class CommandRegistry:
 
 async def execute_command(
     invocation: CommandInvocation,
-    handler: Callable[[CommandInvocation], Any] | None = None,
 ) -> CommandResult:
     """Execute one command with uniform logging and session event recording."""
 
-    command_handler = handler or invocation.command.handler
+    command_handler = invocation.command.handler
     context = invocation.context
     command_name = invocation.command.name
     logger.info(
@@ -603,23 +553,35 @@ async def execute_command(
         )
         raise
 
+    return await publish_command_result(invocation, result)
+
+
+async def publish_command_result(
+    invocation: CommandInvocation,
+    result: CommandResult,
+) -> CommandResult:
+    """Build outbound content and persist one command lifecycle result."""
+
     from chatdome.outbound.builders import OutboundMessageBuilder
 
     outbound = result.outbound or OutboundMessageBuilder().from_command_result(
         invocation,
         result,
     )
-    result = replace(result, outbound=outbound)
-    await _record_command_event(invocation, result)
+    completed = replace(result, outbound=outbound)
+    await _record_command_event(invocation, completed)
+    context = invocation.context
     logger.info(
-        "Control command completed source=%s chat_id=%s command=%s outcome=%s request_id=%s",
+        "Control command lifecycle source=%s chat_id=%s command=%s "
+        "phase=%s outcome=%s request_id=%s",
         context.source,
         context.chat_id,
-        command_name,
-        result.outcome,
+        invocation.command.name,
+        completed.lifecycle_phase,
+        completed.outcome,
         context.request_id,
     )
-    return result
+    return completed
 
 
 def coerce_command_result(result: Any) -> CommandResult:
@@ -641,11 +603,15 @@ async def _record_command_event(
         return
     summary = result.event_summary.strip() or _default_event_summary(invocation, result)
     event = {
-        "event_id": invocation.context.request_id,
+        "event_id": uuid.uuid4().hex[:16],
+        "request_id": invocation.context.request_id,
+        "phase": result.lifecycle_phase,
         "event_type": "control_command",
         "source": invocation.context.source,
         "actor_id": invocation.context.actor_id,
         "command": invocation.command.name,
+        "action": invocation.action,
+        "interaction_id": invocation.interaction_id,
         "argument_count": len(invocation.args),
         "outcome": result.outcome,
         "display_text": summary,

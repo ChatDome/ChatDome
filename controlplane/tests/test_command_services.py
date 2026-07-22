@@ -6,6 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from chatdome.command_handlers import (
+    CommandHandlerRuntime,
+    CommandHandlerService,
+)
 from chatdome.agent.result import AgentResult
 from chatdome.config import AIConfig, ChatDomeConfig
 from chatdome.errors import LLMProfileDeleteForbidden
@@ -18,6 +22,7 @@ from chatdome.llm.profile_admin import (
 from chatdome.model_commands import ModelCommandService
 from chatdome.outbound.builders import EnvironmentFactsBuilder
 from chatdome.outbound.models import (
+    CodexAuthorizationFacts,
     ActionKind,
     EnvironmentFacts,
     OutboundAction,
@@ -26,9 +31,11 @@ from chatdome.outbound.models import (
 from chatdome.platform_adapters import CLIPlatformAdapter, TelegramPlatformAdapter
 from chatdome.slash_commands import (
     CommandContext,
+    CommandInvocation,
     CommandDef,
     CommandRegistry,
     CommandResult,
+    execute_command,
     command_catalog,
     continue_command_result,
 )
@@ -311,7 +318,6 @@ def test_platform_adapters_share_invocation_and_outbound_content() -> None:
 
     cli = CLIPlatformAdapter(cli_sender)
     telegram = TelegramPlatformAdapter(telegram_sender)
-    command = CommandDef("/test", "test", "test")
 
     async def handler(_invocation):
         return CommandResult(
@@ -327,6 +333,8 @@ def test_platform_adapters_share_invocation_and_outbound_content() -> None:
             ),
         )
 
+    command = CommandDef("/test", "test", "test", handler=handler)
+
     cli_invocation = cli.receive_command(
         raw="/test",
         command=command,
@@ -339,9 +347,9 @@ def test_platform_adapters_share_invocation_and_outbound_content() -> None:
         args=(),
         context=CommandContext(source="telegram"),
     )
-    cli_result = asyncio.run(cli.dispatch(cli_invocation, handler=handler))
+    cli_result = asyncio.run(cli.dispatch(cli_invocation))
     telegram_result = asyncio.run(
-        telegram.dispatch(telegram_invocation, handler=handler, target=object())
+        telegram.dispatch(telegram_invocation, target=object())
     )
 
     for result in (cli_result, telegram_result):
@@ -393,3 +401,240 @@ def test_telegram_callback_builds_structured_command_invocation() -> None:
     assert invocation.action == "save_yes"
     assert invocation.interaction_id == "interaction-1"
     assert invocation.params == {"operation": "model_admin"}
+
+def test_model_workflow_returns_same_overwrite_semantics_for_cli_and_telegram() -> None:
+    manager = FakeManager()
+    admin = FakeProfileAdmin()
+    admin.summaries["base"] = ProfileSummary(
+        name="base",
+        provider="openai",
+        api_mode="openai_api",
+        model="gpt-4o",
+        base_url="https://api.openai.com/v1",
+        fingerprint="base-fingerprint",
+        active=True,
+        has_api_key=True,
+    )
+    model_service = ModelCommandService(manager, admin)
+    handler_service = CommandHandlerService(
+        lambda _invocation: CommandHandlerRuntime(
+            model_service=model_service,
+            model_admin_allowed=True,
+        )
+    )
+    command = CommandDef(
+        "/model_add",
+        "add",
+        "model",
+        handler=handler_service.handle,
+    )
+
+    results = []
+    for source in ("cli", "telegram"):
+        invocation = CommandInvocation(
+            raw="/model_add",
+            raw_name="/model_add",
+            args=(),
+            arg_text="",
+            command=command,
+            context=CommandContext(
+                source=source,
+                chat_id=1,
+                actor_id="2",
+                capabilities=frozenset({"model_admin"}),
+            ),
+            action="submit_openai",
+            interaction_id=f"{source}-interaction",
+            params={
+                "name": "base",
+                "model": "gpt-4o",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "",
+            },
+        )
+        results.append(asyncio.run(handler_service.handle(invocation)))
+
+    assert [result.outcome for result in results] == [
+        "model_overwrite_confirmation_requested",
+        "model_overwrite_confirmation_requested",
+    ]
+    assert results[0].text == results[1].text
+    assert [action.params["action"] for action in results[0].actions] == [
+        "overwrite_yes",
+        "overwrite_no",
+    ]
+
+
+def test_command_handler_service_maps_domain_errors_identically() -> None:
+    manager = FakeManager()
+    admin = FakeProfileAdmin()
+    admin.summaries["base"] = ProfileSummary(
+        name="base",
+        provider="openai",
+        api_mode="openai_api",
+        model="gpt-4o",
+        base_url="https://api.openai.com/v1",
+        fingerprint="base-fingerprint",
+        active=True,
+        has_api_key=True,
+    )
+    service = CommandHandlerService(
+        lambda _invocation: CommandHandlerRuntime(
+            model_service=ModelCommandService(manager, admin),
+            model_admin_allowed=True,
+        )
+    )
+    command = CommandDef(
+        "/model_delete",
+        "delete",
+        "model",
+        handler=service.handle,
+    )
+
+    results = []
+    for source in ("cli", "telegram"):
+        invocation = CommandInvocation(
+            raw="/model_delete base",
+            raw_name="/model_delete",
+            args=("base",),
+            arg_text="base",
+            command=command,
+            context=CommandContext(source=source, chat_id=1, actor_id="2"),
+        )
+        results.append(asyncio.run(service.handle(invocation)))
+
+    assert results[0].outcome == results[1].outcome == "failed"
+    assert results[0].title == results[1].title == "Model delete failed"
+    assert results[0].text == results[1].text
+    assert results[0].facts["error_code"] == "llm.profile_delete_forbidden"
+
+
+def test_env_command_uses_central_runtime_path_service(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CHATDOME_DATA_DIR", str(tmp_path))
+    legacy = tmp_path / "environment_profile.md"
+    legacy.write_text("- OS family: Linux\n- Available: bash", encoding="utf-8")
+    service = CommandHandlerService(lambda _invocation: CommandHandlerRuntime())
+    command = CommandDef("/env", "env", "context", handler=service.handle)
+    invocation = CommandInvocation(
+        raw="/env",
+        raw_name="/env",
+        args=(),
+        arg_text="",
+        command=command,
+        context=CommandContext(source="cli"),
+    )
+
+    result = asyncio.run(service.handle(invocation))
+
+    assert result.outcome == "environment_shown"
+    assert result.facts.available
+    assert Path(result.facts.profile_path).name == "profile.md"
+    assert result.facts.available_commands == ("bash",)
+
+
+def test_codex_oauth_deferred_lifecycle_records_pending_and_final_events() -> None:
+    class DeferredOAuth:
+        def __init__(self) -> None:
+            self.completed = False
+
+        async def begin(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                profile_name="codex",
+                authorization=CodexAuthorizationFacts(
+                    profile_name="codex",
+                    verification_uri="https://example.test/device",
+                    user_code="CODE-123",
+                    expires_in=600,
+                ),
+            )
+
+        async def complete(self, _session):
+            self.completed = True
+
+    async def run_case():
+        events = []
+        scheduled = []
+        published = []
+        oauth = DeferredOAuth()
+        model_service = ModelCommandService(FakeManager(), FakeProfileAdmin())
+        runtime = CommandHandlerRuntime(
+            model_service=model_service,
+            codex_oauth=oauth,
+            config=ChatDomeConfig(),
+            model_admin_allowed=True,
+            defer_commands=True,
+            schedule_task=scheduled.append,
+            publish_deferred=published.append,
+        )
+        service = CommandHandlerService(lambda _invocation: runtime)
+        command = CommandDef(
+            "/codex_login",
+            "login",
+            "model",
+            handler=service.handle,
+        )
+        context = CommandContext(
+            source="telegram",
+            chat_id=1,
+            actor_id="2",
+            request_id="request-shared",
+            event_recorder=events.append,
+            capabilities=frozenset({"model_admin"}),
+        )
+        invocation = CommandInvocation(
+            raw="/codex_login",
+            raw_name="/codex_login",
+            args=(),
+            arg_text="",
+            command=command,
+            context=context,
+        )
+
+        pending = await execute_command(invocation)
+        assert pending.lifecycle_phase == "pending"
+        assert len(scheduled) == 1
+
+        await scheduled[0]
+
+        assert oauth.completed
+        assert [event["phase"] for event in events] == ["pending", "final"]
+        assert {event["request_id"] for event in events} == {"request-shared"}
+        assert len({event["event_id"] for event in events}) == 2
+        assert events[0]["outcome"] == "codex_authorization_pending"
+        assert events[1]["outcome"] == "codex_authenticated"
+        assert len(published) == 1
+        assert published[0].outcome == "codex_authenticated"
+        assert published[0].outbound is not None
+
+    asyncio.run(run_case())
+
+def test_semantic_action_registry_is_platform_independent() -> None:
+    service = CommandHandlerService(lambda _invocation: CommandHandlerRuntime())
+    token = service.remember_sentinel_alert(
+        chat_id=7,
+        alert_text="alert",
+        alert_event="invalid",
+    )
+    action = service.action_definition("sentinel_alert_detail")
+    assert action is not None
+    assert "sentinel_alert_detail" in service.registered_actions
+    invocation = CommandInvocation(
+        raw=f"sentinel_alert_detail:{token}",
+        raw_name=action.name,
+        args=(),
+        arg_text="",
+        command=action,
+        context=CommandContext(source="feishu", chat_id=7),
+        action="sentinel_alert_detail",
+        interaction_id=token,
+        params={"alert_token": token},
+    )
+
+    result = asyncio.run(service.handle(invocation))
+
+    assert result.outcome == "sentinel_alert_detail_shown"
+    assert result.text == "暂无详细状态信息。"
+    assert result.visible_to_agent

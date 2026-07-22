@@ -16,6 +16,7 @@ import stat
 import sys
 import time
 import traceback
+import uuid
 import urllib.parse
 import urllib.request
 from dataclasses import replace
@@ -48,6 +49,10 @@ from chatdome import __version__
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.agent.result import AgentResult, coerce_agent_result
 from chatdome.agent.session import record_persisted_control_event
+from chatdome.command_handlers import (
+    CommandHandlerRuntime,
+    CommandHandlerService,
+)
 from chatdome.outbound.builders import (
     EnvironmentFactsBuilder,
     OutboundMessageBuilder,
@@ -59,33 +64,12 @@ from chatdome.outbound.renderers.terminal import TerminalOutboundRenderer
 from chatdome.platform_adapters import CLIPlatformAdapter
 from chatdome.slash_commands import (
     CommandContext,
-    abandon_command_result,
-    approval_details_command_result,
-    approve_command_result,
-    approve_task_command_result,
-    audit_command_result,
     bind_command_catalog,
-    clear_session_command_result,
-    command_echo_command_result,
-    command_help_result,
-    continue_command_result,
-    dispatch_command_handler,
-    environment_command_result,
-    execute_engram_command,
     format_model_profiles,
     format_user_command_audit_events,
     get_user_command_audit_events,
     parse_audit_limit,
     parse_details_options,
-    reject_command_result,
-    sentinel_history,
-    sentinel_mute,
-    sentinel_packs,
-    sentinel_resume,
-    sentinel_status,
-    sentinel_trigger,
-    stop_task_command_result,
-    token_usage_command_result,
 )
 from chatdome.config import AIConfig, validate_profile_name
 from chatdome.errors import ChatDomeError, user_facing_error_message
@@ -674,144 +658,18 @@ def _build_terminal_command_registry(
     def command_context() -> CommandContext:
         return _terminal_command_context(runtime_provider)
 
+    adapter = platform_adapter or _terminal_platform_adapter()
+
     async def render_command_result(
         _invocation: CommandInvocation,
         result: CommandResult,
     ) -> None:
-        adapter = platform_adapter or _terminal_platform_adapter()
         await adapter.deliver_result(result)
 
     registry = CommandRegistry(
         context_factory=command_context,
         result_handler=render_command_result,
     )
-
-    def require_provider() -> Any:
-        if runtime_provider is None:
-            raise RuntimeError("terminal runtime unavailable")
-        return runtime_provider
-
-    async def help_handler(_invocation: CommandInvocation) -> CommandResult:
-        return command_help_result("cli")
-
-    async def clear_handler(invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        return clear_session_command_result(runtime.agent, invocation.context)
-
-    async def exit_handler(_invocation: CommandInvocation) -> CommandResult:
-        return CommandResult(keep_running=False)
-
-    async def stop_handler(_invocation: CommandInvocation) -> CommandResult:
-        return await stop_task_command_result(stop_request_handler)
-
-    async def env_handler(_invocation: CommandInvocation) -> CommandResult:
-        return environment_command_result(
-            ENV_PROFILE_PATH,
-            fallback_paths=(LEGACY_ENV_PROFILE_PATH,),
-        )
-
-    async def audit_handler(invocation: CommandInvocation) -> CommandResult:
-        _sync_terminal_runtime_paths()
-        return audit_command_result(invocation.context, invocation.args)
-
-    async def token_handler(invocation: CommandInvocation) -> CommandResult:
-        return token_usage_command_result(invocation.context)
-
-    async def cmd_echo_handler(invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        return command_echo_command_result(
-            runtime.agent,
-            invocation.context,
-        )
-
-    async def model_handler(invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        service = model_command_service(runtime, "terminal:model")
-        if not invocation.args:
-            return service.list_profiles()
-        try:
-            return await service.switch(
-                invocation.args[0],
-                ProfileActor(source="terminal:model", chat_id=runtime.chat_id),
-            )
-        except Exception as exc:
-            return CommandResult(
-                outcome="failed",
-                title="Model switch failed",
-                text=_terminal_model_error_text(exc),
-                severity="error",
-            )
-
-    async def model_list_handler(_invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        return model_command_service(runtime, "cli:model_list").list_profiles()
-
-    async def details_handler(invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        return await approval_details_command_result(
-            runtime.agent, invocation.context, invocation.args
-        )
-
-
-    async def confirm_handler(invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        return await approve_command_result(
-            runtime.agent, invocation.context, invocation.args
-        )
-
-    async def confirm_task_handler(invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        return await approve_task_command_result(
-            runtime.agent, invocation.context, invocation.args
-        )
-
-    async def continue_handler(invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        return await continue_command_result(runtime.agent, invocation.context)
-
-    async def reject_handler(invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        return await reject_command_result(
-            runtime.agent, invocation.context, invocation.args
-        )
-
-    async def engram_handler(invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        return execute_engram_command(runtime.agent, invocation.args)
-
-    async def sentinel_status_handler(_invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        return sentinel_status(runtime.sentinel, runtime.pack_loader)
-
-    async def sentinel_trigger_handler(_invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        return await sentinel_trigger(runtime.sentinel)
-
-    async def sentinel_history_handler(_invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        return sentinel_history(runtime.sentinel)
-
-    async def sentinel_packs_handler(_invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        return sentinel_packs(runtime.pack_loader)
-
-    async def sentinel_mute_handler(invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        result = sentinel_mute(
-            runtime.sentinel,
-            invocation.args,
-            chat_id=runtime.chat_id,
-            source="cli",
-        )
-        _request_reload(["sentinel"], "cli:/sentinel_mute")
-        return result
-
-    async def sentinel_resume_handler(_invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        result = sentinel_resume(runtime.sentinel, chat_id=runtime.chat_id)
-        _request_reload(["sentinel"], "cli:/sentinel_resume")
-        return result
-
 
     async def reload_model_manager(runtime: _TerminalChatRuntime) -> None:
         manager = _get_terminal_model_manager(runtime)
@@ -822,167 +680,136 @@ def _build_terminal_command_registry(
             if inspect.isawaitable(reloaded):
                 await reloaded
 
-    def model_command_service(
-        runtime: _TerminalChatRuntime,
-        source: str,
-    ) -> ModelCommandService:
-        return ModelCommandService(
-            _get_terminal_model_manager(runtime),
-            _profile_admin_service(source),
-            runtime_sync=lambda: reload_model_manager(runtime),
-        )
+    def command_runtime(invocation: CommandInvocation) -> CommandHandlerRuntime:
+        _sync_terminal_runtime_paths()
+        lightweight = {"/help", "/exit", "/env", "/audit", "/token", "/stop"}
+        runtime = None
+        if runtime_provider is not None:
+            runtime = getattr(runtime_provider, "runtime", None)
+            if runtime is None and invocation.command.name not in lightweight:
+                runtime = runtime_provider.get()
 
-    async def run_codex_auth(
-        runtime: _TerminalChatRuntime,
-        profile_name: str,
-        source: str,
-    ) -> CommandResult:
-        service = CodexOAuthService(_profile_admin_service(source))
-        config = _load_terminal_chat_config()
-        manager = _get_terminal_model_manager(runtime)
-        active_profile = (
-            manager.get_active_profile_name() if manager is not None else ""
-        )
-        session = await service.begin(
-            config,
-            ProfileActor(source=source, chat_id=runtime.chat_id),
-            requested_profile=profile_name,
-            active_profile=active_profile,
-        )
-        pending = CommandResult(
-            outcome="codex_authorization_pending",
-            title="Codex OAuth",
-            facts=session.authorization,
-        )
-        pending = replace(
-            pending,
-            outbound=OutboundMessageBuilder().from_command_result(None, pending),
-        )
-        _render_terminal_outbound(pending.outbound)
-        await service.complete(session)
-        await reload_model_manager(runtime)
-        return CommandResult(
-            outcome="codex_authenticated",
-            event_summary=(
-                f"用户完成了 Codex profile {session.profile_name} 认证。"
+        model_service = None
+        codex_oauth = None
+        config = None
+        actor = None
+        if runtime is not None:
+            source = (
+                "terminal:model"
+                if invocation.command.name == "/model"
+                else f"cli:{invocation.command.name.removeprefix('/')}"
+            )
+            profile_admin = _profile_admin_service(source)
+            model_service = ModelCommandService(
+                _get_terminal_model_manager(runtime),
+                profile_admin,
+                runtime_sync=lambda: reload_model_manager(runtime),
+            )
+            codex_oauth = CodexOAuthService(profile_admin)
+            actor = ProfileActor(source=source, chat_id=runtime.chat_id)
+            if invocation.command.category == "model":
+                config = _load_terminal_chat_config()
+
+        return CommandHandlerRuntime(
+            agent=getattr(runtime, "agent", None),
+            model_service=model_service,
+            codex_oauth=codex_oauth,
+            config=config,
+            sentinel=getattr(runtime, "sentinel", None),
+            pack_loader=getattr(runtime, "pack_loader", None),
+            profile_actor=actor,
+            cancel_request=stop_request_handler,
+            sync_model=(
+                (lambda: reload_model_manager(runtime))
+                if runtime is not None
+                else None
             ),
-            title="Codex OAuth",
-            text=f"Codex profile authenticated: {session.profile_name}",
+            reload_domains=lambda domains, reason: _request_reload(list(domains), reason),
+            publish_deferred=lambda result: adapter.deliver_result(result),
+            defer_commands=False,
+            model_admin_allowed=True,
         )
 
-    async def model_delete_handler(invocation: CommandInvocation) -> CommandResult:
-        if len(invocation.args) != 1:
-            return CommandResult(
-                outcome="invalid_arguments",
-                text="Usage: /model_delete <profile>",
-                severity="error",
-            )
-        runtime = require_provider().get()
-        try:
-            return await model_command_service(runtime, "cli:model_delete").delete(
-                invocation.args[0],
-                ProfileActor(source="cli:model_delete", chat_id=runtime.chat_id),
-            )
-        except Exception as exc:
-            return CommandResult(
-                outcome="failed",
-                title="Model delete failed",
-                text=user_facing_error_message(
-                    exc,
-                    fallback="Model profile could not be deleted.",
-                ),
-                severity="error",
-            )
-
-    async def model_cancel_handler(_invocation: CommandInvocation) -> CommandResult:
-        return ModelCommandService.cancel(False)
-
-    async def codex_login_handler(invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        profile = invocation.args[0] if invocation.args else ""
-        try:
-            return await run_codex_auth(runtime, profile, "cli:codex_login")
-        except Exception as exc:
-            return CommandResult(
-                outcome="failed",
-                title="Codex OAuth failed",
-                text=user_facing_error_message(
-                    exc,
-                    fallback="Codex authentication failed.",
-                ),
-                severity="error",
-            )
-
-    async def model_add_handler(_invocation: CommandInvocation) -> CommandResult:
-        runtime = require_provider().get()
-        profile_type = input("Model type [openai/codex]: ").strip().lower() or "openai"
-        if profile_type == "codex":
-            profile = input("Profile [codex]: ").strip() or "codex"
-            try:
-                return await run_codex_auth(runtime, profile, "cli:model_add")
-            except Exception as exc:
-                return CommandResult(
-                    outcome="failed",
-                    title="Codex OAuth failed",
-                    text=user_facing_error_message(
-                        exc,
-                        fallback="Codex authentication failed.",
-                    ),
-                    severity="error",
-                )
-        if profile_type != "openai":
-            return CommandResult(
-                outcome="invalid_arguments",
-                text="Model type must be openai or codex.",
-                severity="error",
-            )
-
-        profile = input("Profile: ").strip()
-        model = input("Model: ").strip()
-        base_url = (
-            input("Base URL [https://api.openai.com/v1]: ").strip()
-            or "https://api.openai.com/v1"
-        )
-        api_key = getpass.getpass("API key: ").strip()
-        try:
-            return await model_command_service(runtime, "cli:model_add").create_openai(
-                CreateOpenAIProfileRequest(
-                    name=profile,
-                    model=model,
-                    base_url=base_url,
-                    api_key=api_key,
-                    temperature=0.1,
-                    max_tokens=2000,
-                ),
-                ProfileActor(source="cli:model_add", chat_id=runtime.chat_id),
-            )
-        except Exception as exc:
-            return CommandResult(
-                outcome="failed",
-                title="Model add failed",
-                text=user_facing_error_message(
-                    exc,
-                    fallback="Model profile could not be saved.",
-                ),
-                severity="error",
-            )
-
-    handler_namespace = dict(locals())
-
-    async def dispatch_handler(invocation: CommandInvocation) -> CommandResult:
-        return await dispatch_command_handler(
-            invocation,
-            handler_namespace,
-            suffix="_handler",
-        )
-
+    service = CommandHandlerService(command_runtime)
     bind_command_catalog(
         registry,
         "cli",
-        dispatch_handler,
+        service.handle,
         completers={"/model": _terminal_model_completion_items},
     )
+
+    async def adapt_invocation(invocation: CommandInvocation) -> CommandInvocation:
+        if invocation.command.name != "/model_add" or invocation.action:
+            return invocation
+        profile_type = input("Model type [openai/codex]: ").strip().lower() or "openai"
+        profile = input("Profile: ").strip() or ("codex" if profile_type == "codex" else "")
+        params: dict[str, Any] = {"name": profile}
+        if profile_type == "openai":
+            params.update(
+                {
+                    "model": input("Model: ").strip(),
+                    "base_url": (
+                        input("Base URL [https://api.openai.com/v1]: ").strip()
+                        or "https://api.openai.com/v1"
+                    ),
+                    "api_key": getpass.getpass("API key: ").strip(),
+                }
+            )
+        return replace(
+            invocation,
+            action=f"submit_{profile_type}",
+            interaction_id=uuid.uuid4().hex[:12],
+            params=params,
+        )
+
+    async def resolve_action(
+        invocation: CommandInvocation,
+        result: CommandResult,
+    ) -> CommandInvocation | None:
+        if invocation.command.category != "model" or not result.actions:
+            return None
+        actions = list(result.actions)
+        selected = None
+        if any(action.kind == ActionKind.SELECT for action in actions):
+            value = input("Select [openai/codex/cancel]: ").strip().lower()
+            selected = next(
+                (
+                    action
+                    for action in actions
+                    if str(action.params.get("action", "")).removeprefix("type_") == value
+                ),
+                None,
+            )
+        else:
+            value = input("Confirm? [y/N]: ").strip().lower()
+            kinds = {ActionKind.CONFIRM} if value in {"y", "yes"} else {ActionKind.CANCEL}
+            selected = next((action for action in actions if action.kind in kinds), None)
+        if selected is None:
+            selected = next((action for action in actions if action.kind == ActionKind.CANCEL), None)
+        if selected is None:
+            return None
+        params = dict(selected.params)
+        command_name = str(params.get("command") or invocation.command.name)
+        command = registry.resolve_name(command_name)
+        if command is None:
+            return None
+        return adapter.receive_command(
+            raw=str(selected.token or command.name),
+            command=command,
+            args=(),
+            context=invocation.context,
+            action=str(params.get("action") or ""),
+            interaction_id=str(params.get("interaction_id") or ""),
+            params=params,
+        )
+
+    adapter.configure_interactions(
+        invocation_transformer=adapt_invocation,
+        action_resolver=resolve_action,
+    )
+    registry.command_handler_service = service
     return registry
+
 
 
 def _terminal_command_specs() -> list[tuple[str, str]]:
@@ -1375,27 +1202,25 @@ async def _dispatch_terminal_interaction(
     runtime: _TerminalChatRuntime,
     command_name: str,
     args: tuple[str, ...],
-    handler: Any,
+    *,
+    action: str = "",
 ) -> CommandResult:
-    """Run terminal shortcuts through the shared command pipeline."""
+    """Run terminal shortcuts through the canonical command service."""
 
     provider = _StaticTerminalRuntimeProvider(runtime)
     adapter = _terminal_platform_adapter()
-    command = CommandDef(
-        name=command_name,
-        description="",
-        category="interaction",
-    )
+    registry = _build_terminal_command_registry(provider, platform_adapter=adapter)
+    command = registry.resolve_name(command_name)
+    if command is None:
+        raise RuntimeError(f"command is not registered: {command_name}")
     invocation = adapter.receive_command(
         raw=" ".join((command_name, *args)),
         command=command,
         args=args,
         context=_terminal_command_context(provider),
+        action=action,
     )
-    return await adapter.dispatch(
-        invocation,
-        handler=handler,
-    )
+    return await registry.execute_invocation(invocation)
 
 
 async def _show_terminal_details(
@@ -1412,20 +1237,7 @@ async def _show_terminal_details(
         for value in (approval_id, "full" if full else None)
         if value is not None
     )
-
-    async def handler(invocation: CommandInvocation) -> CommandResult:
-        return await approval_details_command_result(
-            runtime.agent,
-            invocation.context,
-            invocation.args,
-        )
-
-    result = await _dispatch_terminal_interaction(
-        runtime,
-        "/details",
-        args,
-        handler,
-    )
+    result = await _dispatch_terminal_interaction(runtime, "/details", args)
     return result.outcome == "details_shown"
 
 
@@ -1434,57 +1246,21 @@ async def _resolve_terminal_confirm(
     approval_id: str | None,
 ) -> str:
     args = (approval_id,) if approval_id else ()
-
-    async def handler(invocation: CommandInvocation) -> CommandResult:
-        return await approve_command_result(
-            runtime.agent,
-            invocation.context,
-            invocation.args,
-        )
-
-    result = await _dispatch_terminal_interaction(
-        runtime,
-        "/confirm",
-        args,
-        handler,
-    )
+    result = await _dispatch_terminal_interaction(runtime, "/confirm", args)
     return result.state or ChatSessionState.IDLE.value
+
 
 async def _resolve_terminal_confirm_task(
     runtime: _TerminalChatRuntime,
     approval_id: str | None,
 ) -> str:
     args = (approval_id,) if approval_id else ()
-
-    async def handler(invocation: CommandInvocation) -> CommandResult:
-        return await approve_task_command_result(
-            runtime.agent,
-            invocation.context,
-            invocation.args,
-        )
-
-    result = await _dispatch_terminal_interaction(
-        runtime,
-        "/confirm_task",
-        args,
-        handler,
-    )
+    result = await _dispatch_terminal_interaction(runtime, "/confirm_task", args)
     return result.state or ChatSessionState.IDLE.value
 
 
 async def _resolve_terminal_continue(runtime: _TerminalChatRuntime) -> str:
-    async def handler(invocation: CommandInvocation) -> CommandResult:
-        return await continue_command_result(
-            runtime.agent,
-            invocation.context,
-        )
-
-    result = await _dispatch_terminal_interaction(
-        runtime,
-        "/continue",
-        (),
-        handler,
-    )
+    result = await _dispatch_terminal_interaction(runtime, "/continue", ())
     return result.state or ChatSessionState.IDLE.value
 
 
@@ -1493,35 +1269,16 @@ async def _resolve_terminal_reject(
     approval_id: str | None,
 ) -> str:
     args = (approval_id,) if approval_id else ()
-
-    async def handler(invocation: CommandInvocation) -> CommandResult:
-        return await reject_command_result(
-            runtime.agent,
-            invocation.context,
-            invocation.args,
-        )
-
-    result = await _dispatch_terminal_interaction(
-        runtime,
-        "/reject",
-        args,
-        handler,
-    )
+    result = await _dispatch_terminal_interaction(runtime, "/reject", args)
     return result.state or ChatSessionState.IDLE.value
 
 
 async def _resolve_terminal_abandon(runtime: _TerminalChatRuntime) -> str:
-    async def handler(invocation: CommandInvocation) -> CommandResult:
-        return await abandon_command_result(
-            runtime.agent,
-            invocation.context,
-        )
-
     result = await _dispatch_terminal_interaction(
         runtime,
         "/reject",
         (),
-        handler,
+        action="abandon",
     )
     return result.state or ChatSessionState.IDLE.value
 

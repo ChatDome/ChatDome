@@ -18,6 +18,8 @@ from chatdome.slash_commands import (
     CommandResult,
     execute_command,
 )
+InvocationTransformer = Callable[[CommandInvocation], Any]
+ActionResolver = Callable[[CommandInvocation, CommandResult], Any]
 
 
 RenderedSender = Callable[[Any, RenderedMessage], Any]
@@ -96,12 +98,11 @@ class PlatformAdapter(ABC):
         self,
         invocation: CommandInvocation,
         *,
-        handler: Callable[[CommandInvocation], Any] | None = None,
         target: Any = None,
     ) -> CommandResult:
         """Run one invocation through the shared executor and platform egress."""
 
-        result = await execute_command(invocation, handler)
+        result = await execute_command(invocation)
         await self.deliver_result(result, target=target)
         return result
 
@@ -117,12 +118,27 @@ class CLIPlatformAdapter(PlatformAdapter):
         *,
         ascii_mode: bool = False,
         full: bool = False,
+        invocation_transformer: InvocationTransformer | None = None,
+        action_resolver: ActionResolver | None = None,
     ) -> None:
         super().__init__(sender)
         self._renderer = TerminalOutboundRenderer(
             ascii_mode=ascii_mode,
             full=full,
         )
+        self._invocation_transformer = invocation_transformer
+        self._action_resolver = action_resolver
+
+    def configure_interactions(
+        self,
+        *,
+        invocation_transformer: InvocationTransformer | None = None,
+        action_resolver: ActionResolver | None = None,
+    ) -> None:
+        """Configure platform-owned synchronous input and action collection."""
+
+        self._invocation_transformer = invocation_transformer
+        self._action_resolver = action_resolver
 
     def receive_terminal_input(
         self,
@@ -151,7 +167,25 @@ class CLIPlatformAdapter(PlatformAdapter):
         )
         if invocation is None:
             return CommandResult(handled=False)
-        return await registry.execute_invocation(invocation)
+        if self._invocation_transformer is not None:
+            transformed = self._invocation_transformer(invocation)
+            if inspect.isawaitable(transformed):
+                transformed = await transformed
+            if transformed is not None:
+                invocation = transformed
+
+        result = await registry.execute_invocation(invocation)
+        for _ in range(8):
+            if self._action_resolver is None:
+                break
+            followup = self._action_resolver(invocation, result)
+            if inspect.isawaitable(followup):
+                followup = await followup
+            if followup is None:
+                break
+            invocation = followup
+            result = await registry.execute_invocation(invocation)
+        return result
 
     def render(self, message: OutboundMessage) -> RenderedMessage:
         return self._renderer.render(message)
