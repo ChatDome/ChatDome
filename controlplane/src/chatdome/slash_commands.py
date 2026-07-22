@@ -82,7 +82,6 @@ class CommandDef:
     keywords: tuple[str, ...] = ()
     handler: Callable[["CommandInvocation"], Any] | None = None
     completer: Callable[[str], Iterable[CompletionItem | str]] | None = None
-    platforms: tuple[str, ...] = ("cli", "telegram")
 
     @property
     def usage(self) -> str:
@@ -90,22 +89,11 @@ class CommandDef:
 
         return f"{self.name} {self.args_hint}".strip()
 
-    def supports(self, platform: str) -> bool:
-        """Return whether this command is exposed on a platform."""
-
-        return str(platform or "").strip().lower() in self.platforms
 
 
 COMMAND_CATALOG: tuple[CommandDef, ...] = (
     CommandDef("/help", "Show commands", "basic", aliases=("/start",)),
     CommandDef("/clear", "Clear the current session", "basic"),
-    CommandDef(
-        "/exit",
-        "Exit terminal chat",
-        "basic",
-        aliases=("/quit",),
-        platforms=("cli",),
-    ),
     CommandDef("/stop", "Stop the current task", "control"),
     CommandDef("/env", "Show the runtime environment", "context"),
     CommandDef("/audit", "Show recent command audit events", "context", args_hint="[N]"),
@@ -190,24 +178,24 @@ COMMAND_CATALOG: tuple[CommandDef, ...] = (
 )
 
 
-def command_catalog(platform: str) -> tuple[CommandDef, ...]:
-    """Return the canonical command definitions available on a platform."""
+def command_catalog(_platform: str = "") -> tuple[CommandDef, ...]:
+    """Return the platform-independent business command catalog."""
 
-    return tuple(command for command in COMMAND_CATALOG if command.supports(platform))
+    return COMMAND_CATALOG
 
 
-def format_command_help(platform: str) -> str:
-    """Render one command catalog as platform-neutral plain text."""
+def format_command_help(_platform: str = "") -> str:
+    """Render the shared business command catalog as plain text."""
 
     lines = ["Commands:"]
-    for command in command_catalog(platform):
+    for command in COMMAND_CATALOG:
         aliases = f" ({', '.join(command.aliases)})" if command.aliases else ""
         lines.append(f"  {command.usage}{aliases}  {command.description}")
     return "\n".join(lines)
 
 
-def command_help_result(platform: str) -> CommandResult:
-    """Return one shared help result with platform availability as Facts."""
+def command_help_result(_platform: str = "") -> CommandResult:
+    """Return one platform-independent help result and Facts contract."""
 
     facts = CommandHelpFacts(
         commands=tuple(
@@ -217,13 +205,13 @@ def command_help_result(platform: str) -> CommandResult:
                 aliases=command.aliases,
                 description=command.description,
             )
-            for command in command_catalog(platform)
+            for command in COMMAND_CATALOG
         )
     )
     return CommandResult(
         outcome="help_shown",
         title="Commands",
-        text=format_command_help(platform),
+        text=format_command_help(),
         facts=facts,
     )
 

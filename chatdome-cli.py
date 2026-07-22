@@ -682,7 +682,7 @@ def _build_terminal_command_registry(
 
     def command_runtime(invocation: CommandInvocation) -> CommandHandlerRuntime:
         _sync_terminal_runtime_paths()
-        lightweight = {"/help", "/exit", "/env", "/audit", "/token", "/stop"}
+        lightweight = {"/help", "/env", "/audit", "/token", "/stop"}
         runtime = None
         if runtime_provider is not None:
             runtime = getattr(runtime_provider, "runtime", None)
@@ -1409,7 +1409,7 @@ def _terminal_model_name() -> str:
 
 
 def _terminal_start_status() -> str:
-    return f"model: {_terminal_model_name()}\nsession: local"
+    return f"model: {_terminal_model_name()}\nsession: local\n{CLIPlatformAdapter.local_command_hint()}"
 
 
 def _terminal_start_line() -> str:
@@ -1492,6 +1492,7 @@ async def _terminal_chat_loop(args: argparse.Namespace) -> None:
         ),
         unknown_handler=_handle_unknown_terminal_command,
         command_handler=lambda text: adapter.execute_terminal_input(registry, text),
+        local_command_predicate=adapter.is_local_command,
         stop_handler=provider.stop,
         approval_handler=approval_handler,
         continuation_handler=lambda text: _handle_terminal_continuation_choice(

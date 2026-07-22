@@ -111,6 +111,19 @@ class CLIPlatformAdapter(PlatformAdapter):
     """Terminal input, rendering, and output adapter."""
 
     platform = "cli"
+    _LOCAL_EXIT_COMMANDS = frozenset({"/exit", "/quit"})
+
+    @classmethod
+    def is_local_command(cls, line: str) -> bool:
+        """Return whether terminal input is handled without the business registry."""
+
+        return str(line or "").strip().lower() in cls._LOCAL_EXIT_COMMANDS
+
+    @staticmethod
+    def local_command_hint() -> str:
+        """Return terminal-only interaction guidance."""
+
+        return "exit: /exit or /quit"
 
     def __init__(
         self,
@@ -160,6 +173,8 @@ class CLIPlatformAdapter(PlatformAdapter):
     ) -> CommandResult:
         """Adapt and execute one terminal line through the shared invocation path."""
 
+        if self.is_local_command(line):
+            return CommandResult(keep_running=False)
         invocation = self.receive_terminal_input(
             registry,
             line,

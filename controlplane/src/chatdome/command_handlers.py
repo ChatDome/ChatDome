@@ -140,7 +140,6 @@ class CommandHandlerService:
         self._handlers: dict[str, Callable[[CommandInvocation, CommandHandlerRuntime], Any]] = {
             "/help": self._help,
             "/clear": self._clear,
-            "/exit": self._exit,
             "/stop": self._stop,
             "/env": self._env,
             "/audit": self._audit,
@@ -280,12 +279,8 @@ class CommandHandlerService:
         )
 
     @staticmethod
-    def _help(invocation: CommandInvocation, _runtime: CommandHandlerRuntime) -> CommandResult:
-        return command_help_result(invocation.context.source)
-
-    @staticmethod
-    def _exit(_invocation: CommandInvocation, _runtime: CommandHandlerRuntime) -> CommandResult:
-        return CommandResult(keep_running=False, outcome="session_exited")
+    def _help(_invocation: CommandInvocation, _runtime: CommandHandlerRuntime) -> CommandResult:
+        return command_help_result()
 
     async def _clear(self, invocation: CommandInvocation, runtime: CommandHandlerRuntime) -> CommandResult:
         return clear_session_command_result(self._require(runtime.agent, "agent"), invocation.context)

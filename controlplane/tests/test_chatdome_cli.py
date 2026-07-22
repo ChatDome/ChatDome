@@ -947,9 +947,12 @@ class ChatDomeCLITests(unittest.TestCase):
                     raise
 
             registry = self.cli._build_terminal_command_registry()
+            adapter = self.cli._terminal_platform_adapter()
             controller = self.cli.ChatSessionController(
                 registry,
                 message_handler=message_handler,
+                command_handler=lambda text: adapter.execute_terminal_input(registry, text),
+                local_command_predicate=adapter.is_local_command,
                 background_messages=True,
             )
             view = FakeView()
@@ -967,6 +970,39 @@ class ChatDomeCLITests(unittest.TestCase):
 
         asyncio.run(run_case())
 
+    def test_terminal_local_exit_is_allowed_while_message_runs(self):
+        async def run_case():
+            started = asyncio.Event()
+            cancelled = asyncio.Event()
+            never_finish = asyncio.Event()
+
+            async def message_handler(_text):
+                started.set()
+                try:
+                    await never_finish.wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+            registry = self.cli._build_terminal_command_registry()
+            adapter = self.cli._terminal_platform_adapter()
+            controller = self.cli.ChatSessionController(
+                registry,
+                message_handler=message_handler,
+                command_handler=lambda text: adapter.execute_terminal_input(registry, text),
+                local_command_predicate=adapter.is_local_command,
+                background_messages=True,
+            )
+            self.assertTrue(await controller.handle_line("long task"))
+            await asyncio.wait_for(started.wait(), timeout=1)
+
+            self.assertFalse(await controller.handle_line("/exit"))
+            await controller.stop()
+
+            await asyncio.wait_for(cancelled.wait(), timeout=1)
+            self.assertEqual(controller.state, self.cli.ChatSessionState.IDLE)
+
+        asyncio.run(run_case())
     def test_terminal_ctrl_c_exits_when_idle(self):
         class FakeView:
             def __init__(self):

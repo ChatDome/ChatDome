@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 # Help text
 # ---------------------------------------------------------------------------
 
-HELP_TEXT = format_command_help("telegram")
+HELP_TEXT = format_command_help()
 
 
 # ---------------------------------------------------------------------------

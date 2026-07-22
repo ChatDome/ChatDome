@@ -39,6 +39,7 @@ class ChatSessionController:
         *,
         message_handler: Callable[[str], Any],
         command_handler: Callable[[str], Any] | None = None,
+        local_command_predicate: Callable[[str], bool] | None = None,
         unknown_handler: Callable[[str], Any] | None = None,
         stop_handler: Callable[[], Any] | None = None,
         approval_handler: Callable[[str], Any] | None = None,
@@ -51,6 +52,7 @@ class ChatSessionController:
         self._command_handler = command_handler or registry.execute
         self._unknown_handler = unknown_handler
         self._stop_handler = stop_handler
+        self._local_command_predicate = local_command_predicate
         self._approval_handler = approval_handler
         self._continuation_handler = continuation_handler
         self._busy_handler = busy_handler
@@ -190,12 +192,17 @@ class ChatSessionController:
         self._apply_result_state(result)
 
     def _is_working_command_allowed(self, text: str) -> bool:
+        if (
+            self._local_command_predicate is not None
+            and self._local_command_predicate(text)
+        ):
+            return True
         invocation = self._registry.parse(text)
         if invocation is None:
             return False
         if invocation.command.category == "control":
             return True
-        return invocation.command.name in {"/help", "/exit"}
+        return invocation.command.name == "/help"
 
     async def _run_message_handler(self, text: str) -> CommandResult:
         result = self._message_handler(text)

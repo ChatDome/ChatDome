@@ -281,7 +281,7 @@ def test_cli_and_telegram_share_task_approval_command() -> None:
 
     assert "/confirm_task" in cli_names
     assert "/confirm_task" in telegram_names
-    assert cli_names - {"/exit"} == telegram_names
+    assert cli_names == telegram_names
 
 
 def test_command_registry_converts_result_before_platform_handler() -> None:
@@ -383,6 +383,22 @@ def test_cli_platform_adapter_executes_terminal_input_through_registry() -> None
 
     assert result.handled
     assert delivered == ["done"]
+
+
+def test_cli_platform_adapter_handles_exit_without_business_invocation() -> None:
+    calls = []
+    adapter = CLIPlatformAdapter(lambda _target, _rendered: None)
+    registry = CommandRegistry(
+        [CommandDef("/help", "help", "basic", handler=lambda item: calls.append(item))]
+    )
+
+    for command in ("/exit", "/quit", "  /EXIT  "):
+        result = asyncio.run(adapter.execute_terminal_input(registry, command))
+        assert result.handled
+        assert not result.keep_running
+        assert result.outbound is None
+    assert calls == []
+    assert registry.resolve_name("/exit") is None
 
 
 def test_telegram_callback_builds_structured_command_invocation() -> None:

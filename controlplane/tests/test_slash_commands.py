@@ -10,6 +10,7 @@ from chatdome.slash_commands import (
     CommandRegistry,
     CommandResult,
     bind_command_catalog,
+    command_help_result,
     command_catalog,
     toggle_command_echo,
 )
@@ -184,8 +185,9 @@ def test_cli_and_telegram_share_one_command_catalog() -> None:
     telegram_names = {command.name for command in telegram_commands}
 
     assert "/retry" not in cli_names
-    assert telegram_names <= cli_names
-    assert cli_names - telegram_names == {"/exit"}
+    assert cli_names == telegram_names
+    assert "/exit" not in cli_names
+    assert "/retry" not in telegram_names
 
     cli_aliases = {
         alias
@@ -194,6 +196,15 @@ def test_cli_and_telegram_share_one_command_catalog() -> None:
     }
     assert "/start" in cli_aliases
     assert "/llm_add" in cli_aliases
+    assert "/quit" not in cli_aliases
+
+    cli_help = command_help_result("cli")
+    telegram_help = command_help_result("telegram")
+    assert cli_help.text == telegram_help.text
+    assert cli_help.facts == telegram_help.facts
+    assert all(item.name != "/exit" for item in cli_help.facts.commands)
+
+
 
 
 def test_platform_catalogs_bind_to_one_shared_handler() -> None:
