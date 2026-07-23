@@ -20,6 +20,7 @@ import httpx
 
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.agent.manual import read_manual_section
+from chatdome.executor.command_parser import ShellCommandSegment, split_shell_commands
 from chatdome.executor.sandbox import CommandSandbox, CommandResult
 from chatdome.llm.client import LLMClient
 from chatdome.sentinel.alert_controls import format_alert_push_status, parse_alert_mute_until
@@ -705,16 +706,27 @@ class ToolDispatcher:
     ) -> dict[str, Any]:
         reviewer_llm = llm if llm is not None else self.llm
         if reviewer_llm is None:
-            return self._llm_detail_fallback("LLM 未就绪。")
+            return self._llm_detail_fallback("LLM 未就绪。", command)
 
         from chatdome.agent.prompts import COMMAND_DETAIL_SYSTEM_PROMPT
 
-        command_payload = json.dumps({"command": command, "shell": "bash"}, ensure_ascii=False)
+        segments = split_shell_commands(command)
+        command_payload = json.dumps(
+            {
+                "command": command,
+                "commands": [
+                    {"index": index, "command": segment.command, "separator": segment.separator}
+                    for index, segment in enumerate(segments, start=1)
+                ],
+                "shell": "bash",
+            },
+            ensure_ascii=False,
+        )
         messages = [
             {"role": "system", "content": COMMAND_DETAIL_SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": "只分析以下 JSON 中的 command 字段。\n" + command_payload,
+                "content": "只分析以下 JSON 中的 command 和 commands 字段。\n" + command_payload,
             },
         ]
 
@@ -746,13 +758,17 @@ class ToolDispatcher:
                     )
                 except Exception:
                     logger.debug("Failed to record command detail token usage", exc_info=True)
-            return self._normalize_llm_command_details(parsed, command)
+            return self._normalize_llm_command_details(parsed, segments)
         except Exception as exc:
             logger.error("Error loading LLM command details: %s", exc)
-            return self._llm_detail_fallback("LLM 解析失败。请直接检查原始命令。")
+            return self._llm_detail_fallback("LLM 解析失败。请直接检查原始命令。", command)
 
     @classmethod
-    def _normalize_llm_command_details(cls, payload: dict[str, Any], command: str) -> dict[str, Any]:
+    def _normalize_llm_command_details(
+        cls,
+        payload: dict[str, Any],
+        segments: tuple[ShellCommandSegment, ...],
+    ) -> dict[str, Any]:
         safety_status = str(payload.get("safety_status", "UNSAFE")).strip().upper()
         if safety_status not in {"SAFE", "UNSAFE", "CRITICAL"}:
             safety_status = "UNSAFE"
@@ -762,7 +778,9 @@ class ToolDispatcher:
             risk_level = "HIGH"
 
         impact_analysis = " ".join(str(payload.get("impact_analysis") or "LLM 未返回影响说明。").split())
-        breakdown = cls._normalize_llm_command_breakdown(payload.get("command_breakdown"), command)
+        breakdown = cls._normalize_llm_command_breakdown_groups(
+            payload.get("command_breakdown"), segments
+        )
 
         return {
             "safety_status": safety_status,
@@ -850,6 +868,62 @@ class ToolDispatcher:
             "confidence": confidence,
         }
 
+    @classmethod
+    def _normalize_llm_command_breakdown_groups(
+        cls,
+        raw: Any,
+        segments: tuple[ShellCommandSegment, ...],
+    ) -> dict[str, Any]:
+        payload = raw if isinstance(raw, dict) else {}
+        raw_commands = payload.get("commands")
+        commands_by_index: dict[int, dict[str, Any]] = {}
+
+        if isinstance(raw_commands, list):
+            for position, item in enumerate(raw_commands, start=1):
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    index = int(item.get("index", position))
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= index <= len(segments) and index not in commands_by_index:
+                    commands_by_index[index] = item
+        elif len(segments) == 1 and payload:
+            # Accept cached or mocked responses that use the legacy flat schema.
+            commands_by_index[1] = payload
+
+        commands: list[dict[str, Any]] = []
+        for index, segment in enumerate(segments, start=1):
+            item = commands_by_index.get(index)
+            if item is None:
+                normalized = cls._minimal_command_breakdown("命令解析不可用")
+            else:
+                normalized = cls._normalize_llm_command_breakdown(item, segment.command)
+            normalized.update(
+                {
+                    "index": index,
+                    "command": segment.command,
+                    "separator": segment.separator,
+                }
+            )
+            commands.append(normalized)
+
+        tokens = [item for child in commands for item in child["tokens"]]
+        targets = [item for child in commands for item in child["targets"]]
+        warnings = [item for child in commands for item in child["warnings"]]
+        summary = " ".join(str(payload.get("summary") or "").split())
+        if not summary and len(commands) == 1:
+            summary = commands[0]["summary"]
+
+        return {
+            "summary": summary,
+            "commands": commands,
+            "tokens": tokens,
+            "targets": targets,
+            "warnings": warnings,
+            "irreversible": any(child["irreversible"] for child in commands),
+        }
+
     @staticmethod
     def _minimal_command_breakdown(summary: str) -> dict[str, Any]:
         return {
@@ -863,14 +937,17 @@ class ToolDispatcher:
         }
 
     @classmethod
-    def _llm_detail_fallback(cls, message: str) -> dict[str, Any]:
+    def _llm_detail_fallback(cls, message: str, command: str = "") -> dict[str, Any]:
         return {
             "safety_status": "UNSAFE",
             "risk_level": "HIGH",
             "mutation_detected": True,
             "deletion_detected": False,
             "impact_analysis": message,
-            "command_breakdown": cls._minimal_command_breakdown(message),
+            "command_breakdown": cls._normalize_llm_command_breakdown_groups(
+                {},
+                split_shell_commands(command),
+            ),
             "reviewer_mode": "llm_error",
             "reviewer_status": "UNSAFE",
             "reviewer_risk_level": "HIGH",

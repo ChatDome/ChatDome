@@ -394,6 +394,83 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         self.assertIn("rm /root/show_time.sh", encoded_messages)
         self.assertNotIn("用户上下文不应进入详情解析", encoded_messages)
 
+    def test_llm_details_group_tokens_by_locally_split_subcommand(self):
+        dispatcher = ToolDispatcher(FakeSandbox())
+        llm = FakeLLM(
+            LLMResponse(
+                content=json.dumps(
+                    {
+                        "safety_status": "UNSAFE",
+                        "risk_level": "HIGH",
+                        "mutation_detected": True,
+                        "deletion_detected": False,
+                        "impact_analysis": "切换目录后重启 ChatDome 服务。",
+                        "command_breakdown": {
+                            "summary": "切换目录并重启服务",
+                            "commands": [
+                                {
+                                    "index": 1,
+                                    "command": "LLM 回显不会被信任",
+                                    "separator": "||",
+                                    "base_cmd": "cd",
+                                    "summary": "切换工作目录",
+                                    "tokens": [
+                                        {"token": "cd", "role": "command", "label": "命令", "meaning": "切换目录"},
+                                        {"token": "/srv", "role": "target_directory", "label": "目标目录", "meaning": "工作目录"},
+                                        {"token": "systemctl", "role": "command", "label": "命令", "meaning": "跨组内容"},
+                                    ],
+                                    "targets": [],
+                                    "warnings": [],
+                                    "irreversible": False,
+                                    "confidence": "high",
+                                },
+                                {
+                                    "index": 2,
+                                    "command": "错误的第二段回显",
+                                    "separator": ";",
+                                    "base_cmd": "systemctl",
+                                    "summary": "重启服务",
+                                    "tokens": [
+                                        {"token": "systemctl", "role": "command", "label": "命令", "meaning": "控制服务"},
+                                        {"token": "restart", "role": "subcommand", "label": "子命令", "meaning": "重启服务"},
+                                        {"token": "chatdome", "role": "target_service", "label": "目标服务", "meaning": "ChatDome 服务"},
+                                        {"token": "/srv", "role": "target_directory", "label": "目标目录", "meaning": "跨组内容"},
+                                    ],
+                                    "targets": [],
+                                    "warnings": ["服务会短暂中断"],
+                                    "irreversible": False,
+                                    "confidence": "high",
+                                },
+                            ],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        )
+
+        analysis = asyncio.run(
+            dispatcher.analyze_command_for_approval(
+                "cd /srv; systemctl restart chatdome",
+                "重启服务",
+                include_llm=True,
+                llm=llm,
+            )
+        )
+
+        commands = analysis["command_breakdown"]["commands"]
+        self.assertEqual([item["command"] for item in commands], ["cd /srv", "systemctl restart chatdome"])
+        self.assertEqual([item["separator"] for item in commands], [";", ""])
+        self.assertEqual([item["token"] for item in commands[0]["tokens"]], ["cd", "/srv"])
+        self.assertEqual(
+            [item["token"] for item in commands[1]["tokens"]],
+            ["systemctl", "restart", "chatdome"],
+        )
+        self.assertEqual(len(llm.calls), 1)
+        user_content = llm.calls[0]["messages"][1]["content"]
+        command_payload = json.loads(user_content.split("\n", 1)[1])
+        self.assertEqual([item["command"] for item in command_payload["commands"]], ["cd /srv", "systemctl restart chatdome"])
+        self.assertEqual(command_payload["commands"][0]["separator"], ";")
     def test_pending_session_snapshot_preserves_approval_binding(self):
         session = _pending_session()
 

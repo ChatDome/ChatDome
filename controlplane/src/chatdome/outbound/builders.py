@@ -13,6 +13,7 @@ from chatdome.outbound.models import (
     ApprovalDetailsFacts,
     ApprovalRequestFacts,
     CodexAuthorizationFacts,
+    CommandBreakdownGroup,
     CommandBreakdownItem,
     EnvironmentFacts,
     OutboundAction,
@@ -135,11 +136,39 @@ def _warnings(value: Any) -> Tuple[str, ...]:
     return tuple(text for item in value if (text := str(item or "").strip()))
 
 
+def _breakdown_groups(value: Any) -> Tuple[CommandBreakdownGroup, ...]:
+    if not isinstance(value, Iterable) or isinstance(value, (str, bytes, Mapping)):
+        return ()
+    groups = []
+    for position, raw in enumerate(value, start=1):
+        if not isinstance(raw, Mapping):
+            continue
+        try:
+            index = int(raw.get("index", position))
+        except (TypeError, ValueError):
+            index = position
+        command = str(raw.get("command") or "").strip()
+        if not command:
+            continue
+        groups.append(
+            CommandBreakdownGroup(
+                index=max(1, index),
+                command=command,
+                separator=str(raw.get("separator") or ""),
+                summary=str(raw.get("summary") or "").strip(),
+                items=_breakdown_items(raw.get("tokens")),
+                warnings=_warnings(raw.get("warnings")),
+            )
+        )
+    return tuple(sorted(groups, key=lambda item: item.index))
+
+
 def build_approval_details(details: Optional[Mapping[str, Any]]) -> OutboundMessage:
     data = dict(details or {})
     ok = bool(data.get("ok"))
     analysis = data.get("analysis") if isinstance(data.get("analysis"), Mapping) else {}
     breakdown = analysis.get("command_breakdown") if isinstance(analysis.get("command_breakdown"), Mapping) else {}
+    command_groups = _breakdown_groups(breakdown.get("commands"))
     facts = ApprovalDetailsFacts(
         ok=ok,
         command=str(data.get("command") or "").strip(),
@@ -150,6 +179,7 @@ def build_approval_details(details: Optional[Mapping[str, Any]]) -> OutboundMess
         mutation_detected=_optional_bool(analysis.get("mutation_detected", data.get("mutation_detected"))),
         deletion_detected=_optional_bool(analysis.get("deletion_detected", data.get("deletion_detected"))),
         command_breakdown=_breakdown_items(breakdown.get("tokens")),
+        command_groups=command_groups,
         warnings=_warnings(breakdown.get("warnings")),
         error_message=str(data.get("message") or "No pending approval.").strip() if not ok else "",
     )

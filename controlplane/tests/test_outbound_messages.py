@@ -129,6 +129,60 @@ class OutboundMessageTests(unittest.TestCase):
         self.assertIn("命令解析:", terminal)
         self.assertIn("命令解析:", telegram)
 
+    def test_details_renderers_group_semicolon_separated_commands(self):
+        details = {
+            "ok": True,
+            **self.request_payload,
+            "command": "cd /srv; systemctl restart chatdome",
+            "analysis": {
+                "risk_level": "HIGH",
+                "safety_status": "UNSAFE",
+                "mutation_detected": True,
+                "deletion_detected": False,
+                "impact_analysis": "Switches directory and restarts ChatDome.",
+                "command_breakdown": {
+                    "summary": "切换目录并重启服务",
+                    "commands": [
+                        {
+                            "index": 1,
+                            "command": "cd /srv",
+                            "separator": ";",
+                            "summary": "切换工作目录",
+                            "tokens": [
+                                {"token": "cd", "label": "命令", "meaning": "切换目录"},
+                                {"token": "/srv", "label": "目标目录", "meaning": "工作目录"},
+                            ],
+                            "warnings": [],
+                        },
+                        {
+                            "index": 2,
+                            "command": "systemctl restart chatdome",
+                            "separator": "",
+                            "summary": "重启服务",
+                            "tokens": [
+                                {"token": "systemctl", "label": "命令", "meaning": "控制系统服务"},
+                                {"token": "restart", "label": "子命令", "meaning": "重启服务"},
+                                {"token": "chatdome", "label": "目标服务", "meaning": "将被操作的服务"},
+                            ],
+                            "warnings": ["服务会短暂中断"],
+                        },
+                    ],
+                    "tokens": [],
+                    "warnings": ["服务会短暂中断"],
+                },
+            },
+        }
+
+        message = build_approval_details(details)
+        terminal = TerminalOutboundRenderer().render(message).text_parts[0]
+        telegram = TelegramOutboundRenderer().render(message).text_parts[0]
+
+        self.assertEqual(len(message.facts.command_groups), 2)
+        for text in (terminal, telegram):
+            self.assertIn("[1] cd /srv", text)
+            self.assertIn("[2] systemctl restart chatdome", text)
+            self.assertLess(text.index("[1] cd /srv"), text.index("[2] systemctl restart chatdome"))
+            self.assertEqual(text.count("服务会短暂中断"), 1)
     def test_sentinel_alert_uses_notification_facts_and_actions(self):
         message = build_sentinel_alert(
             "Critical alert",

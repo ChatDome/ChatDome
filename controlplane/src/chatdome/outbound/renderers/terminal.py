@@ -71,7 +71,34 @@ class TerminalOutboundRenderer:
         )
         return RenderedMessage(text_parts=(text,))
 
+    def _grouped_breakdown_lines(self, facts: ApprovalDetailsFacts) -> List[str]:
+        arrow = "->" if self.ascii_mode else "→"
+        warning_prefix = "[!]" if self.ascii_mode else "⚠"
+        show_headings = len(facts.command_groups) > 1
+        lines = ["命令解析:"]
+        for position, group in enumerate(facts.command_groups):
+            if position and show_headings:
+                lines.append("")
+            indent = "    " if show_headings else "  "
+            if show_headings:
+                lines.append(f"  [{group.index}] {group.command}")
+            if group.items:
+                token_width = min(max(len(item.token) for item in group.items), 28)
+                for item in group.items:
+                    padded = (
+                        item.token
+                        if len(item.token) > token_width
+                        else item.token.ljust(token_width)
+                    )
+                    lines.append(f"{indent}{padded} {arrow} {item.meaning}")
+            elif group.summary:
+                lines.append(f"{indent}{group.summary}")
+            lines.extend(f"{indent}{warning_prefix} {warning}" for warning in group.warnings)
+        return lines
+
     def _breakdown_lines(self, facts: ApprovalDetailsFacts) -> List[str]:
+        if facts.command_groups:
+            return self._grouped_breakdown_lines(facts)
         if not facts.command_breakdown:
             return []
         arrow = "->" if self.ascii_mode else "→"

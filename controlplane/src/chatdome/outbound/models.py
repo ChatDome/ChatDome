@@ -64,6 +64,16 @@ class CommandBreakdownItem:
 
 
 @dataclass(frozen=True)
+class CommandBreakdownGroup:
+    index: int
+    command: str
+    separator: str = ""
+    summary: str = ""
+    items: Tuple[CommandBreakdownItem, ...] = ()
+    warnings: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ApprovalRequestFacts:
     command: str
     reason: str
@@ -86,6 +96,7 @@ class ApprovalDetailsFacts:
     mutation_detected: Optional[bool] = None
     deletion_detected: Optional[bool] = None
     command_breakdown: Tuple[CommandBreakdownItem, ...] = ()
+    command_groups: Tuple[CommandBreakdownGroup, ...] = ()
     warnings: Tuple[str, ...] = ()
     error_message: str = ""
 

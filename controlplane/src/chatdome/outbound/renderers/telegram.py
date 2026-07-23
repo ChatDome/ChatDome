@@ -94,7 +94,28 @@ class TelegramOutboundRenderer:
         )
 
     @staticmethod
+    def _grouped_breakdown_lines(facts: ApprovalDetailsFacts) -> List[str]:
+        show_headings = len(facts.command_groups) > 1
+        lines: List[str] = []
+        for position, group in enumerate(facts.command_groups):
+            if position and show_headings:
+                lines.append("")
+            if show_headings:
+                lines.append(f"[{group.index}] {group.command}")
+            for index, item in enumerate(group.items):
+                has_more = index < len(group.items) - 1 or bool(group.warnings)
+                prefix = "├" if has_more else "└"
+                lines.append(f"{prefix} {item.token} → {item.meaning}")
+            if not group.items and group.summary:
+                prefix = "├" if group.warnings else "└"
+                lines.append(f"{prefix} {group.summary}")
+            lines.extend(f"⚠ {warning}" for warning in group.warnings)
+        return lines
+
+    @staticmethod
     def _breakdown_lines(facts: ApprovalDetailsFacts) -> List[str]:
+        if facts.command_groups:
+            return TelegramOutboundRenderer._grouped_breakdown_lines(facts)
         lines: List[str] = []
         for index, item in enumerate(facts.command_breakdown):
             has_more = index < len(facts.command_breakdown) - 1 or bool(facts.warnings)
