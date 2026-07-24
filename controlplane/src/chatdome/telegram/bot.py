@@ -103,6 +103,7 @@ class TelegramBot:
         self._pack_loader: Any = None
         self._approval_detail_tasks: dict[str, asyncio.Task] = {}
         self._approval_resolution_tasks: dict[int, asyncio.Task] = {}
+        self._approval_messages: dict[int, tuple[str, Any]] = {}
         self._round_limit_tasks: dict[int, asyncio.Task] = {}
         self._message_tasks: dict[int, asyncio.Task] = {}
         self._command_targets: dict[str, Any] = {}
@@ -339,7 +340,7 @@ class TelegramBot:
                     else 0
                 ),
             ),
-            cancel_request=lambda: self._cancel_active_task_for_chat(
+            cancel_request=lambda: self._stop_task_for_chat(
                 invocation.context.chat_id
             ),
             sync_model=self._sync_model_manager,
@@ -420,7 +421,9 @@ class TelegramBot:
 
     # ----- Platform task control -----
 
-    def _active_task_for_chat(self, chat_id: int) -> asyncio.Task | None:
+    def _active_tasks_for_chat(self, chat_id: int) -> tuple[asyncio.Task, ...]:
+        active: list[asyncio.Task] = []
+        seen: set[asyncio.Task] = set()
         for tasks in (
             self._message_tasks,
             self._approval_resolution_tasks,
@@ -432,8 +435,88 @@ class TelegramBot:
             if task.done():
                 tasks.pop(chat_id, None)
                 continue
-            return task
-        return None
+            if task not in seen:
+                active.append(task)
+                seen.add(task)
+        return tuple(active)
+
+    def _active_task_for_chat(self, chat_id: int) -> asyncio.Task | None:
+        return next(iter(self._active_tasks_for_chat(chat_id)), None)
+
+    @staticmethod
+    def _message_chat_id(message: Any) -> int | None:
+        raw_chat_id = getattr(message, "chat_id", None)
+        if raw_chat_id is None:
+            raw_chat_id = getattr(getattr(message, "chat", None), "id", None)
+        try:
+            return int(raw_chat_id) if raw_chat_id is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _remember_approval_message(
+        self,
+        chat_id: int,
+        approval_id: str | None,
+        message: Any,
+    ) -> None:
+        approval_key = str(approval_id or "").strip()
+        if approval_key and message is not None:
+            self._approval_messages[chat_id] = (approval_key, message)
+
+    async def _invalidate_approval_message(
+        self,
+        chat_id: int,
+        *,
+        command_not_executed: bool = False,
+    ) -> bool:
+        tracked = self._approval_messages.pop(chat_id, None)
+        if tracked is None:
+            return False
+        _, message = tracked
+        edit_text = getattr(message, "edit_text", None)
+        if not callable(edit_text):
+            return False
+        try:
+            await edit_text(
+                (
+                    "⏹️ 已中止\n命令未执行。"
+                    if command_not_executed
+                    else "⏹️ 任务已中止。"
+                ),
+                reply_markup=None,
+            )
+            return True
+        except Exception:
+            logger.debug(
+                "Failed to invalidate stopped approval card for chat_id=%s",
+                chat_id,
+                exc_info=True,
+            )
+            return False
+
+    async def _cancel_approval_detail_tasks_for_chat(self, chat_id: int) -> bool:
+        prefix = f"{chat_id}:"
+        tasks = [
+            task
+            for key, task in tuple(self._approval_detail_tasks.items())
+            if key.startswith(prefix) and not task.done()
+        ]
+        if not tasks:
+            return False
+        for task in tasks:
+            task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(
+                result,
+                asyncio.CancelledError,
+            ):
+                logger.debug(
+                    "Approval detail task ended while stopping chat_id=%s: %r",
+                    chat_id,
+                    result,
+                )
+        return True
 
     def _pending_approval_snapshot(
         self,
@@ -595,8 +678,11 @@ class TelegramBot:
         original_text: str,
         original_reply_markup: Any,
     ) -> None:
+        self._remember_approval_message(chat_id, approval_id, message)
         resolved = False
         try:
+            await self._cancel_approval_detail_tasks_for_chat(chat_id)
+            await self._cancel_message_task_for_chat(chat_id)
             await query.edit_message_text(
                 text=self._approval_decision_text(
                     message,
@@ -627,7 +713,16 @@ class TelegramBot:
                 ),
             )
         finally:
-            if not resolved:
+            if resolved:
+                tracked = self._approval_messages.get(chat_id)
+                approval_key = str(approval_id or "").strip()
+                if (
+                    tracked is not None
+                    and tracked[0] == approval_key
+                    and tracked[1] is message
+                ):
+                    self._approval_messages.pop(chat_id, None)
+            else:
                 _, snapshot = self._pending_approval_snapshot(chat_id, approval_id)
                 if snapshot is not None:
                     await self._restore_approval_request(
@@ -636,20 +731,75 @@ class TelegramBot:
                         original_reply_markup,
                     )
 
-    async def _cancel_active_task_for_chat(self, chat_id: int) -> bool:
-        task = self._active_task_for_chat(chat_id)
+    async def _cancel_tracked_tasks(
+        self,
+        chat_id: int,
+        tasks: tuple[asyncio.Task, ...],
+    ) -> None:
+        for task in tasks:
+            task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(
+                result,
+                asyncio.CancelledError,
+            ):
+                logger.debug(
+                    "Task ended while stopping chat_id=%s: %r",
+                    chat_id,
+                    result,
+                )
+
+    async def _cancel_message_task_for_chat(self, chat_id: int) -> bool:
+        task = self._message_tasks.get(chat_id)
         if task is None:
             return False
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.debug("Task ended while stopping chat_id=%s", chat_id, exc_info=True)
+        if task.done():
+            self._message_tasks.pop(chat_id, None)
+            return False
+        await self._cancel_tracked_tasks(chat_id, (task,))
+        if self._message_tasks.get(chat_id) is task:
+            self._message_tasks.pop(chat_id, None)
         return True
 
-    # ----- Message handler -----
+    async def _cancel_active_task_for_chat(self, chat_id: int) -> bool:
+        tasks = self._active_tasks_for_chat(chat_id)
+        if not tasks:
+            return False
+        await self._cancel_tracked_tasks(chat_id, tasks)
+        for task_map in (
+            self._message_tasks,
+            self._approval_resolution_tasks,
+            self._round_limit_tasks,
+        ):
+            task = task_map.get(chat_id)
+            if task in tasks and task.done():
+                task_map.pop(chat_id, None)
+        return True
+
+    async def _stop_task_for_chat(self, chat_id: int) -> bool:
+        live_stopped = await self._cancel_active_task_for_chat(chat_id)
+        details_stopped = await self._cancel_approval_detail_tasks_for_chat(chat_id)
+
+        pending_aborted = False
+        abort_pending = getattr(self.agent, "abort_pending_task", None)
+        if callable(abort_pending):
+            try:
+                result = abort_pending(chat_id)
+                if inspect.isawaitable(result):
+                    result = await result
+                pending_aborted = bool(result)
+            except Exception:
+                logger.exception("Failed to abort pending task for chat_id=%s", chat_id)
+
+        stopped = live_stopped or details_stopped or pending_aborted
+        if stopped:
+            await self._invalidate_approval_message(
+                chat_id,
+                command_not_executed=pending_aborted,
+            )
+        return stopped
+
     # ----- Message handler -----
 
     async def _handle_message(
@@ -818,6 +968,7 @@ class TelegramBot:
                 logger.exception("Failed to retire expired approval request")
             return
 
+        self._remember_approval_message(chat_id, approval_id, message)
         original_text = str(
             getattr(message, "text", "") or getattr(message, "caption", "") or ""
         )
@@ -829,7 +980,7 @@ class TelegramBot:
             chat_id=chat_id,
         )
         args = (approval_id,) if approval_id else ()
-        details_shown = False
+        details_delivered = False
         try:
             await message.edit_text(
                 f"🔎 正在分析命令风险与影响…\n目的：{purpose}",
@@ -856,8 +1007,14 @@ class TelegramBot:
                 ),
             )
         else:
-            if result.outcome == "details_shown" and result.outbound is not None:
-                details_shown = True
+            if (
+                result.outcome
+                in {"details_shown", "details_partial", "details_unavailable"}
+                and result.outbound is not None
+            ):
+                details_delivered = bool(
+                    getattr(result.outbound.facts, "ok", False)
+                )
                 rendered = self._platform_adapter.render(result.outbound)
                 text = "\n".join(rendered.text_parts)
                 facts = result.outbound.facts
@@ -873,7 +1030,7 @@ class TelegramBot:
                     },
                 )
         finally:
-            if details_shown:
+            if details_delivered:
                 await self._retire_approval_request(message)
             else:
                 state_known, snapshot = self._pending_approval_snapshot(
@@ -1304,7 +1461,13 @@ class TelegramBot:
                 chat_id,
                 approval_id or None,
             )
-            if state_known and snapshot is None:
+            if not state_known:
+                await self._send_long_message(
+                    query.message,
+                    "审批状态读取失败，请重试。",
+                )
+                return
+            if snapshot is None:
                 await query.edit_message_text(
                     text="ℹ️ 审批已失效，请使用最新卡片。",
                     reply_markup=None,
@@ -1361,13 +1524,26 @@ class TelegramBot:
                 reply_markup=reply_markup,
             )
             return
-        await self._send_long_message(
+        sent_message = await self._send_long_message(
             message,
             text,
             markup=MessageMarkup.PLAIN,
             reply_markup=reply_markup,
         )
-
+        approval_id = next(
+            (
+                parts[2].strip()
+                for control in rendered.controls
+                if (parts := str(control.data or "").split(":", 2))
+                and len(parts) == 3
+                and parts[0] == "approval"
+                and parts[2].strip()
+            ),
+            "",
+        )
+        chat_id = self._message_chat_id(sent_message) or self._message_chat_id(message)
+        if approval_id and chat_id is not None:
+            self._remember_approval_message(chat_id, approval_id, sent_message)
 
     async def _send_command_result(
         self,
@@ -1440,7 +1616,6 @@ class TelegramBot:
         if reply_markup is not None:
             kwargs["reply_markup"] = reply_markup
         await bot.send_message(chat_id=chat_id, text=rendered.text, **kwargs)
-
 
     @staticmethod
     def _compact_visible_value(value: Any, max_chars: int = 500) -> str:
@@ -1547,7 +1722,7 @@ class TelegramBot:
         *,
         markup: MessageMarkup = MessageMarkup.PLAIN,
         reply_markup=None,
-    ) -> None:
+    ) -> Any | None:
         """
         Send a message, automatically splitting if it exceeds Telegram's
         4096 character limit.
@@ -1556,19 +1731,18 @@ class TelegramBot:
         text = rendered.text
         parse_mode = rendered.parse_mode
 
-        async def _send_chunk(chunk_text: str, chunk_reply_markup=None) -> None:
+        async def _send_chunk(chunk_text: str, chunk_reply_markup=None) -> Any:
             kwargs: dict[str, Any] = {}
             if parse_mode:
                 kwargs["parse_mode"] = parse_mode
             if chunk_reply_markup is not None:
                 kwargs["reply_markup"] = chunk_reply_markup
-            await message.reply_text(chunk_text, **kwargs)
+            return await message.reply_text(chunk_text, **kwargs)
 
         max_len = min(self.max_message_length, 4096)
 
         if len(text) <= max_len:
-            await _send_chunk(text, reply_markup)
-            return
+            return await _send_chunk(text, reply_markup)
 
         # Split into chunks
         chunks = []
@@ -1585,10 +1759,15 @@ class TelegramBot:
             chunks.append(text[:split_pos])
             text = text[split_pos:].lstrip("\n")
 
+        last_message = None
         for i, chunk in enumerate(chunks, 1):
             if len(chunks) > 1:
                 chunk = f"📄 ({i}/{len(chunks)})\n{chunk}"
-            await _send_chunk(chunk, reply_markup if i == len(chunks) else None)
+            last_message = await _send_chunk(
+                chunk,
+                reply_markup if i == len(chunks) else None,
+            )
+        return last_message
 
     def _build_environment_summary(self) -> str:
         facts = EnvironmentFactsBuilder().from_profile(

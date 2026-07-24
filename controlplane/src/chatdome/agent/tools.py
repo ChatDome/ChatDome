@@ -10,9 +10,11 @@ Handles:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
@@ -25,7 +27,49 @@ from chatdome.executor.sandbox import CommandSandbox, CommandResult
 from chatdome.llm.client import LLMClient
 from chatdome.sentinel.alert_controls import format_alert_push_status, parse_alert_mute_until
 
+_COMMAND_DETAIL_BATCH_SIZE = 4
+_COMMAND_DETAIL_MAX_CONCURRENCY = 2
+_COMMAND_DETAIL_TIMEOUT_SECONDS = 30.0
+_COMMAND_DETAIL_MAX_TOKENS_PER_SEGMENT = 12
+_COMMAND_DETAIL_MAX_TARGETS_PER_SEGMENT = 6
+_COMMAND_DETAIL_MAX_WARNINGS_PER_SEGMENT = 3
+_COMMAND_DETAIL_MAX_TOKEN_CHARS = 240
+_COMMAND_DETAIL_MAX_LABEL_CHARS = 40
+_COMMAND_DETAIL_MAX_MEANING_CHARS = 120
+_COMMAND_DETAIL_MAX_SUMMARY_CHARS = 160
+_COMMAND_DETAIL_MAX_WARNING_CHARS = 160
+
 logger = logging.getLogger(__name__)
+
+
+class _InvalidCommandDetailResponse(ValueError):
+    """The reviewer returned JSON that cannot provide command details."""
+
+
+_COMMAND_DETAIL_CANCELLED_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _release_cancelled_command_detail_task(task: asyncio.Task[Any]) -> None:
+    _COMMAND_DETAIL_CANCELLED_TASKS.discard(task)
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        pass
+
+
+def _cancel_command_detail_tasks(
+    tasks: Iterable[asyncio.Task[Any]],
+) -> None:
+    for task in tuple(tasks):
+        if task.done():
+            _release_cancelled_command_detail_task(task)
+            continue
+        task.cancel()
+        _COMMAND_DETAIL_CANCELLED_TASKS.add(task)
+        task.add_done_callback(_release_cancelled_command_detail_task)
+
 
 _LONG_TERM_CONTEXT_SIGNALS = (
     "通常",
@@ -652,7 +696,7 @@ class ToolDispatcher:
         include_llm: bool = False,
         llm: Any = None,
     ) -> dict[str, Any]:
-        """Return static gate data or LLM-only approval details."""
+        """Return static gate data or LLM details bounded by the static gate."""
         if include_llm:
             return await self._analyze_command_details_with_llm(
                 command=command,
@@ -705,63 +749,552 @@ class ToolDispatcher:
         llm: Any = None,
     ) -> dict[str, Any]:
         reviewer_llm = llm if llm is not None else self.llm
+        static_gate = self._analyze_command_static_gate(command)
         if reviewer_llm is None:
-            return self._llm_detail_fallback("LLM 未就绪。", command)
-
-        from chatdome.agent.prompts import COMMAND_DETAIL_SYSTEM_PROMPT
+            details = self._llm_detail_fallback(
+                "命令分析不可用。请直接检查原始命令。",
+                command,
+                error_code="llm_unavailable",
+            )
+            return self._apply_static_detail_floor(details, static_gate)
 
         segments = split_shell_commands(command)
+        if not segments:
+            details = self._llm_detail_fallback(
+                "命令分析不可用。请直接检查原始命令。",
+                command,
+                error_code="empty_command",
+            )
+            return self._apply_static_detail_floor(details, static_gate)
+
+        batch_specs = [
+            (offset, segments[offset : offset + _COMMAND_DETAIL_BATCH_SIZE])
+            for offset in range(0, len(segments), _COMMAND_DETAIL_BATCH_SIZE)
+        ]
+        semaphore = asyncio.Semaphore(_COMMAND_DETAIL_MAX_CONCURRENCY)
+
+        async def analyze_batch(
+            offset: int,
+            batch_segments: tuple[ShellCommandSegment, ...],
+        ) -> tuple[int, dict[str, Any] | None, bool, str]:
+            async with semaphore:
+                try:
+                    payload = await self._request_command_detail_batch(
+                        reviewer_llm,
+                        batch_segments,
+                        chat_id=chat_id,
+                        previous_separator=(
+                            segments[offset - 1].separator if offset else ""
+                        ),
+                        compact=False,
+                    )
+                    return (
+                        offset,
+                        self._normalize_llm_command_details(payload, batch_segments),
+                        False,
+                        "",
+                    )
+                except _InvalidCommandDetailResponse:
+                    logger.warning(
+                        "Command detail response invalid; retrying compact format: "
+                        "start=%d count=%d",
+                        offset + 1,
+                        len(batch_segments),
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "Command detail batch failed: start=%d count=%d error=%s",
+                        offset + 1,
+                        len(batch_segments),
+                        type(exc).__name__,
+                    )
+                    return offset, None, False, "provider_error"
+
+                try:
+                    payload = await self._request_command_detail_batch(
+                        reviewer_llm,
+                        batch_segments,
+                        chat_id=chat_id,
+                        previous_separator=(
+                            segments[offset - 1].separator if offset else ""
+                        ),
+                        compact=True,
+                    )
+                    return (
+                        offset,
+                        self._normalize_llm_command_details(payload, batch_segments),
+                        True,
+                        "compact_retry",
+                    )
+                except _InvalidCommandDetailResponse:
+                    logger.warning(
+                        "Compact command detail response invalid: start=%d count=%d",
+                        offset + 1,
+                        len(batch_segments),
+                    )
+                    return offset, None, False, "invalid_response"
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "Compact command detail batch failed: "
+                        "start=%d count=%d error=%s",
+                        offset + 1,
+                        len(batch_segments),
+                        type(exc).__name__,
+                    )
+                    return offset, None, False, "provider_error"
+
+        tasks = {
+            asyncio.create_task(analyze_batch(offset, batch_segments)): (
+                offset,
+                len(batch_segments),
+            )
+            for offset, batch_segments in batch_specs
+        }
+        try:
+            done, pending = await asyncio.wait(
+                tuple(tasks),
+                timeout=_COMMAND_DETAIL_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            _cancel_command_detail_tasks(tasks)
+            raise
+
+        _cancel_command_detail_tasks(pending)
+
+        batch_results: dict[int, tuple[dict[str, Any], bool]] = {}
+        batch_errors: dict[int, str] = {
+            tasks[task][0]: "timeout"
+            for task in pending
+        }
+        for task in done:
+            try:
+                offset, analysis, compact, error_code = task.result()
+            except asyncio.CancelledError:
+                offset = tasks[task][0]
+                batch_errors[offset] = "timeout"
+                continue
+            if analysis is None:
+                batch_errors[offset] = error_code or "provider_error"
+                continue
+            batch_results[offset] = (analysis, compact)
+            if error_code:
+                batch_errors[offset] = error_code
+
+        if pending:
+            logger.warning(
+                "Command detail analysis timed out after %.1fs: completed=%d total=%d",
+                _COMMAND_DETAIL_TIMEOUT_SECONDS,
+                len(done),
+                len(tasks),
+            )
+
+        details = self._merge_command_detail_batches(
+            command=command,
+            segments=segments,
+            batch_specs=batch_specs,
+            batch_results=batch_results,
+            batch_errors=batch_errors,
+        )
+        return self._apply_static_detail_floor(details, static_gate)
+
+    async def _request_command_detail_batch(
+        self,
+        reviewer_llm: Any,
+        segments: tuple[ShellCommandSegment, ...],
+        *,
+        chat_id: int,
+        previous_separator: str,
+        compact: bool,
+    ) -> dict[str, Any]:
+        from chatdome.agent.prompts import (
+            COMMAND_DETAIL_COMPACT_SYSTEM_PROMPT,
+            COMMAND_DETAIL_SYSTEM_PROMPT,
+        )
+
+        command_parts: list[str] = []
+        for position, segment in enumerate(segments):
+            command_parts.append(segment.command)
+            if position < len(segments) - 1 and segment.separator:
+                command_parts.append(segment.separator)
         command_payload = json.dumps(
             {
-                "command": command,
+                "command": " ".join(command_parts),
                 "commands": [
-                    {"index": index, "command": segment.command, "separator": segment.separator}
-                    for index, segment in enumerate(segments, start=1)
+                    {
+                        "index": position + 1,
+                        "command": segment.command,
+                        "separator": segment.separator,
+                        "operator_before": (
+                            previous_separator
+                            if position == 0
+                            else segments[position - 1].separator
+                        ),
+                        "operator_after": segment.separator,
+                    }
+                    for position, segment in enumerate(segments)
                 ],
                 "shell": "bash",
             },
             ensure_ascii=False,
         )
         messages = [
-            {"role": "system", "content": COMMAND_DETAIL_SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": (
+                    COMMAND_DETAIL_COMPACT_SYSTEM_PROMPT
+                    if compact
+                    else COMMAND_DETAIL_SYSTEM_PROMPT
+                ),
+            },
             {
                 "role": "user",
-                "content": "只分析以下 JSON 中的 command 和 commands 字段。\n" + command_payload,
+                "content": (
+                    "只分析以下 JSON 中的 command 和 commands 字段。\n"
+                    + command_payload
+                ),
             },
         ]
+        kwargs: dict[str, Any] = {
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+        }
+        try:
+            params = inspect.signature(reviewer_llm.chat_completion).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "temperature" in params:
+            kwargs["temperature"] = 0.0
+        if "max_tokens" in params:
+            requested_tokens = (
+                250 + 120 * len(segments)
+                if compact
+                else 420 + 220 * len(segments)
+            )
+            configured_tokens = int(
+                getattr(reviewer_llm, "max_tokens", requested_tokens)
+                or requested_tokens
+            )
+            kwargs["max_tokens"] = min(requested_tokens, max(1, configured_tokens))
+
+        response = await reviewer_llm.chat_completion(**kwargs)
+        if chat_id > 0:
+            try:
+                from chatdome.agent.tracker import TokenTracker
+
+                TokenTracker.record_usage(
+                    chat_id=chat_id,
+                    model=getattr(reviewer_llm, "model", "unknown"),
+                    action=(
+                        "command_detail_compact_retry"
+                        if compact
+                        else "command_detail"
+                    ),
+                    prompt_tokens=getattr(response, "prompt_tokens", 0),
+                    completion_tokens=getattr(response, "completion_tokens", 0),
+                    total_tokens=getattr(response, "total_tokens", 0),
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to record command detail token usage",
+                    exc_info=True,
+                )
 
         try:
-            kwargs: dict[str, Any] = {
-                "messages": messages,
-                "response_format": {"type": "json_object"},
-            }
-            try:
-                params = inspect.signature(reviewer_llm.chat_completion).parameters
-            except (TypeError, ValueError):
-                params = {}
-            if "temperature" in params:
-                kwargs["temperature"] = 0.0
-
-            response = await reviewer_llm.chat_completion(**kwargs)
-            parsed = LLMClient.parse_json_object(response.content or "{}")
-            if chat_id > 0:
-                try:
-                    from chatdome.agent.tracker import TokenTracker
-
-                    TokenTracker.record_usage(
-                        chat_id=chat_id,
-                        model=getattr(reviewer_llm, "model", "unknown"),
-                        action="command_detail",
-                        prompt_tokens=getattr(response, "prompt_tokens", 0),
-                        completion_tokens=getattr(response, "completion_tokens", 0),
-                        total_tokens=getattr(response, "total_tokens", 0),
-                    )
-                except Exception:
-                    logger.debug("Failed to record command detail token usage", exc_info=True)
-            return self._normalize_llm_command_details(parsed, segments)
+            parsed = LLMClient.parse_json_object(response.content or "")
+            self._validate_command_detail_payload(parsed, len(segments))
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            logger.error("Error loading LLM command details: %s", exc)
-            return self._llm_detail_fallback("LLM 解析失败。请直接检查原始命令。", command)
+            raise _InvalidCommandDetailResponse(
+                "invalid command detail response"
+            ) from exc
+        return parsed
+
+    @staticmethod
+    def _validate_command_detail_payload(
+        payload: dict[str, Any],
+        command_count: int,
+    ) -> None:
+        required_fields = {
+            "safety_status",
+            "risk_level",
+            "mutation_detected",
+            "deletion_detected",
+            "impact_analysis",
+            "command_breakdown",
+        }
+        if command_count < 1 or not isinstance(payload, dict):
+            raise _InvalidCommandDetailResponse("invalid detail payload")
+        if required_fields - payload.keys():
+            raise _InvalidCommandDetailResponse("missing detail fields")
+
+        safety_status = str(payload.get("safety_status", "")).strip().upper()
+        if safety_status not in {"SAFE", "UNSAFE", "CRITICAL"}:
+            raise _InvalidCommandDetailResponse("invalid safety status")
+        risk_level = str(payload.get("risk_level", "")).strip().upper()
+        if risk_level not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+            raise _InvalidCommandDetailResponse("invalid risk level")
+
+        mutation_detected = payload.get("mutation_detected")
+        deletion_detected = payload.get("deletion_detected")
+        if not isinstance(mutation_detected, bool):
+            raise _InvalidCommandDetailResponse("invalid mutation flag")
+        if not isinstance(deletion_detected, bool):
+            raise _InvalidCommandDetailResponse("invalid deletion flag")
+        if mutation_detected and safety_status == "SAFE":
+            raise _InvalidCommandDetailResponse("inconsistent mutation status")
+        if deletion_detected and not mutation_detected:
+            raise _InvalidCommandDetailResponse("inconsistent deletion status")
+        if deletion_detected and risk_level in {"LOW", "MEDIUM"}:
+            raise _InvalidCommandDetailResponse("inconsistent deletion risk")
+        if not str(payload.get("impact_analysis") or "").strip():
+            raise _InvalidCommandDetailResponse("missing impact analysis")
+
+        breakdown = payload.get("command_breakdown")
+        if not isinstance(breakdown, dict):
+            raise _InvalidCommandDetailResponse("missing command breakdown")
+
+        raw_commands = breakdown.get("commands")
+        if command_count == 1 and not isinstance(raw_commands, list):
+            if not str(breakdown.get("base_cmd") or "").strip():
+                raise _InvalidCommandDetailResponse("missing base command")
+            if not str(breakdown.get("summary") or "").strip():
+                raise _InvalidCommandDetailResponse("missing command summary")
+            return
+        if not isinstance(raw_commands, list):
+            raise _InvalidCommandDetailResponse("missing command groups")
+        if len(raw_commands) != command_count:
+            raise _InvalidCommandDetailResponse("incomplete command groups")
+        if not str(breakdown.get("summary") or "").strip():
+            raise _InvalidCommandDetailResponse("missing breakdown summary")
+
+        for position, item in enumerate(raw_commands, start=1):
+            if not isinstance(item, dict):
+                raise _InvalidCommandDetailResponse("invalid command group")
+            try:
+                index = int(item["index"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise _InvalidCommandDetailResponse("invalid command index") from exc
+            if index != position:
+                raise _InvalidCommandDetailResponse("out-of-order command groups")
+            if not str(item.get("base_cmd") or "").strip():
+                raise _InvalidCommandDetailResponse("missing base command")
+            if not str(item.get("summary") or "").strip():
+                raise _InvalidCommandDetailResponse("missing command summary")
+
+    @classmethod
+    def _merge_command_detail_batches(
+        cls,
+        *,
+        command: str,
+        segments: tuple[ShellCommandSegment, ...],
+        batch_specs: list[tuple[int, tuple[ShellCommandSegment, ...]]],
+        batch_results: dict[int, tuple[dict[str, Any], bool]],
+        batch_errors: dict[int, str],
+    ) -> dict[str, Any]:
+        commands = []
+        for index, segment in enumerate(segments, start=1):
+            child = cls._minimal_command_breakdown("命令解析不可用")
+            child.update(
+                {
+                    "index": index,
+                    "command": segment.command,
+                    "separator": segment.separator,
+                }
+            )
+            commands.append(child)
+
+        analyzed_command_count = 0
+        analyses: list[dict[str, Any]] = []
+        compact_used = False
+        for offset, batch_segments in batch_specs:
+            stored = batch_results.get(offset)
+            if stored is None:
+                continue
+            analysis, compact = stored
+            analyses.append(analysis)
+            compact_used = compact_used or compact
+            batch_commands = (
+                analysis.get("command_breakdown", {}).get("commands", [])
+            )
+            for position, child in enumerate(batch_commands):
+                if position >= len(batch_segments):
+                    break
+                normalized = dict(child)
+                normalized.update(
+                    {
+                        "index": offset + position + 1,
+                        "command": batch_segments[position].command,
+                        "separator": batch_segments[position].separator,
+                    }
+                )
+                commands[offset + position] = normalized
+            analyzed_command_count += len(batch_segments)
+
+        errors = [
+            batch_errors[offset]
+            for offset, _ in batch_specs
+            if batch_errors.get(offset)
+        ]
+        errors = list(dict.fromkeys(errors))
+        if not analyses:
+            error_code = "timeout" if "timeout" in errors else (
+                errors[0] if errors else "provider_error"
+            )
+            message = (
+                "命令分析超时。请直接检查原始命令。"
+                if error_code == "timeout"
+                else "命令分析不可用。请直接检查原始命令。"
+            )
+            return cls._llm_detail_fallback(
+                message,
+                command,
+                error_code=error_code,
+            )
+
+        safety_order = {"SAFE": 0, "UNSAFE": 1, "CRITICAL": 2}
+        risk_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+        safety_status = max(
+            (str(item.get("safety_status", "UNSAFE")) for item in analyses),
+            key=lambda value: safety_order.get(value, 1),
+        )
+        risk_level = max(
+            (str(item.get("risk_level", "HIGH")) for item in analyses),
+            key=lambda value: risk_order.get(value, 2),
+        )
+        mutation_detected = any(
+            bool(item.get("mutation_detected", False))
+            for item in analyses
+        )
+        deletion_detected = any(
+            bool(item.get("deletion_detected", False))
+            for item in analyses
+        )
+
+        detail_status = (
+            "complete"
+            if analyzed_command_count == len(segments)
+            and not compact_used
+            and not errors
+            else "partial"
+        )
+        if detail_status == "partial":
+            if safety_order.get(safety_status, 1) < safety_order["UNSAFE"]:
+                safety_status = "UNSAFE"
+            if risk_order.get(risk_level, 2) < risk_order["HIGH"]:
+                risk_level = "HIGH"
+            mutation_detected = True
+        if compact_used and "compact_retry" not in errors:
+            errors.append("compact_retry")
+
+        impacts = list(
+            dict.fromkeys(
+                " ".join(str(item.get("impact_analysis") or "").split())
+                for item in analyses
+                if str(item.get("impact_analysis") or "").strip()
+            )
+        )
+        impact_analysis = cls._limit_command_detail_text(
+            "；".join(impacts) or "请直接检查原始命令。",
+            400,
+        )
+        summaries = [
+            str(item.get("command_breakdown", {}).get("summary") or "").strip()
+            for item in analyses
+        ]
+        summary = cls._limit_command_detail_text(
+            "；".join(item for item in summaries if item),
+            400,
+        )
+        tokens = [item for child in commands for item in child["tokens"]]
+        targets = [item for child in commands for item in child["targets"]]
+        warnings = [item for child in commands for item in child["warnings"]]
+
+        return {
+            "safety_status": safety_status,
+            "risk_level": risk_level,
+            "mutation_detected": mutation_detected,
+            "deletion_detected": deletion_detected,
+            "impact_analysis": impact_analysis,
+            "command_breakdown": {
+                "summary": summary,
+                "commands": commands,
+                "tokens": tokens,
+                "targets": targets,
+                "warnings": warnings,
+                "irreversible": any(
+                    bool(child.get("irreversible", False))
+                    for child in commands
+                ),
+            },
+            "detail_status": detail_status,
+            "reviewer_mode": (
+                "llm" if detail_status == "complete" else "llm_partial"
+            ),
+            "reviewer_status": safety_status,
+            "reviewer_risk_level": risk_level,
+            "analyzed_command_count": analyzed_command_count,
+            "command_count": len(segments),
+            "detail_errors": errors,
+        }
+
+    @staticmethod
+    def _limit_command_detail_text(value: Any, max_chars: int) -> str:
+        text = " ".join(str(value or "").split())
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 1].rstrip() + "…"
+
+    @staticmethod
+    def _apply_static_detail_floor(
+        details: dict[str, Any],
+        static_gate: dict[str, Any],
+    ) -> dict[str, Any]:
+        safety_order = {"SAFE": 0, "UNSAFE": 1, "CRITICAL": 2}
+        risk_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+        bounded = dict(details)
+        safety_status = max(
+            (
+                str(bounded.get("safety_status", "UNSAFE")).strip().upper(),
+                str(static_gate.get("safety_status", "UNSAFE")).strip().upper(),
+            ),
+            key=lambda value: safety_order.get(value, 1),
+        )
+        risk_level = max(
+            (
+                str(bounded.get("risk_level", "HIGH")).strip().upper(),
+                str(static_gate.get("risk_level", "HIGH")).strip().upper(),
+            ),
+            key=lambda value: risk_order.get(value, 2),
+        )
+        mutation_detected = bool(
+            bounded.get("mutation_detected", False)
+        ) or bool(static_gate.get("mutation_detected", False))
+        deletion_detected = bool(
+            bounded.get("deletion_detected", False)
+        ) or bool(static_gate.get("deletion_detected", False))
+        if deletion_detected:
+            mutation_detected = True
+            if safety_order.get(safety_status, 1) < safety_order["UNSAFE"]:
+                safety_status = "UNSAFE"
+            if risk_order.get(risk_level, 2) < risk_order["HIGH"]:
+                risk_level = "HIGH"
+
+        bounded.update(
+            {
+                "safety_status": safety_status,
+                "risk_level": risk_level,
+                "mutation_detected": mutation_detected,
+                "deletion_detected": deletion_detected,
+                "reviewer_status": safety_status,
+                "reviewer_risk_level": risk_level,
+            }
+        )
+        return bounded
 
     @classmethod
     def _normalize_llm_command_details(
@@ -777,7 +1310,10 @@ class ToolDispatcher:
         if risk_level not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
             risk_level = "HIGH"
 
-        impact_analysis = " ".join(str(payload.get("impact_analysis") or "LLM 未返回影响说明。").split())
+        impact_analysis = cls._limit_command_detail_text(
+            payload.get("impact_analysis") or "LLM 未返回影响说明。",
+            _COMMAND_DETAIL_MAX_SUMMARY_CHARS,
+        )
         breakdown = cls._normalize_llm_command_breakdown_groups(
             payload.get("command_breakdown"), segments
         )
@@ -818,49 +1354,84 @@ class ToolDispatcher:
         allowed_target_types = {"file", "directory", "path", "service", "process", "url", "package", "user", "other"}
         allowed_operations = {"read", "write", "delete", "modify", "execute", "network", "unknown"}
 
+        raw_tokens = raw.get("tokens", [])
+        if not isinstance(raw_tokens, list):
+            raw_tokens = []
         tokens: list[dict[str, str]] = []
-        for item in raw.get("tokens", []) or []:
+        for item in raw_tokens[:_COMMAND_DETAIL_MAX_TOKENS_PER_SEGMENT]:
             if not isinstance(item, dict):
                 continue
-            token = str(item.get("token") or "").strip()
-            if not token or token not in command_text:
+            raw_token = str(item.get("token") or "").strip()
+            if not raw_token or raw_token not in command_text:
                 continue
+            token = raw_token[:_COMMAND_DETAIL_MAX_TOKEN_CHARS]
             role = str(item.get("role") or "unknown").strip()
             if role not in allowed_roles:
                 role = "unknown"
-            label = str(item.get("label") or role).strip()
-            meaning = " ".join(str(item.get("meaning") or label or "命令组成部分").split())
-            tokens.append({"token": token, "role": role, "label": label, "meaning": meaning})
+            label = cls._limit_command_detail_text(
+                item.get("label") or role,
+                _COMMAND_DETAIL_MAX_LABEL_CHARS,
+            )
+            meaning = cls._limit_command_detail_text(
+                item.get("meaning") or label or "命令组成部分",
+                _COMMAND_DETAIL_MAX_MEANING_CHARS,
+            )
+            tokens.append(
+                {
+                    "token": token,
+                    "role": role,
+                    "label": label,
+                    "meaning": meaning,
+                }
+            )
 
+        raw_targets = raw.get("targets", [])
+        if not isinstance(raw_targets, list):
+            raw_targets = []
         targets: list[dict[str, str]] = []
-        for item in raw.get("targets", []) or []:
+        for item in raw_targets[:_COMMAND_DETAIL_MAX_TARGETS_PER_SEGMENT]:
             if isinstance(item, str):
                 item = {"value": item}
             if not isinstance(item, dict):
                 continue
-            value = str(item.get("value") or "").strip()
-            if not value or value not in command_text:
+            raw_value = str(item.get("value") or "").strip()
+            if not raw_value or raw_value not in command_text:
                 continue
+            value = raw_value[:_COMMAND_DETAIL_MAX_TOKEN_CHARS]
             target_type = str(item.get("type") or "other").strip()
             if target_type not in allowed_target_types:
                 target_type = "other"
             operation = str(item.get("operation") or "unknown").strip()
             if operation not in allowed_operations:
                 operation = "unknown"
-            targets.append({"value": value, "type": target_type, "operation": operation})
+            targets.append(
+                {"value": value, "type": target_type, "operation": operation}
+            )
 
+        raw_warnings = raw.get("warnings", [])
+        if not isinstance(raw_warnings, list):
+            raw_warnings = []
         warnings = [
-            " ".join(str(item).split())
-            for item in raw.get("warnings", []) or []
-            if " ".join(str(item).split())
-        ][:8]
+            cls._limit_command_detail_text(
+                item,
+                _COMMAND_DETAIL_MAX_WARNING_CHARS,
+            )
+            for item in raw_warnings[:_COMMAND_DETAIL_MAX_WARNINGS_PER_SEGMENT]
+            if cls._limit_command_detail_text(item, _COMMAND_DETAIL_MAX_WARNING_CHARS)
+        ]
         confidence = str(raw.get("confidence") or "medium").strip().lower()
         if confidence not in {"low", "medium", "high"}:
             confidence = "medium"
 
         return {
-            "base_cmd": str(raw.get("base_cmd") or "").strip(),
-            "summary": " ".join(str(raw.get("summary") or "").split()),
+            "base_cmd": cls._limit_command_detail_text(
+                raw.get("base_cmd"),
+                _COMMAND_DETAIL_MAX_TOKEN_CHARS,
+            ),
+            "summary": cls._limit_command_detail_text(
+                raw.get("summary"),
+                _COMMAND_DETAIL_MAX_SUMMARY_CHARS,
+            ),
             "tokens": tokens,
             "targets": targets,
             "warnings": warnings,
@@ -911,7 +1482,10 @@ class ToolDispatcher:
         tokens = [item for child in commands for item in child["tokens"]]
         targets = [item for child in commands for item in child["targets"]]
         warnings = [item for child in commands for item in child["warnings"]]
-        summary = " ".join(str(payload.get("summary") or "").split())
+        summary = cls._limit_command_detail_text(
+            payload.get("summary"),
+            _COMMAND_DETAIL_MAX_SUMMARY_CHARS,
+        )
         if not summary and len(commands) == 1:
             summary = commands[0]["summary"]
 
@@ -937,20 +1511,31 @@ class ToolDispatcher:
         }
 
     @classmethod
-    def _llm_detail_fallback(cls, message: str, command: str = "") -> dict[str, Any]:
+    def _llm_detail_fallback(
+        cls,
+        message: str,
+        command: str = "",
+        *,
+        error_code: str = "unavailable",
+    ) -> dict[str, Any]:
+        segments = split_shell_commands(command)
         return {
             "safety_status": "UNSAFE",
             "risk_level": "HIGH",
             "mutation_detected": True,
             "deletion_detected": False,
-            "impact_analysis": message,
+            "impact_analysis": cls._limit_command_detail_text(message, 400),
             "command_breakdown": cls._normalize_llm_command_breakdown_groups(
                 {},
-                split_shell_commands(command),
+                segments,
             ),
+            "detail_status": "failed",
             "reviewer_mode": "llm_error",
             "reviewer_status": "UNSAFE",
             "reviewer_risk_level": "HIGH",
+            "analyzed_command_count": 0,
+            "command_count": len(segments),
+            "detail_errors": [error_code],
         }
 
     @staticmethod

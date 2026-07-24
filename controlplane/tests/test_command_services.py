@@ -654,3 +654,27 @@ def test_semantic_action_registry_is_platform_independent() -> None:
     assert result.outcome == "sentinel_alert_detail_shown"
     assert result.text == "暂无详细状态信息。"
     assert result.visible_to_agent
+
+
+def test_stop_handler_combines_runtime_cancellation_callbacks() -> None:
+    calls = []
+    runtime = CommandHandlerRuntime(
+        cancel_request=lambda: calls.append("live") or False,
+        abort_pending_request=lambda: calls.append("pending") or True,
+    )
+    service = CommandHandlerService(lambda _invocation: runtime)
+    command = CommandDef("/stop", "stop", "control", handler=service.handle)
+    invocation = CommandInvocation(
+        raw="/stop",
+        raw_name="/stop",
+        args=(),
+        arg_text="",
+        command=command,
+        context=CommandContext(source="cli", chat_id=1),
+    )
+
+    result = asyncio.run(service.handle(invocation))
+
+    assert calls == ["live", "pending"]
+    assert result.outcome == "task_stopped"
+    assert result.facts.changed

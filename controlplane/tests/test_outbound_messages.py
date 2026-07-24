@@ -180,9 +180,106 @@ class OutboundMessageTests(unittest.TestCase):
         self.assertEqual(len(message.facts.command_groups), 2)
         for text in (terminal, telegram):
             self.assertIn("[1] cd /srv", text)
+            self.assertIn("[1] cd /srv ;", text)
             self.assertIn("[2] systemctl restart chatdome", text)
             self.assertLess(text.index("[1] cd /srv"), text.index("[2] systemctl restart chatdome"))
             self.assertEqual(text.count("服务会短暂中断"), 1)
+
+    def test_partial_details_use_distinct_outcome_and_render_review_guidance(self):
+        details = {
+            "ok": True,
+            **self.request_payload,
+            "command": "cd /srv && systemctl restart chatdome || systemctl status chatdome",
+            "analysis": {
+                "detail_status": "partial",
+                "reviewer_mode": "llm_partial",
+                "analyzed_command_count": 2,
+                "command_count": 3,
+                "detail_errors": ["timeout"],
+                "risk_level": "HIGH",
+                "safety_status": "UNSAFE",
+                "impact_analysis": "The service may restart.",
+                "command_breakdown": {"commands": []},
+            },
+        }
+
+        message = build_approval_details(details)
+        terminal = TerminalOutboundRenderer().render(message).text_parts[0]
+        telegram = TelegramOutboundRenderer().render(message)
+        plaintext = PlainTextOutboundRenderer().render(message).text_parts[0]
+
+        self.assertEqual(message.status, "approval_details_partial")
+        self.assertEqual(message.outcome, "details_partial")
+        self.assertEqual(message.facts.detail_status, "partial")
+        self.assertEqual(message.facts.reviewer_mode, "llm_partial")
+        self.assertEqual(message.facts.analyzed_command_count, 2)
+        self.assertEqual(message.facts.command_count, 3)
+        self.assertEqual(message.facts.detail_errors, ("timeout",))
+        for text in (telegram.text_parts[0], plaintext):
+            self.assertIn("命令分析部分可用", text)
+            self.assertIn("已分析 2/3 个子命令", text)
+            self.assertIn(details["command"], text)
+        self.assertIn("Command analysis partially available", terminal)
+        self.assertIn("Analyzed 2/3 subcommands", terminal)
+        self.assertIn(details["command"], terminal)
+        self.assertEqual(
+            {control.kind for control in telegram.controls},
+            {ActionKind.APPROVE, ActionKind.APPROVE_TASK, ActionKind.REJECT},
+        )
+        self.assertIn("/confirm AP-1", plaintext)
+
+    def test_failed_details_are_unavailable_but_keep_pending_approval_controls(self):
+        details = {
+            "ok": True,
+            **self.request_payload,
+            "command": "find /tmp -type f -delete",
+            "reason": "无说明",
+            "analysis": {
+                "detail_status": "failed",
+                "reviewer_mode": "llm_error",
+                "analyzed_command_count": 0,
+                "command_count": 1,
+                "detail_errors": ["invalid_response"],
+                "impact_analysis": "LLM 解析失败。",
+            },
+        }
+
+        message = build_approval_details(details)
+        terminal = TerminalOutboundRenderer().render(message).text_parts[0]
+        telegram = TelegramOutboundRenderer().render(message)
+        plaintext = PlainTextOutboundRenderer().render(message).text_parts[0]
+
+        self.assertEqual(message.status, "approval_details_unavailable")
+        self.assertEqual(message.outcome, "details_unavailable")
+        self.assertEqual(message.facts.detail_status, "failed")
+        for text in (telegram.text_parts[0], plaintext):
+            self.assertIn("命令分析不可用", text)
+            self.assertIn("请核对原始命令后决定是否允许。", text)
+            self.assertIn(details["command"], text)
+            self.assertNotIn("LLM 解析失败", text)
+            self.assertNotIn("目的：", text)
+        self.assertNotIn("影响说明", telegram.text_parts[0])
+        self.assertNotIn("影响：", plaintext)
+        self.assertIn("Command analysis unavailable", terminal)
+        self.assertIn("Review the original command before allowing it.", terminal)
+        self.assertIn(details["command"], terminal)
+        self.assertNotIn("LLM 解析失败", terminal)
+        self.assertNotIn("Impact:", terminal)
+        self.assertEqual(len(telegram.controls), 3)
+        self.assertIn("/confirm AP-1", plaintext)
+
+    def test_reviewer_error_mode_marks_legacy_fallback_unavailable(self):
+        message = build_approval_details(
+            {
+                "ok": True,
+                **self.request_payload,
+                "analysis": {"reviewer_mode": "llm_error"},
+            }
+        )
+
+        self.assertEqual(message.facts.detail_status, "failed")
+        self.assertEqual(message.outcome, "details_unavailable")
+
     def test_sentinel_alert_uses_notification_facts_and_actions(self):
         message = build_sentinel_alert(
             "Critical alert",

@@ -136,6 +136,37 @@ def _warnings(value: Any) -> Tuple[str, ...]:
     return tuple(text for item in value if (text := str(item or "").strip()))
 
 
+def _non_negative_int(value: Any, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _approval_detail_status(*, ok: bool, analysis: Mapping[str, Any]) -> str:
+    if not ok:
+        return "failed"
+
+    explicit = normalize_text(analysis.get("detail_status", "")).casefold()
+    aliases = {
+        "complete": "complete",
+        "full": "complete",
+        "partial": "partial",
+        "failed": "failed",
+        "failure": "failed",
+        "unavailable": "failed",
+    }
+    if explicit in aliases:
+        return aliases[explicit]
+
+    reviewer_mode = normalize_text(analysis.get("reviewer_mode", "")).casefold()
+    if reviewer_mode in {"llm_error", "failed", "unavailable"}:
+        return "failed"
+    if reviewer_mode in {"llm_partial", "static_gate", "static_only"}:
+        return "partial"
+    return "complete"
+
+
 def _breakdown_groups(value: Any) -> Tuple[CommandBreakdownGroup, ...]:
     if not isinstance(value, Iterable) or isinstance(value, (str, bytes, Mapping)):
         return ()
@@ -169,8 +200,22 @@ def build_approval_details(details: Optional[Mapping[str, Any]]) -> OutboundMess
     analysis = data.get("analysis") if isinstance(data.get("analysis"), Mapping) else {}
     breakdown = analysis.get("command_breakdown") if isinstance(analysis.get("command_breakdown"), Mapping) else {}
     command_groups = _breakdown_groups(breakdown.get("commands"))
+    detail_status = _approval_detail_status(ok=ok, analysis=analysis)
+    command_count = _non_negative_int(analysis.get("command_count"), len(command_groups))
+    analyzed_command_count = min(
+        command_count,
+        _non_negative_int(
+            analysis.get("analyzed_command_count"),
+            command_count if detail_status == "complete" else 0,
+        ),
+    )
     facts = ApprovalDetailsFacts(
         ok=ok,
+        detail_status=detail_status,
+        reviewer_mode=normalize_text(analysis.get("reviewer_mode", "")),
+        analyzed_command_count=analyzed_command_count,
+        command_count=command_count,
+        detail_errors=_warnings(analysis.get("detail_errors")),
         command=str(data.get("command") or "").strip(),
         reason=str(data.get("reason") or "").strip(),
         impact_analysis=str(analysis.get("impact_analysis") or data.get("impact_analysis") or "").strip(),
@@ -185,13 +230,23 @@ def build_approval_details(details: Optional[Mapping[str, Any]]) -> OutboundMess
     )
     approval_id = normalize_text(data.get("approval_id", ""))
     actions = _approval_actions(approval_id, include_details=False) if ok and approval_id else ()
+    outcomes = {
+        "complete": "details_shown",
+        "partial": "details_partial",
+        "failed": "details_unavailable",
+    }
+    statuses = {
+        "complete": "approval_details",
+        "partial": "approval_details_partial",
+        "failed": "approval_details_unavailable",
+    }
     return OutboundMessage(
         kind=OutboundMessageKind.APPROVAL_DETAILS,
         title="Approval details",
         summary=facts.reason or facts.impact_analysis,
         severity="warning" if ok else "info",
-        status="approval_details" if ok else "idle",
-        outcome="details_shown" if ok else "details_unavailable",
+        status=statuses[detail_status] if ok else "idle",
+        outcome=outcomes[detail_status],
         refs=_refs(data),
         facts=facts,
         actions=actions,

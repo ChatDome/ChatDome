@@ -454,7 +454,10 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
     async def test_approval_button_uses_shared_command_pipeline(self):
         bot = _bot()
         bot._check_auth = lambda update: True
-        manager = SimpleNamespace(record_control_event=Mock())
+        manager = SimpleNamespace(
+            get_or_create=Mock(return_value=_pending_session()),
+            record_control_event=Mock(),
+        )
         bot.agent = SimpleNamespace(
             session_manager=manager,
             resume_session=AsyncMock(
@@ -737,6 +740,32 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         )
         resume_session.assert_not_awaited()
 
+    async def test_approval_action_retries_when_pending_state_is_unknown(self):
+        bot = _bot()
+        bot._check_auth = lambda update: True
+        bot._pending_approval_snapshot = Mock(return_value=(False, None))
+        bot._start_approval_resolution = Mock()
+        message = SimpleNamespace(text="⚠️ 待审批")
+        query = SimpleNamespace(
+            answer=AsyncMock(),
+            data="approve_cmd",
+            message=message,
+            edit_message_text=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_chat=SimpleNamespace(id=123),
+            effective_user=SimpleNamespace(id=456),
+        )
+
+        await bot._handle_callback_query(update, None)
+
+        bot._send_long_message.assert_awaited_once_with(
+            message,
+            "审批状态读取失败，请重试。",
+        )
+        query.edit_message_text.assert_not_awaited()
+
     async def test_callback_router_dispatches_sentinel_detail(self):
         bot = _bot()
         bot._check_auth = lambda update: True
@@ -767,6 +796,110 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
             "sentinel_alert_detail",
             "token",
         )
+
+    async def test_unavailable_approval_detail_retires_original_card(self):
+        bot = _bot()
+        session = _pending_session()
+        manager = SimpleNamespace(
+            get_or_create=Mock(return_value=session),
+            save_session=Mock(),
+        )
+        bot.agent = SimpleNamespace(session_manager=manager)
+        outbound = build_approval_details(
+            {
+                "ok": True,
+                "approval_id": "AP-1",
+                "command": session.pending_command,
+                "reason": session.pending_reason,
+                "analysis": {
+                    "detail_status": "failed",
+                    "reviewer_mode": "llm_error",
+                    "command_count": 1,
+                    "analyzed_command_count": 0,
+                    "detail_errors": ["timeout"],
+                },
+            }
+        )
+
+        async def deliver_details(target, **_kwargs):
+            await bot._platform_adapter.deliver(outbound, target=target)
+            return CommandResult(
+                outcome="details_unavailable",
+                outbound=outbound,
+            )
+
+        bot._dispatch_callback_command = AsyncMock(side_effect=deliver_details)
+        original_text = "⚠️ 待审批\n目的：检查系统日志"
+        message = SimpleNamespace(
+            text=original_text,
+            caption=None,
+            reply_markup=object(),
+            edit_text=AsyncMock(),
+            delete=AsyncMock(),
+        )
+
+        await bot._start_approval_detail_analysis(message, 123, "AP-1")
+        task_key = bot._approval_detail_task_key(123, "AP-1")
+        await bot._approval_detail_tasks[task_key]
+        await asyncio.sleep(0)
+
+        message.edit_text.assert_awaited_once_with(
+            "🔎 正在分析命令风险与影响…\n目的：检查系统日志",
+            reply_markup=None,
+        )
+        message.delete.assert_awaited_once_with()
+        rendered_text = bot._send_long_message.await_args.args[1]
+        self.assertIn("命令分析不可用", rendered_text)
+
+    async def test_unavailable_result_restores_pending_approval_card(self):
+        bot = _bot()
+        session = _pending_session()
+        manager = SimpleNamespace(
+            get_or_create=Mock(return_value=session),
+            save_session=Mock(),
+        )
+        bot.agent = SimpleNamespace(session_manager=manager)
+        outbound = build_approval_details(
+            {
+                "ok": False,
+                "message": "命令分析服务暂不可用。",
+            }
+        )
+
+        async def deliver_details(target, **_kwargs):
+            await bot._platform_adapter.deliver(outbound, target=target)
+            return CommandResult(
+                outcome="details_unavailable",
+                outbound=outbound,
+            )
+
+        bot._dispatch_callback_command = AsyncMock(side_effect=deliver_details)
+        original_text = "⚠️ 待审批\n目的：检查系统日志"
+        original_markup = object()
+        message = SimpleNamespace(
+            text=original_text,
+            caption=None,
+            reply_markup=original_markup,
+            edit_text=AsyncMock(),
+            delete=AsyncMock(),
+        )
+
+        await bot._start_approval_detail_analysis(message, 123, "AP-1")
+        task_key = bot._approval_detail_task_key(123, "AP-1")
+        await bot._approval_detail_tasks[task_key]
+        await asyncio.sleep(0)
+
+        self.assertEqual(
+            message.edit_text.await_args_list,
+            [
+                call(
+                    "🔎 正在分析命令风险与影响…\n目的：检查系统日志",
+                    reply_markup=None,
+                ),
+                call(original_text, reply_markup=original_markup),
+            ],
+        )
+        message.delete.assert_not_awaited()
 
 
 if __name__ == "__main__":

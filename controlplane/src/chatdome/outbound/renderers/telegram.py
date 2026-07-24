@@ -101,7 +101,8 @@ class TelegramOutboundRenderer:
             if position and show_headings:
                 lines.append("")
             if show_headings:
-                lines.append(f"[{group.index}] {group.command}")
+                separator = f" {group.separator}" if group.separator else ""
+                lines.append(f"[{group.index}] {group.command}{separator}")
             for index, item in enumerate(group.items):
                 has_more = index < len(group.items) - 1 or bool(group.warnings)
                 prefix = "├" if has_more else "└"
@@ -131,25 +132,50 @@ class TelegramOutboundRenderer:
         if not facts.ok:
             return RenderedMessage(text_parts=(f"ℹ️ {facts.error_message or '没有待审批操作。'}",))
 
+        purpose = compact_approval_purpose(facts.reason, fallback="")
+        if facts.detail_status == "failed":
+            lines = ["⚠️ 命令分析不可用"]
+            if purpose:
+                lines.extend(["", f"目的：{purpose}"])
+            lines.extend(
+                [
+                    "请核对原始命令后决定是否允许。",
+                    "",
+                    "📋 命令",
+                    facts.command or "(empty)",
+                ]
+            )
+            return RenderedMessage(
+                text_parts=("\n".join(lines),),
+                controls=self._approval_controls(message),
+            )
+
         flags = []
         if facts.mutation_detected:
             flags.append("修改系统")
         if facts.deletion_detected:
             flags.append("删除文件")
         full = self.full or bool(message.presentation.get("full"))
-        purpose = compact_approval_purpose(
-            facts.reason,
-            fallback="信息不可用",
-        )
         impact = compact_impact(facts.impact_analysis, full=full)
-        lines = [
-            "🔎 命令审批详情",
-            "",
-            f"目的：{purpose}",
-            "",
-            "🛡 安全评估",
-            f"风险等级: {facts.risk_level or 'unknown'} | 安全状态: {facts.safety_status or 'unknown'}",
-        ]
+        if facts.detail_status == "partial":
+            if facts.command_count:
+                notice = (
+                    f"已分析 {facts.analyzed_command_count}/{facts.command_count} 个子命令，"
+                    "请核对未分析部分。"
+                )
+            else:
+                notice = "部分子命令未完成分析，请核对原始命令。"
+            lines = ["⚠️ 命令分析部分可用", notice, ""]
+        else:
+            lines = ["🔎 命令审批详情", ""]
+        lines.extend(
+            [
+                f"目的：{purpose or '信息不可用'}",
+                "",
+                "🛡 安全评估",
+                f"风险等级: {facts.risk_level or 'unknown'} | 安全状态: {facts.safety_status or 'unknown'}",
+            ]
+        )
         if flags:
             lines.append(f"标记: {' · '.join(flags)}")
         lines.extend(["", "📋 命令", facts.command or "(empty)"])

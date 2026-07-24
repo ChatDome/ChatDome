@@ -81,7 +81,8 @@ class TerminalOutboundRenderer:
                 lines.append("")
             indent = "    " if show_headings else "  "
             if show_headings:
-                lines.append(f"  [{group.index}] {group.command}")
+                separator = f" {group.separator}" if group.separator else ""
+                lines.append(f"  [{group.index}] {group.command}{separator}")
             if group.items:
                 token_width = min(max(len(item.token) for item in group.items), 28)
                 for item in group.items:
@@ -119,6 +120,25 @@ class TerminalOutboundRenderer:
             text = self._status("ℹ️", "[i]", facts.error_message or "No pending approval.")
             return RenderedMessage(text_parts=(text,))
 
+        if facts.detail_status == "failed":
+            purpose = compact_approval_purpose(facts.reason, fallback="")
+            lines = [self._status("⚠️", "[!]", "Command analysis unavailable")]
+            if purpose:
+                lines.append(f"Purpose: {purpose}")
+            lines.extend(
+                [
+                    "Review the original command before allowing it.",
+                    "",
+                    "Command:",
+                    "```bash",
+                    facts.command or "(empty)",
+                    "```",
+                    "",
+                    self._action_prompt(message, include_details=False),
+                ]
+            )
+            return RenderedMessage(text_parts=("\n".join(lines),))
+
         risk = facts.risk_level or "unknown"
         safety = facts.safety_status or "unknown"
         full = self.full or bool(message.presentation.get("full"))
@@ -133,7 +153,21 @@ class TerminalOutboundRenderer:
         if facts.deletion_detected:
             flags.append("deletes files")
 
-        lines = [self._status("🔎", "[details]", "Approval details")]
+        if facts.detail_status == "partial":
+            lines = [
+                self._status("⚠️", "[!]", "Command analysis partially available")
+            ]
+            if facts.command_count:
+                lines.append(
+                    f"Analyzed {facts.analyzed_command_count}/{facts.command_count} "
+                    "subcommands. Review unanalyzed portions."
+                )
+            else:
+                lines.append(
+                    "Some subcommands were not analyzed. Review the original command."
+                )
+        else:
+            lines = [self._status("🔎", "[details]", "Approval details")]
         lines.append(f"Risk: {risk}    Safety: {safety}")
         if flags:
             lines.append(f"Flags: {', '.join(flags)}")
@@ -147,6 +181,7 @@ class TerminalOutboundRenderer:
         lines.append(self._action_prompt(message, include_details=False))
         return RenderedMessage(text_parts=("\n".join(lines),))
     @staticmethod
+
     def _command_list(items: tuple[str, ...]) -> str:
         return ", ".join(items) if items else "none"
 

@@ -662,10 +662,13 @@ async def stop_active_task(cancel_request: Callable[[], Any] | None) -> bool:
 
 async def stop_task_command_result(
     cancel_request: Callable[[], Any] | None,
+    abort_pending_request: Callable[[], Any] | None = None,
 ) -> CommandResult:
-    """Stop one platform-owned task and return shared result semantics."""
+    """Stop live work and abort a suspended approval through shared callbacks."""
 
-    stopped = await stop_active_task(cancel_request)
+    live_stopped = await stop_active_task(cancel_request)
+    pending_aborted = await stop_active_task(abort_pending_request)
+    stopped = live_stopped or pending_aborted
     if stopped:
         return CommandResult(
             state="idle",
@@ -851,8 +854,8 @@ async def approval_details_command_result(
     outbound = replace(outbound, presentation=presentation)
     available = bool(details.get("ok"))
     return CommandResult(
-        state="approval_details" if available else "idle",
-        outcome="details_shown" if available else "details_unavailable",
+        state=outbound.status if available else "idle",
+        outcome=outbound.outcome,
         event_summary="用户查看了待审批命令分析。",
         event_refs=outbound.refs,
         facts=outbound.facts,

@@ -547,6 +547,56 @@ class Agent:
             session.processing_approval_id = None
             self._persist_session(session)
 
+    async def abort_pending_task(
+        self,
+        chat_id: int,
+        approval_id: str | None = None,
+    ) -> bool:
+        """Abort a pending approval without resuming the agent loop."""
+        session = self.session_manager.get_or_create(chat_id)
+        if session.approval_processing or not session.pending_approval:
+            return False
+
+        pending_approval_id = session.pending_approval_id or ""
+        requested_approval_id = (approval_id or "").strip()
+        if requested_approval_id and pending_approval_id != requested_approval_id:
+            return False
+
+        tool_call_id = session.pending_tool_call_id or ""
+        command = session.pending_command or ""
+        run_id = session.pending_run_id or ""
+        command_hash = session.pending_command_hash or self._command_hash(command)
+
+        if tool_call_id:
+            session.add_tool_result(
+                tool_call_id,
+                (
+                    "The user stopped the current task with /stop. This command was not "
+                    "executed. Do not retry or continue it unless the user explicitly "
+                    "starts a new task."
+                ),
+            )
+        session.task_auto_approve = False
+        session.clear_pending_state()
+        self._persist_session(session)
+
+        CommandAuditTracker.record_event(
+            "command_task_aborted",
+            chat_id=chat_id,
+            approval_id=pending_approval_id,
+            run_id=run_id,
+            tool_call_id=tool_call_id,
+            command=command,
+            command_hash=command_hash,
+            approval_action="ABORT",
+        )
+        logger.info(
+            "Pending command task aborted: chat_id=%d approval_id=%s",
+            chat_id,
+            pending_approval_id,
+        )
+        return True
+
     async def get_pending_approval_details(
         self,
         chat_id: int,

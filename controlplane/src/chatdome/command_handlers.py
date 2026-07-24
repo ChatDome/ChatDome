@@ -69,6 +69,7 @@ class CommandHandlerRuntime:
     schedule_task: TaskScheduler | None = None
     defer_commands: bool = False
     model_admin_allowed: bool = True
+    abort_pending_request: Callable[[], Any] | None = None
 
 
 class CommandErrorMapper:
@@ -286,7 +287,10 @@ class CommandHandlerService:
         return clear_session_command_result(self._require(runtime.agent, "agent"), invocation.context)
 
     async def _stop(self, _invocation: CommandInvocation, runtime: CommandHandlerRuntime) -> CommandResult:
-        return await stop_task_command_result(runtime.cancel_request)
+        return await stop_task_command_result(
+            runtime.cancel_request,
+            runtime.abort_pending_request,
+        )
 
     @staticmethod
     def _env(_invocation: CommandInvocation, _runtime: CommandHandlerRuntime) -> CommandResult:

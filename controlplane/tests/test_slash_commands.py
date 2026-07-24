@@ -9,10 +9,12 @@ from chatdome.slash_commands import (
     CommandDef,
     CommandRegistry,
     CommandResult,
+    approval_details_command_result,
     bind_command_catalog,
     command_help_result,
     command_catalog,
     toggle_command_echo,
+    stop_task_command_result,
 )
 
 
@@ -205,8 +207,6 @@ def test_cli_and_telegram_share_one_command_catalog() -> None:
     assert all(item.name != "/exit" for item in cli_help.facts.commands)
 
 
-
-
 def test_platform_catalogs_bind_to_one_shared_handler() -> None:
     calls = []
 
@@ -224,5 +224,83 @@ def test_platform_catalogs_bind_to_one_shared_handler() -> None:
     for registry in registries:
         result = asyncio.run(registry.execute("/help"))
         assert result.outcome == "help_shown"
-
     assert calls == ["/help", "/help"]
+
+
+def test_stop_result_combines_live_cancellation_and_pending_abort() -> None:
+    calls = []
+
+    async def cancel_live_task():
+        calls.append("live")
+        return True
+
+    async def abort_pending_task():
+        calls.append("pending")
+        return True
+
+    result = asyncio.run(
+        stop_task_command_result(cancel_live_task, abort_pending_task)
+    )
+
+    assert calls == ["live", "pending"]
+    assert result.outcome == "task_stopped"
+    assert result.facts.changed
+
+
+def test_stop_result_keeps_legacy_single_callback_contract() -> None:
+    result = asyncio.run(stop_task_command_result(lambda: True))
+
+    assert result.outcome == "task_stopped"
+    assert result.facts.changed
+
+
+def test_approval_details_command_preserves_degraded_outcome() -> None:
+    class DetailAgent:
+        def __init__(self, detail_status):
+            self.detail_status = detail_status
+
+        async def get_pending_approval_details(
+            self,
+            chat_id,
+            approval_id=None,
+            include_llm=True,
+        ):
+            del chat_id, approval_id, include_llm
+            return {
+                "ok": True,
+                "approval_id": "AP-1",
+                "command": "echo ok",
+                "reason": "检查命令",
+                "analysis": {
+                    "detail_status": self.detail_status,
+                    "reviewer_mode": (
+                        "llm_partial"
+                        if self.detail_status == "partial"
+                        else "llm_error"
+                    ),
+                    "command_count": 1,
+                    "analyzed_command_count": (
+                        1 if self.detail_status == "partial" else 0
+                    ),
+                    "impact_analysis": "请核对原始命令。",
+                    "command_breakdown": {"commands": []},
+                },
+            }
+
+    context = CommandContext(source="telegram", chat_id=123)
+    expected = {
+        "partial": ("details_partial", "approval_details_partial"),
+        "failed": ("details_unavailable", "approval_details_unavailable"),
+    }
+    for detail_status, (outcome, state) in expected.items():
+        result = asyncio.run(
+            approval_details_command_result(
+                DetailAgent(detail_status),
+                context,
+                ("AP-1",),
+            )
+        )
+
+        assert result.outcome == outcome
+        assert result.state == state
+        assert result.outbound.outcome == outcome

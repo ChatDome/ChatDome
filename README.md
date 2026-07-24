@@ -348,7 +348,7 @@ chatdome hello
 |---------|-------------|
 | `/help` | Show terminal commands |
 | `/clear` | Clear conversation context |
-| `/stop` | Stop the current task |
+| `/stop` | Stop the current running, analyzing, or approval-waiting task |
 | `/env` | Show the runtime environment summary |
 | `/token` | Show token usage for the current terminal session |
 | `/cmd_echo` | Toggle command echo mode |
@@ -380,7 +380,7 @@ CLI and Telegram load the same command catalog and call the same business servic
 |---------|-------------|
 | *(any message)* | Talk to the AI agent in natural language |
 | `/clear` | Clear conversation context, start fresh |
-| `/stop` | Stop the current task |
+| `/stop` | Stop the current running, analyzing, or approval-waiting task |
 | `/details [approval_id] [full]` | Show pending approval details |
 | `/confirm [approval_id]` | Force-approve and execute the current pending high-risk command |
 | `/reject [approval_id]` | Reject a pending command or abandon a paused task |

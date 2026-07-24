@@ -51,6 +51,90 @@ class SequenceLLM:
         return LLMResponse(content="done")
 
 
+class SlowCommandDetailLLM:
+    model = "fake-model"
+
+    def __init__(self):
+        self.calls = 0
+        self.cancelled = False
+
+    async def chat_completion(self, messages, tools=None, response_format=None):
+        del messages, tools, response_format
+        self.calls += 1
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+class CancellationResistantDetailLLM:
+    model = "fake-model"
+
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def chat_completion(self, messages, tools=None, response_format=None):
+        del messages, tools, response_format
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            await asyncio.sleep(0.2)
+            raise
+
+
+
+def _command_detail_response(
+    commands,
+    *,
+    safety_status="SAFE",
+    risk_level="LOW",
+    mutation_detected=False,
+    deletion_detected=False,
+    compact=False,
+):
+    groups = []
+    for index, command in enumerate(commands, start=1):
+        base_cmd = command.split()[0]
+        group = {
+            "index": index,
+            "base_cmd": base_cmd,
+            "summary": f"分析 {command}",
+            "targets": [],
+            "warnings": [],
+            "irreversible": False,
+            "confidence": "high",
+        }
+        if not compact:
+            group["tokens"] = [
+                {
+                    "token": base_cmd,
+                    "role": "command",
+                    "label": "命令",
+                    "meaning": "执行当前命令",
+                }
+            ]
+        groups.append(group)
+    return LLMResponse(
+        content=json.dumps(
+            {
+                "safety_status": safety_status,
+                "risk_level": risk_level,
+                "mutation_detected": mutation_detected,
+                "deletion_detected": deletion_detected,
+                "impact_analysis": "分析当前批次命令。",
+                "command_breakdown": {
+                    "summary": "分析当前批次",
+                    "commands": groups,
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
 class RepeatingToolLLM:
     model = "fake-model"
 
@@ -328,7 +412,7 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         self.assertNotIn("删除", summary)
         self.assertNotIn("高危", summary)
 
-    def test_llm_details_do_not_merge_static_guardrail_risk(self):
+    def test_llm_details_respect_static_guardrail_risk_floor(self):
         dispatcher = ToolDispatcher(FakeSandbox())
         llm = FakeLLM(
             LLMResponse(
@@ -350,7 +434,7 @@ class PendingApprovalFollowupTests(unittest.TestCase):
                                     "meaning": "删除文件或目录",
                                 },
                                 {
-                                    "token": "/root/show_time.sh",
+                                    "token": "/",
                                     "role": "target_file",
                                     "label": "目标文件",
                                     "meaning": "命令作用的文件路径",
@@ -358,7 +442,7 @@ class PendingApprovalFollowupTests(unittest.TestCase):
                             ],
                             "targets": [
                                 {
-                                    "value": "/root/show_time.sh",
+                                    "value": "/",
                                     "type": "file",
                                     "operation": "delete",
                                 }
@@ -375,7 +459,7 @@ class PendingApprovalFollowupTests(unittest.TestCase):
 
         analysis = asyncio.run(
             dispatcher.analyze_command_for_approval(
-                "rm /root/show_time.sh",
+                "rm -rf /",
                 "用户上下文不应进入详情解析",
                 chat_id=0,
                 include_llm=True,
@@ -384,14 +468,16 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         )
 
         self.assertEqual(analysis["reviewer_mode"], "llm")
-        self.assertEqual(analysis["safety_status"], "SAFE")
-        self.assertEqual(analysis["risk_level"], "LOW")
-        self.assertFalse(analysis["deletion_detected"])
+        self.assertEqual(analysis["detail_status"], "complete")
+        self.assertEqual(analysis["safety_status"], "CRITICAL")
+        self.assertEqual(analysis["risk_level"], "CRITICAL")
+        self.assertTrue(analysis["mutation_detected"])
+        self.assertTrue(analysis["deletion_detected"])
         self.assertNotIn("static_signals", analysis)
         self.assertEqual(analysis["command_breakdown"]["tokens"][1]["label"], "目标文件")
         self.assertEqual(llm.calls[0]["response_format"], {"type": "json_object"})
         encoded_messages = json.dumps(llm.calls[0]["messages"], ensure_ascii=False)
-        self.assertIn("rm /root/show_time.sh", encoded_messages)
+        self.assertIn("rm -rf /", encoded_messages)
         self.assertNotIn("用户上下文不应进入详情解析", encoded_messages)
 
     def test_llm_details_group_tokens_by_locally_split_subcommand(self):
@@ -471,6 +557,315 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         command_payload = json.loads(user_content.split("\n", 1)[1])
         self.assertEqual([item["command"] for item in command_payload["commands"]], ["cd /srv", "systemctl restart chatdome"])
         self.assertEqual(command_payload["commands"][0]["separator"], ";")
+
+    def test_command_details_are_batched_and_merged_in_original_order(self):
+        dispatcher = ToolDispatcher(FakeSandbox())
+        llm = SequenceLLM(
+            _command_detail_response(["echo a", "echo b"]),
+            _command_detail_response(["echo c", "echo d"]),
+            _command_detail_response(["echo e"]),
+        )
+
+        with (
+            patch("chatdome.agent.tools._COMMAND_DETAIL_BATCH_SIZE", 2),
+            patch("chatdome.agent.tools._COMMAND_DETAIL_MAX_CONCURRENCY", 1),
+        ):
+            analysis = asyncio.run(
+                dispatcher.analyze_command_for_approval(
+                    "echo a && echo b && echo c || echo d; echo e",
+                    "分析批处理",
+                    include_llm=True,
+                    llm=llm,
+                )
+            )
+
+        commands = analysis["command_breakdown"]["commands"]
+        self.assertEqual(len(llm.calls), 3)
+        self.assertEqual(analysis["detail_status"], "complete")
+        self.assertEqual(analysis["analyzed_command_count"], 5)
+        self.assertEqual(analysis["command_count"], 5)
+        self.assertEqual(
+            [item["command"] for item in commands],
+            ["echo a", "echo b", "echo c", "echo d", "echo e"],
+        )
+        self.assertEqual(
+            [item["separator"] for item in commands],
+            ["&&", "&&", "||", ";", ""],
+        )
+        self.assertEqual([item["index"] for item in commands], [1, 2, 3, 4, 5])
+        batch_payloads = [
+            json.loads(call["messages"][1]["content"].split("\n", 1)[1])
+            for call in llm.calls
+        ]
+        self.assertEqual(
+            [payload["command"] for payload in batch_payloads],
+            [
+                "echo a && echo b",
+                "echo c || echo d",
+                "echo e",
+            ],
+        )
+        self.assertEqual(
+            batch_payloads[1]["commands"][0]["operator_before"],
+            "&&",
+        )
+        self.assertEqual(
+            batch_payloads[2]["commands"][0]["operator_before"],
+            ";",
+        )
+        self.assertNotIn("batch_start_index", batch_payloads[0])
+
+    def test_invalid_detail_json_retries_once_with_compact_schema(self):
+        dispatcher = ToolDispatcher(FakeSandbox())
+        llm = SequenceLLM(
+            LLMResponse(content='{"safety_status":"SAFE"'),
+            _command_detail_response(["echo ok"], compact=True),
+        )
+
+        analysis = asyncio.run(
+            dispatcher.analyze_command_for_approval(
+                "echo ok",
+                "测试紧凑重试",
+                include_llm=True,
+                llm=llm,
+            )
+        )
+
+        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(analysis["detail_status"], "partial")
+        self.assertEqual(analysis["reviewer_mode"], "llm_partial")
+        self.assertEqual(analysis["detail_errors"], ["compact_retry"])
+        self.assertEqual(analysis["analyzed_command_count"], 1)
+        self.assertEqual(
+            analysis["command_breakdown"]["commands"][0]["tokens"],
+            [],
+        )
+        self.assertIn(
+            "Linux shell 命令风险解析器",
+            llm.calls[1]["messages"][0]["content"],
+        )
+
+    def test_two_invalid_detail_responses_are_marked_failed(self):
+        dispatcher = ToolDispatcher(FakeSandbox())
+        llm = SequenceLLM(
+            LLMResponse(content="{"),
+            LLMResponse(content="{"),
+        )
+
+        analysis = asyncio.run(
+            dispatcher.analyze_command_for_approval(
+                "echo ok",
+                "测试分析失败",
+                include_llm=True,
+                llm=llm,
+            )
+        )
+
+        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(analysis["detail_status"], "failed")
+        self.assertEqual(analysis["reviewer_mode"], "llm_error")
+        self.assertEqual(analysis["detail_errors"], ["invalid_response"])
+        self.assertEqual(analysis["analyzed_command_count"], 0)
+        self.assertEqual(analysis["command_count"], 1)
+
+    def test_empty_command_groups_retry_then_fail_instead_of_showing_details(self):
+        invalid_response = LLMResponse(
+            content=json.dumps(
+                {
+                    "safety_status": "SAFE",
+                    "risk_level": "LOW",
+                    "mutation_detected": False,
+                    "deletion_detected": False,
+                    "impact_analysis": "无影响。",
+                    "command_breakdown": {
+                        "summary": "空结构",
+                        "commands": [{}, {}],
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+        dispatcher = ToolDispatcher(FakeSandbox())
+        llm = SequenceLLM(invalid_response, invalid_response)
+
+        analysis = asyncio.run(
+            dispatcher.analyze_command_for_approval(
+                "echo a && echo b",
+                "测试空结构",
+                include_llm=True,
+                llm=llm,
+            )
+        )
+
+        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(analysis["detail_status"], "failed")
+        self.assertEqual(analysis["detail_errors"], ["invalid_response"])
+
+    def test_inconsistent_deletion_flags_retry_then_fail(self):
+        invalid_response = _command_detail_response(
+            ["rm /tmp/a"],
+            safety_status="SAFE",
+            risk_level="LOW",
+            mutation_detected=False,
+            deletion_detected=True,
+        )
+        dispatcher = ToolDispatcher(FakeSandbox())
+        llm = SequenceLLM(invalid_response, invalid_response)
+
+        analysis = asyncio.run(
+            dispatcher.analyze_command_for_approval(
+                "rm /tmp/a",
+                "测试风险一致性",
+                include_llm=True,
+                llm=llm,
+            )
+        )
+
+        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(analysis["detail_status"], "failed")
+        self.assertEqual(analysis["detail_errors"], ["invalid_response"])
+
+    def test_failed_batch_preserves_completed_batches_as_partial(self):
+        dispatcher = ToolDispatcher(FakeSandbox())
+        llm = SequenceLLM(
+            _command_detail_response(["echo a", "echo b"]),
+            LLMResponse(content="{"),
+            LLMResponse(content="{"),
+        )
+
+        with (
+            patch("chatdome.agent.tools._COMMAND_DETAIL_BATCH_SIZE", 2),
+            patch("chatdome.agent.tools._COMMAND_DETAIL_MAX_CONCURRENCY", 1),
+        ):
+            analysis = asyncio.run(
+                dispatcher.analyze_command_for_approval(
+                    "echo a && echo b && echo c",
+                    "测试部分结果",
+                    include_llm=True,
+                    llm=llm,
+                )
+            )
+
+        commands = analysis["command_breakdown"]["commands"]
+        self.assertEqual(analysis["detail_status"], "partial")
+        self.assertEqual(analysis["analyzed_command_count"], 2)
+        self.assertEqual(analysis["command_count"], 3)
+        self.assertEqual(analysis["detail_errors"], ["invalid_response"])
+        self.assertEqual(commands[2]["summary"], "命令解析不可用")
+        self.assertEqual(analysis["safety_status"], "UNSAFE")
+        self.assertEqual(analysis["risk_level"], "HIGH")
+        self.assertTrue(analysis["mutation_detected"])
+
+    def test_command_detail_hard_timeout_cancels_pending_batches(self):
+        dispatcher = ToolDispatcher(FakeSandbox())
+        llm = SlowCommandDetailLLM()
+
+        with patch(
+            "chatdome.agent.tools._COMMAND_DETAIL_TIMEOUT_SECONDS",
+            0.01,
+        ):
+            analysis = asyncio.run(
+                dispatcher.analyze_command_for_approval(
+                    "echo ok",
+                    "测试分析超时",
+                    include_llm=True,
+                    llm=llm,
+                )
+            )
+
+        self.assertTrue(llm.cancelled)
+        self.assertEqual(analysis["detail_status"], "failed")
+        self.assertEqual(analysis["detail_errors"], ["timeout"])
+        self.assertIn("分析超时", analysis["impact_analysis"])
+
+    def test_hard_timeout_does_not_wait_for_delayed_cancellation(self):
+        async def run_case():
+            dispatcher = ToolDispatcher(FakeSandbox())
+            llm = CancellationResistantDetailLLM()
+            loop = asyncio.get_running_loop()
+            started_at = loop.time()
+            analysis = await dispatcher.analyze_command_for_approval(
+                "echo ok",
+                "测试硬超时",
+                include_llm=True,
+                llm=llm,
+            )
+            elapsed = loop.time() - started_at
+
+            await asyncio.wait_for(llm.cancelled.wait(), timeout=0.1)
+            self.assertLess(elapsed, 0.1)
+            self.assertEqual(analysis["detail_status"], "failed")
+            self.assertEqual(analysis["detail_errors"], ["timeout"])
+            await asyncio.sleep(0.25)
+
+        with patch(
+            "chatdome.agent.tools._COMMAND_DETAIL_TIMEOUT_SECONDS",
+            0.01,
+        ):
+            asyncio.run(run_case())
+
+    def test_external_cancellation_does_not_wait_for_detail_provider(self):
+        async def run_case():
+            dispatcher = ToolDispatcher(FakeSandbox())
+            llm = CancellationResistantDetailLLM()
+            detail_task = asyncio.create_task(
+                dispatcher.analyze_command_for_approval(
+                    "echo ok",
+                    "测试中止分析",
+                    include_llm=True,
+                    llm=llm,
+                )
+            )
+            await asyncio.wait_for(llm.started.wait(), timeout=0.1)
+
+            started_at = asyncio.get_running_loop().time()
+            detail_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await detail_task
+            elapsed = asyncio.get_running_loop().time() - started_at
+
+            await asyncio.wait_for(llm.cancelled.wait(), timeout=0.1)
+            self.assertLess(elapsed, 0.1)
+            await asyncio.sleep(0.25)
+
+        asyncio.run(run_case())
+
+    def test_command_detail_normalization_limits_each_segment(self):
+        raw = {
+            "base_cmd": "echo",
+            "summary": "摘要" * 200,
+            "tokens": [
+                {
+                    "token": "echo",
+                    "role": "command",
+                    "label": "标签" * 100,
+                    "meaning": "解释" * 200,
+                }
+                for _ in range(20)
+            ],
+            "targets": [
+                {
+                    "value": "/tmp/a",
+                    "type": "file",
+                    "operation": "read",
+                }
+                for _ in range(10)
+            ],
+            "warnings": [f"风险 {index}" for index in range(8)],
+        }
+
+        normalized = ToolDispatcher._normalize_llm_command_breakdown(
+            raw,
+            "echo /tmp/a",
+        )
+
+        self.assertEqual(len(normalized["tokens"]), 12)
+        self.assertEqual(len(normalized["targets"]), 6)
+        self.assertEqual(len(normalized["warnings"]), 3)
+        self.assertLessEqual(len(normalized["tokens"][0]["label"]), 40)
+        self.assertLessEqual(len(normalized["tokens"][0]["meaning"]), 120)
+        self.assertLessEqual(len(normalized["summary"]), 160)
+
     def test_pending_session_snapshot_preserves_approval_binding(self):
         session = _pending_session()
 
@@ -1001,6 +1396,89 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         persisted_text = "\n".join(item["content"] for item in session.pending_followups)
         self.assertNotIn("<tool_call>", persisted_text)
         self.assertNotIn("<function=run_shell_command>", persisted_text)
+
+    def test_abort_pending_task_clears_approval_without_resuming(self):
+        session = _pending_session()
+        session.task_auto_approve = True
+        session.pending_analysis = {"reviewer_mode": "llm"}
+        session.pending_followups = [{"role": "user", "content": "question"}]
+        agent = _resume_agent(session)
+
+        with patch(
+            "chatdome.agent.audit.CommandAuditTracker.record_event"
+        ) as record_event:
+            aborted = asyncio.run(agent.abort_pending_task(123))
+            repeated_abort = asyncio.run(
+                agent.abort_pending_task(123, approval_id="AP-20260423-000001")
+            )
+
+        self.assertTrue(aborted)
+        self.assertFalse(repeated_abort)
+        self.assertFalse(session.pending_approval)
+        self.assertFalse(session.task_auto_approve)
+        self.assertIsNone(session.pending_approval_id)
+        self.assertIsNone(session.pending_command)
+        self.assertEqual(session.pending_followups, [])
+        self.assertEqual(agent.tool_dispatcher.sandbox.commands, [])
+        self.assertEqual(agent.llm.calls, [])
+        self.assertGreater(agent.session_manager.saved, 0)
+
+        tool_results = [
+            message
+            for message in session.messages
+            if message.get("role") == "tool"
+        ]
+        self.assertEqual(len(tool_results), 1)
+        self.assertEqual(tool_results[0]["tool_call_id"], "call-1")
+        self.assertIn("/stop", tool_results[0]["content"])
+
+        record_event.assert_called_once()
+        audit_call = record_event.call_args
+        self.assertEqual(audit_call.args[0], "command_task_aborted")
+        self.assertEqual(audit_call.kwargs["approval_id"], "AP-20260423-000001")
+        self.assertEqual(audit_call.kwargs["approval_action"], "ABORT")
+
+        raw_result, final_response = asyncio.run(
+            agent.resume_session(
+                123,
+                "APPROVE",
+                approval_id="AP-20260423-000001",
+            )
+        )
+        self.assertEqual(raw_result, "")
+        self.assertEqual(final_response.payload["approval_status"], "unavailable")
+        self.assertEqual(agent.tool_dispatcher.sandbox.commands, [])
+
+    def test_abort_pending_task_rejects_mismatched_approval_id(self):
+        session = _pending_session()
+        agent = _resume_agent(session)
+
+        with patch(
+            "chatdome.agent.audit.CommandAuditTracker.record_event"
+        ) as record_event:
+            aborted = asyncio.run(
+                agent.abort_pending_task(123, approval_id="AP-OTHER")
+            )
+
+        self.assertFalse(aborted)
+        self.assertTrue(session.pending_approval)
+        self.assertEqual(agent.session_manager.saved, 0)
+        record_event.assert_not_called()
+
+    def test_abort_pending_task_does_not_race_approval_processing(self):
+        session = _pending_session()
+        session.approval_processing = True
+        agent = _resume_agent(session)
+
+        with patch(
+            "chatdome.agent.audit.CommandAuditTracker.record_event"
+        ) as record_event:
+            aborted = asyncio.run(agent.abort_pending_task(123))
+
+        self.assertFalse(aborted)
+        self.assertTrue(session.pending_approval)
+        self.assertEqual(agent.session_manager.saved, 0)
+        record_event.assert_not_called()
 
     def test_resume_rejects_mismatched_approval_id_without_execution(self):
         session = _pending_session()

@@ -88,6 +88,11 @@ class ApprovalRequestFacts:
 @dataclass(frozen=True)
 class ApprovalDetailsFacts:
     ok: bool
+    detail_status: str = "complete"
+    reviewer_mode: str = ""
+    analyzed_command_count: int = 0
+    command_count: int = 0
+    detail_errors: Tuple[str, ...] = ()
     command: str = ""
     reason: str = ""
     impact_analysis: str = ""
