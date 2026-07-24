@@ -137,9 +137,15 @@ class TelegramOutboundRenderer:
         if facts.deletion_detected:
             flags.append("删除文件")
         full = self.full or bool(message.presentation.get("full"))
+        purpose = compact_approval_purpose(
+            facts.reason,
+            fallback="信息不可用",
+        )
         impact = compact_impact(facts.impact_analysis, full=full)
         lines = [
             "🔎 命令审批详情",
+            "",
+            f"目的：{purpose}",
             "",
             "🛡 安全评估",
             f"风险等级: {facts.risk_level or 'unknown'} | 安全状态: {facts.safety_status or 'unknown'}",

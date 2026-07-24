@@ -1,12 +1,15 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from chatdome.agent.result import AgentResult
+from chatdome.agent.session import AgentSession
 from chatdome.config import ChatDomeConfig
+from chatdome.outbound.builders import build_approval_details
 from chatdome.sentinel.alerter import AlertEvent
 from chatdome.platform_adapters import TelegramPlatformAdapter
+from chatdome.slash_commands import CommandResult
 from chatdome.telegram.bot import TelegramBot
 
 
@@ -40,6 +43,21 @@ def _bot() -> TelegramBot:
         bot._deliver_telegram_rendered
     )
     return bot
+
+
+def _pending_session(
+    approval_id: str = "AP-1",
+    reason: str = "检查系统日志",
+) -> AgentSession:
+    return AgentSession(
+        chat_id=123,
+        pending_approval=True,
+        pending_approval_id=approval_id,
+        pending_tool_call_id="CALL-1",
+        pending_command="journalctl -n 20",
+        pending_reason=reason,
+        pending_risk_level="MEDIUM",
+    )
 
 
 class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
@@ -251,6 +269,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         text = TelegramBot._format_approval_detail_text(details)
 
         self.assertIn("命令审批详情", text)
+        self.assertIn("目的：delete old helper", text)
         self.assertIn("命令解析", text)
         self.assertIn("/root/show_time.sh", text)
         self.assertIn("目标文件（将被永久删除）", text)
@@ -294,7 +313,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         fallback_labels = [button.text for row in fallback_markup.inline_keyboard for button in row]
         self.assertEqual(fallback_labels, ["❌ 拒绝", "🔎 命令分析"])
 
-    async def test_approval_detail_callback_removes_original_buttons(self):
+    async def test_approval_detail_callback_starts_in_place_analysis(self):
         bot = _bot()
         bot._check_auth = lambda update: True
         bot._start_approval_detail_analysis = AsyncMock()
@@ -311,12 +330,126 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
 
         await bot._handle_callback_query(update, None)
 
-        query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
+        query.edit_message_reply_markup.assert_not_awaited()
         bot._start_approval_detail_analysis.assert_awaited_once()
         call_args = bot._start_approval_detail_analysis.await_args.args
         self.assertEqual(call_args[:3], (query.message, 123, "AP-1"))
         self.assertEqual(call_args[3].source, "telegram")
         self.assertEqual(call_args[3].chat_id, 123)
+
+    async def test_approval_detail_replaces_request_then_retires_it_on_success(self):
+        bot = _bot()
+        session = _pending_session()
+        manager = SimpleNamespace(
+            get_or_create=Mock(return_value=session),
+            save_session=Mock(),
+        )
+        bot.agent = SimpleNamespace(session_manager=manager)
+        outbound = build_approval_details(
+            {
+                "ok": True,
+                "approval_id": "AP-1",
+                "command": session.pending_command,
+                "reason": session.pending_reason,
+                "analysis": {
+                    "risk_level": "MEDIUM",
+                    "safety_status": "REVIEW",
+                    "impact_analysis": "读取最近的系统日志。",
+                },
+            }
+        )
+        lifecycle_events = []
+
+        async def deliver_details(target, **_kwargs):
+            await bot._platform_adapter.deliver(outbound, target=target)
+            return CommandResult(
+                outcome="details_shown",
+                outbound=outbound,
+            )
+
+        async def record_detail_delivery(*_args, **_kwargs):
+            lifecycle_events.append("details")
+
+        async def record_request_deletion():
+            lifecycle_events.append("delete")
+
+        bot._dispatch_callback_command = AsyncMock(side_effect=deliver_details)
+        bot._send_long_message.side_effect = record_detail_delivery
+        original_text = "⚠️ 待审批\n目的：检查系统日志\n是否允许本次操作？"
+        original_markup = object()
+        message = SimpleNamespace(
+            text=original_text,
+            caption=None,
+            reply_markup=original_markup,
+            edit_text=AsyncMock(),
+            delete=AsyncMock(side_effect=record_request_deletion),
+        )
+
+        await bot._start_approval_detail_analysis(message, 123, "AP-1")
+        task_key = bot._approval_detail_task_key(123, "AP-1")
+        await bot._approval_detail_tasks[task_key]
+        await asyncio.sleep(0)
+
+        message.edit_text.assert_awaited_once_with(
+            "🔎 正在分析命令风险与影响…\n目的：检查系统日志",
+            reply_markup=None,
+        )
+        message.delete.assert_awaited_once_with()
+        self.assertEqual(lifecycle_events, ["details", "delete"])
+
+    async def test_approval_request_delete_failure_uses_retired_state(self):
+        message = SimpleNamespace(
+            delete=AsyncMock(side_effect=RuntimeError("delete unavailable")),
+            edit_text=AsyncMock(),
+        )
+
+        await TelegramBot._retire_approval_request(message)
+
+        message.delete.assert_awaited_once_with()
+        message.edit_text.assert_awaited_once_with(
+            "ℹ️ 命令分析已生成，请在最新卡片中审批。",
+            reply_markup=None,
+        )
+
+    async def test_approval_detail_failure_restores_request_and_controls(self):
+        bot = _bot()
+        session = _pending_session()
+        manager = SimpleNamespace(
+            get_or_create=Mock(return_value=session),
+            save_session=Mock(),
+        )
+        bot.agent = SimpleNamespace(session_manager=manager)
+        bot._dispatch_callback_command = AsyncMock(
+            side_effect=RuntimeError("analysis unavailable")
+        )
+        original_text = "⚠️ 待审批\n目的：检查系统日志\n是否允许本次操作？"
+        original_markup = object()
+        message = SimpleNamespace(
+            text=original_text,
+            caption=None,
+            reply_markup=original_markup,
+            edit_text=AsyncMock(),
+            delete=AsyncMock(),
+        )
+
+        await bot._start_approval_detail_analysis(message, 123, "AP-1")
+        task_key = bot._approval_detail_task_key(123, "AP-1")
+        await bot._approval_detail_tasks[task_key]
+        await asyncio.sleep(0)
+
+        self.assertEqual(
+            message.edit_text.await_args_list,
+            [
+                call(
+                    "🔎 正在分析命令风险与影响…\n目的：检查系统日志",
+                    reply_markup=None,
+                ),
+                call(original_text, reply_markup=original_markup),
+            ],
+        )
+        message.delete.assert_not_awaited()
+        error_text = bot._send_long_message.await_args.args[1]
+        self.assertIn("命令分析失败", error_text)
 
     async def test_approval_button_uses_shared_command_pipeline(self):
         bot = _bot()
@@ -368,6 +501,241 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         event = manager.record_control_event.call_args.args[1]
         self.assertEqual(event["command"], "/confirm")
         self.assertEqual(event["outcome"], "approval_confirmed")
+
+    async def test_approval_resolution_reserves_slot_before_editing_card(self):
+        bot = _bot()
+        gate = asyncio.Event()
+
+        async def dispatch(*_args, **_kwargs):
+            await gate.wait()
+            return CommandResult(outcome="approval_confirmed")
+
+        bot._dispatch_callback_command = AsyncMock(side_effect=dispatch)
+        message = SimpleNamespace(
+            text="⚠️ 待审批\n目的：检查系统日志",
+            reply_markup=object(),
+        )
+        approve_query = SimpleNamespace(
+            message=message,
+            edit_message_text=AsyncMock(),
+        )
+        reject_query = SimpleNamespace(
+            message=message,
+            edit_message_text=AsyncMock(),
+        )
+        command_context = SimpleNamespace(source="telegram", chat_id=123)
+
+        approve_started = bot._start_approval_resolution(
+            approve_query,
+            123,
+            action="APPROVE",
+            reason="检查系统日志",
+            approval_id="AP-1",
+            data="approval:approve:AP-1",
+            command_name="/confirm",
+            args=("AP-1",),
+            command_context=command_context,
+        )
+        reject_started = bot._start_approval_resolution(
+            reject_query,
+            123,
+            action="REJECT",
+            reason="检查系统日志",
+            approval_id="AP-1",
+            data="approval:reject:AP-1",
+            command_name="/reject",
+            args=("AP-1",),
+            command_context=command_context,
+        )
+        task = bot._approval_resolution_tasks[123]
+        await asyncio.sleep(0)
+
+        self.assertTrue(approve_started)
+        self.assertFalse(reject_started)
+        approve_query.edit_message_text.assert_awaited_once_with(
+            text="✅ 已批准\n目的：检查系统日志",
+            reply_markup=None,
+        )
+        reject_query.edit_message_text.assert_not_awaited()
+
+        gate.set()
+        await task
+        bot._dispatch_callback_command.assert_awaited_once()
+
+    async def test_approval_resolution_failure_restores_matching_pending_card(self):
+        bot = _bot()
+        bot._check_auth = lambda update: True
+        session = _pending_session()
+        manager = SimpleNamespace(
+            get_or_create=Mock(return_value=session),
+            record_control_event=Mock(),
+        )
+        bot.agent = SimpleNamespace(
+            session_manager=manager,
+            resume_session=AsyncMock(),
+        )
+        bot._dispatch_callback_command = AsyncMock(
+            side_effect=RuntimeError("dispatch unavailable")
+        )
+        original_text = "⚠️ 待审批\n目的：检查系统日志\n是否允许本次操作？"
+        original_markup = object()
+        message = SimpleNamespace(
+            text=original_text,
+            reply_markup=original_markup,
+            edit_text=AsyncMock(),
+        )
+        query = SimpleNamespace(
+            answer=AsyncMock(),
+            data="approval:approve:AP-1",
+            message=message,
+            edit_message_text=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_chat=SimpleNamespace(id=123),
+            effective_user=SimpleNamespace(id=456),
+        )
+
+        await bot._handle_callback_query(update, None)
+        task = bot._approval_resolution_tasks[123]
+        await task
+        await asyncio.sleep(0)
+
+        query.edit_message_text.assert_awaited_once_with(
+            text="✅ 已批准\n目的：检查系统日志",
+            reply_markup=None,
+        )
+        message.edit_text.assert_awaited_once_with(
+            original_text,
+            reply_markup=original_markup,
+        )
+        error_text = bot._send_long_message.await_args.args[1]
+        self.assertIn("命令处理失败", error_text)
+
+    async def test_approval_from_detail_uses_session_reason_after_sentinel_context(self):
+        bot = _bot()
+        bot._check_auth = lambda update: True
+        session = _pending_session(reason="检查系统日志")
+        manager = SimpleNamespace(
+            get_or_create=Mock(return_value=session),
+            save_session=Mock(),
+            record_control_event=Mock(),
+        )
+        resume_session = AsyncMock(
+            return_value=(None, AgentResult.reply("approved"))
+        )
+        bot.agent = SimpleNamespace(
+            session_manager=manager,
+            resume_session=resume_session,
+        )
+        bot._app = SimpleNamespace(
+            bot=object(),
+            create_task=lambda coroutine: asyncio.create_task(coroutine),
+        )
+        bot._send_bot_text = AsyncMock()
+        await bot.send_alert(123, "检测到新的监听端口。", _event())
+        message = SimpleNamespace(
+            text="🔎 命令审批详情\n\n🛡 安全评估\n风险等级: MEDIUM",
+        )
+        query = SimpleNamespace(
+            answer=AsyncMock(),
+            data="approval:approve:AP-1",
+            message=message,
+            edit_message_text=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_chat=SimpleNamespace(id=123),
+            effective_user=SimpleNamespace(id=456),
+        )
+
+        await bot._handle_callback_query(update, None)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertEqual(session.pending_reason, "检查系统日志")
+        self.assertEqual(len(session.pending_followups), 2)
+        bot._send_bot_text.assert_awaited_once()
+        query.edit_message_text.assert_awaited_once_with(
+            text="✅ 已批准\n目的：检查系统日志",
+            reply_markup=None,
+        )
+        resume_session.assert_awaited_once_with(
+            123,
+            "APPROVE",
+            approval_id="AP-1",
+        )
+
+    async def test_stale_approval_card_does_not_use_another_approval_reason(self):
+        bot = _bot()
+        bot._check_auth = lambda update: True
+        session = _pending_session(
+            approval_id="AP-2",
+            reason="另一个审批的目的",
+        )
+        manager = SimpleNamespace(
+            get_or_create=Mock(return_value=session),
+            record_control_event=Mock(),
+        )
+        resume_session = AsyncMock()
+        bot.agent = SimpleNamespace(
+            session_manager=manager,
+            resume_session=resume_session,
+        )
+        message = SimpleNamespace(text="🔎 旧命令审批详情")
+        query = SimpleNamespace(
+            answer=AsyncMock(),
+            data="approval:approve:AP-1",
+            message=message,
+            edit_message_text=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_chat=SimpleNamespace(id=123),
+            effective_user=SimpleNamespace(id=456),
+        )
+
+        await bot._handle_callback_query(update, None)
+
+        query.edit_message_text.assert_awaited_once_with(
+            text="ℹ️ 审批已失效，请使用最新卡片。",
+            reply_markup=None,
+        )
+        resume_session.assert_not_awaited()
+
+    async def test_legacy_approval_button_cannot_bind_current_session(self):
+        bot = _bot()
+        bot._check_auth = lambda update: True
+        session = _pending_session()
+        manager = SimpleNamespace(
+            get_or_create=Mock(return_value=session),
+            record_control_event=Mock(),
+        )
+        resume_session = AsyncMock()
+        bot.agent = SimpleNamespace(
+            session_manager=manager,
+            resume_session=resume_session,
+        )
+        message = SimpleNamespace(text="⚠️ 旧待审批卡片")
+        query = SimpleNamespace(
+            answer=AsyncMock(),
+            data="approve_cmd",
+            message=message,
+            edit_message_text=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_chat=SimpleNamespace(id=123),
+            effective_user=SimpleNamespace(id=456),
+        )
+
+        await bot._handle_callback_query(update, None)
+
+        query.edit_message_text.assert_awaited_once_with(
+            text="ℹ️ 审批已失效，请使用最新卡片。",
+            reply_markup=None,
+        )
+        resume_session.assert_not_awaited()
 
     async def test_callback_router_dispatches_sentinel_detail(self):
         bot = _bot()

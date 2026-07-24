@@ -40,6 +40,7 @@ from chatdome.outbound.builders import (
     build_notification_message,
     build_sentinel_alert,
 )
+from chatdome.outbound.renderers.common import compact_approval_purpose
 from chatdome.outbound.renderers.telegram import TelegramOutboundRenderer, group_controls
 from chatdome.platform_adapters import (
     TelegramDeliveryTarget,
@@ -434,38 +435,139 @@ class TelegramBot:
             return task
         return None
 
-    @staticmethod
-    def _approval_decision_text(message: Any, action: str) -> str:
-        """Keep the approval purpose visible after replacing the action card."""
-        source = str(getattr(message, "text", "") or getattr(message, "caption", "") or "")
-        purpose = next(
-            (line.strip() for line in source.splitlines() if line.strip().startswith("目的：")),
-            "目的：信息不可用",
-        )
-        title = "❌ 已拒绝" if action == "REJECT" else "✅ 已批准"
-        return f"{title}\n{purpose}"
-
-    async def _start_approval_resolution(
+    def _pending_approval_snapshot(
         self,
+        chat_id: int,
+        approval_id: str | None = None,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Read approval state without treating rendered Telegram text as authoritative."""
+        manager = getattr(getattr(self, "agent", None), "session_manager", None)
+        get_or_create = getattr(manager, "get_or_create", None)
+        if not callable(get_or_create):
+            return False, None
+
+        try:
+            session = get_or_create(chat_id)
+        except Exception:
+            logger.exception("Failed to read pending approval for chat_id=%s", chat_id)
+            return False, None
+
+        if (
+            not bool(getattr(session, "pending_approval", False))
+            or not str(getattr(session, "pending_tool_call_id", "") or "").strip()
+            or bool(getattr(session, "approval_processing", False))
+        ):
+            return True, None
+
+        requested_id = str(approval_id or "").strip()
+        current_id = str(getattr(session, "pending_approval_id", "") or "").strip()
+        if not requested_id or requested_id != current_id:
+            return True, None
+
+        return True, {
+            "approval_id": current_id,
+            "command": str(getattr(session, "pending_command", "") or ""),
+            "reason": str(getattr(session, "pending_reason", "") or ""),
+            "risk_level": str(getattr(session, "pending_risk_level", "") or ""),
+            "requires_detail_expansion": True,
+        }
+
+    @staticmethod
+    def _approval_purpose(message: Any, *, reason: str = "") -> str:
+        """Prefer approval state while retaining compatibility with older cards."""
+        source = str(getattr(message, "text", "") or getattr(message, "caption", "") or "")
+        rendered_reason = next(
+            (
+                line.strip().removeprefix("目的：").strip()
+                for line in source.splitlines()
+                if line.strip().startswith("目的：")
+            ),
+            "",
+        )
+        return compact_approval_purpose(
+            reason or rendered_reason,
+            fallback="信息不可用",
+        )
+
+    @staticmethod
+    def _approval_decision_text(
         message: Any,
+        action: str,
+        *,
+        reason: str = "",
+    ) -> str:
+        """Keep the approval purpose visible after replacing the action card."""
+        purpose = TelegramBot._approval_purpose(message, reason=reason)
+        title = "❌ 已拒绝" if action == "REJECT" else "✅ 已批准"
+        return f"{title}\n目的：{purpose}"
+
+    @staticmethod
+    async def _restore_approval_request(
+        message: Any,
+        text: str,
+        reply_markup: Any,
+    ) -> None:
+        edit_text = getattr(message, "edit_text", None)
+        if not callable(edit_text) or not text:
+            return
+        try:
+            await edit_text(text, reply_markup=reply_markup)
+        except Exception:
+            logger.exception("Failed to restore approval request")
+
+    @staticmethod
+    async def _retire_approval_request(message: Any) -> None:
+        delete = getattr(message, "delete", None)
+        if callable(delete):
+            try:
+                await delete()
+                return
+            except Exception:
+                logger.debug("Failed to delete superseded approval request", exc_info=True)
+
+        edit_text = getattr(message, "edit_text", None)
+        if callable(edit_text):
+            try:
+                await edit_text(
+                    "ℹ️ 命令分析已生成，请在最新卡片中审批。",
+                    reply_markup=None,
+                )
+            except Exception:
+                logger.debug("Failed to retire superseded approval request", exc_info=True)
+
+    def _start_approval_resolution(
+        self,
+        query: Any,
         chat_id: int,
         *,
+        action: str,
+        reason: str,
+        approval_id: str | None,
         data: str,
         command_name: str,
         args: tuple[str, ...],
         command_context: CommandContext,
-    ) -> None:
+    ) -> bool:
         existing_task = self._approval_resolution_tasks.get(chat_id)
         if existing_task and not existing_task.done():
-            return
+            return False
 
+        message = query.message
         coroutine = self._run_approval_resolution(
+            query=query,
             message=message,
             chat_id=chat_id,
+            action=action,
+            reason=reason,
+            approval_id=approval_id,
             data=data,
             command_name=command_name,
             args=args,
             command_context=command_context,
+            original_text=str(
+                getattr(message, "text", "") or getattr(message, "caption", "") or ""
+            ),
+            original_reply_markup=getattr(message, "reply_markup", None),
         )
         task = self._app.create_task(coroutine) if self._app is not None else asyncio.create_task(coroutine)
         self._approval_resolution_tasks[chat_id] = task
@@ -475,18 +577,34 @@ class TelegramBot:
                 self._approval_resolution_tasks.pop(chat_id, None)
 
         task.add_done_callback(_drop_finished_task)
+        return True
 
     async def _run_approval_resolution(
         self,
         *,
+        query: Any,
         message: Any,
         chat_id: int,
+        action: str,
+        reason: str,
+        approval_id: str | None,
         data: str,
         command_name: str,
         args: tuple[str, ...],
         command_context: CommandContext,
+        original_text: str,
+        original_reply_markup: Any,
     ) -> None:
+        resolved = False
         try:
+            await query.edit_message_text(
+                text=self._approval_decision_text(
+                    message,
+                    action,
+                    reason=reason,
+                ),
+                reply_markup=None,
+            )
             await self._dispatch_callback_command(
                 message,
                 data=data,
@@ -494,6 +612,7 @@ class TelegramBot:
                 args=args,
                 command_context=command_context,
             )
+            resolved = True
         except asyncio.CancelledError:
             logger.info("Approval resolution stopped for chat_id=%s", chat_id)
             raise
@@ -507,6 +626,15 @@ class TelegramBot:
                     fallback="命令处理失败，请重新发起任务。",
                 ),
             )
+        finally:
+            if not resolved:
+                _, snapshot = self._pending_approval_snapshot(chat_id, approval_id)
+                if snapshot is not None:
+                    await self._restore_approval_request(
+                        message,
+                        original_text,
+                        original_reply_markup,
+                    )
 
     async def _cancel_active_task_for_chat(self, chat_id: int) -> bool:
         task = self._active_task_for_chat(chat_id)
@@ -649,14 +777,9 @@ class TelegramBot:
         if existing_task and not existing_task.done():
             await self._send_long_message(
                 message,
-                "命令分析仍在进行中，请稍候。",
+                "命令分析正在进行。",
             )
             return
-
-        await self._send_long_message(
-            message,
-            "⏳",
-        )
 
         coroutine = self._run_approval_detail_analysis(
             message=message,
@@ -684,14 +807,34 @@ class TelegramBot:
         approval_id: str | None,
         command_context: CommandContext | None = None,
     ) -> None:
+        state_known, snapshot = self._pending_approval_snapshot(chat_id, approval_id)
+        if state_known and snapshot is None:
+            try:
+                await message.edit_text(
+                    "ℹ️ 审批已失效，请使用最新卡片。",
+                    reply_markup=None,
+                )
+            except Exception:
+                logger.exception("Failed to retire expired approval request")
+            return
+
+        original_text = str(
+            getattr(message, "text", "") or getattr(message, "caption", "") or ""
+        )
+        original_reply_markup = getattr(message, "reply_markup", None)
+        reason = str((snapshot or {}).get("reason", ""))
+        purpose = self._approval_purpose(message, reason=reason)
         context = command_context or CommandContext(
             source="telegram",
             chat_id=chat_id,
         )
         args = (approval_id,) if approval_id else ()
-
-
+        details_shown = False
         try:
+            await message.edit_text(
+                f"🔎 正在分析命令风险与影响…\n目的：{purpose}",
+                reply_markup=None,
+            )
             result = await self._dispatch_callback_command(
                 message,
                 data="approval:details",
@@ -699,6 +842,9 @@ class TelegramBot:
                 args=args,
                 command_context=context,
             )
+        except asyncio.CancelledError:
+            logger.info("Approval detail analysis stopped for chat_id=%s", chat_id)
+            raise
         except Exception as e:
             logger.exception("Failed to load approval details in background")
             await self._send_long_message(
@@ -709,25 +855,39 @@ class TelegramBot:
                     fallback="命令分析失败，请稍后重试。",
                 ),
             )
-            return
-
-        if result.outcome != "details_shown" or result.outbound is None:
-            return
-
-        rendered = self._platform_adapter.render(result.outbound)
-        text = "\n".join(rendered.text_parts)
-        facts = result.outbound.facts
-        self._record_visible_context(
-            chat_id,
-            event_type="approval_detail",
-            user_action="查看待审批命令分析",
-            assistant_summary=text,
-            refs={
-                **dict(result.outbound.refs),
-                "safety_status": getattr(facts, "safety_status", ""),
-                "risk_level": getattr(facts, "risk_level", ""),
-            },
-        )
+        else:
+            if result.outcome == "details_shown" and result.outbound is not None:
+                details_shown = True
+                rendered = self._platform_adapter.render(result.outbound)
+                text = "\n".join(rendered.text_parts)
+                facts = result.outbound.facts
+                self._record_visible_context(
+                    chat_id,
+                    event_type="approval_detail",
+                    user_action="查看待审批命令分析",
+                    assistant_summary=text,
+                    refs={
+                        **dict(result.outbound.refs),
+                        "safety_status": getattr(facts, "safety_status", ""),
+                        "risk_level": getattr(facts, "risk_level", ""),
+                    },
+                )
+        finally:
+            if details_shown:
+                await self._retire_approval_request(message)
+            else:
+                state_known, snapshot = self._pending_approval_snapshot(
+                    chat_id,
+                    approval_id,
+                )
+                if not state_known or snapshot is not None:
+                    await self._restore_approval_request(
+                        message,
+                        original_text,
+                        original_reply_markup,
+                    )
+                else:
+                    await self._retire_approval_request(message)
 
     async def _send_approval_detail_result(
         self,
@@ -1112,7 +1272,6 @@ class TelegramBot:
                 return
 
             if callback_data == "show_cmd_details" or approval_action == "details":
-                await self._clear_callback_message_markup(query, "approval detail callback message")
                 await self._start_approval_detail_analysis(
                     query.message,
                     chat_id,
@@ -1141,18 +1300,31 @@ class TelegramBot:
                 "REJECT": "/reject",
             }[action]
 
-            await query.edit_message_text(
-                text=self._approval_decision_text(query.message, action),
-                reply_markup=None,
-            )
-            await self._start_approval_resolution(
-                query.message,
+            state_known, snapshot = self._pending_approval_snapshot(
                 chat_id,
+                approval_id or None,
+            )
+            if state_known and snapshot is None:
+                await query.edit_message_text(
+                    text="ℹ️ 审批已失效，请使用最新卡片。",
+                    reply_markup=None,
+                )
+                return
+
+            reason = str((snapshot or {}).get("reason", ""))
+            started = self._start_approval_resolution(
+                query,
+                chat_id,
+                action=action,
+                reason=reason,
+                approval_id=approval_id or None,
                 data=callback_data,
                 command_name=command_name,
                 args=(approval_id,) if approval_id else (),
                 command_context=self._command_context_for_update(update),
             )
+            if not started:
+                logger.info("Approval resolution already running for chat_id=%s", chat_id)
             return
         except asyncio.TimeoutError:
             await self._send_long_message(
