@@ -166,7 +166,10 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_analysis_action_rejects_expired_context_and_removes_buttons(self):
         bot = _bot()
-        thinking = SimpleNamespace(delete=AsyncMock())
+        thinking = SimpleNamespace(
+            delete=AsyncMock(side_effect=RuntimeError("delete unavailable")),
+            edit_text=AsyncMock(),
+        )
         message = SimpleNamespace(reply_text=AsyncMock(return_value=thinking))
         query = SimpleNamespace(message=message, edit_message_reply_markup=AsyncMock())
 
@@ -187,6 +190,33 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
             "告警上下文已过期。使用 /sentinel_history 查看告警记录。",
         )
         thinking.delete.assert_awaited_once()
+        thinking.edit_text.assert_awaited_once_with("分析已结束。")
+
+    async def test_analysis_runs_when_progress_message_is_unavailable(self):
+        bot = _bot()
+        bot._dispatch_callback_command = AsyncMock(
+            return_value=CommandResult(outcome="completed")
+        )
+        message = SimpleNamespace()
+        query = SimpleNamespace(
+            message=message,
+            edit_message_reply_markup=AsyncMock(),
+        )
+
+        with patch(
+            "chatdome.telegram.bot.TelegramProgressMessage.create",
+            new=AsyncMock(side_effect=RuntimeError("send unavailable")),
+        ) as create_progress:
+            await bot._dispatch_sentinel_alert_action(
+                self._callback_update(query),
+                None,
+                query,
+                "sentinel_alert_analysis",
+                "token",
+            )
+
+        create_progress.assert_awaited_once()
+        bot._dispatch_callback_command.assert_awaited_once()
 
     async def test_analysis_action_runs_shared_handler_and_preserves_platform_ui(self):
         class FakeClient:
@@ -230,13 +260,14 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         reply_markup = query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
         keyboard = reply_markup.inline_keyboard
         self.assertEqual([button.text for button in keyboard[0]], ["📋 查看详情"])
-        message.reply_text.assert_awaited_once_with("⏳")
+        message.reply_text.assert_awaited_once_with("◌ 正在处理")
         thinking.delete.assert_awaited_once()
         self.assertEqual(bot._send_long_message.await_args.args[:2], (message, "分析内容"))
         record_usage.assert_called_once()
         event = manager.record_control_event.call_args.args[1]
         self.assertEqual(event["command"], "/sentinel_alert_analysis")
         self.assertEqual(event["outcome"], "sentinel_alert_analysis_completed")
+
     def test_approval_detail_text_groups_command_breakdown(self):
         details = {
             "ok": True,
@@ -391,7 +422,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
 
         message.edit_text.assert_awaited_once_with(
-            "🔎 正在分析命令风险与影响…\n目的：检查系统日志",
+            "🔎 正在分析命令",
             reply_markup=None,
         )
         message.delete.assert_awaited_once_with()
@@ -441,7 +472,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
             message.edit_text.await_args_list,
             [
                 call(
-                    "🔎 正在分析命令风险与影响…\n目的：检查系统日志",
+                    "🔎 正在分析命令",
                     reply_markup=None,
                 ),
                 call(original_text, reply_markup=original_markup),
@@ -844,7 +875,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
 
         message.edit_text.assert_awaited_once_with(
-            "🔎 正在分析命令风险与影响…\n目的：检查系统日志",
+            "🔎 正在分析命令",
             reply_markup=None,
         )
         message.delete.assert_awaited_once_with()
@@ -893,7 +924,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
             message.edit_text.await_args_list,
             [
                 call(
-                    "🔎 正在分析命令风险与影响…\n目的：检查系统日志",
+                    "🔎 正在分析命令",
                     reply_markup=None,
                 ),
                 call(original_text, reply_markup=original_markup),

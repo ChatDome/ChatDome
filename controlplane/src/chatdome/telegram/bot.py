@@ -50,6 +50,7 @@ from chatdome.config import AIConfig, ChatDomeConfig
 from chatdome.errors import user_facing_error_message
 from chatdome.telegram.auth import Authenticator
 from chatdome.telegram.formatting import MessageMarkup, TelegramMessageFormatter
+from chatdome.telegram.progress import TelegramProgressMessage
 from chatdome.runtime_paths import environment_profile_path
 from chatdome.model_commands import ModelCommandService
 from chatdome.slash_commands import (
@@ -107,6 +108,8 @@ class TelegramBot:
         self._round_limit_tasks: dict[int, asyncio.Task] = {}
         self._message_tasks: dict[int, asyncio.Task] = {}
         self._command_targets: dict[str, Any] = {}
+        self._progress_update_interval = 2.0
+        self._progress_edit_timeout = 1.0
         # Default policy: plain text output; markdown can be enabled per message.
         self._formatter = TelegramMessageFormatter(enable_markdown=True)
         self._platform_adapter = TelegramPlatformAdapter(self._deliver_telegram_rendered)
@@ -825,12 +828,10 @@ class TelegramBot:
             await update.message.reply_text("任务正在运行。\n发送 /stop 中止。")
             return
 
-        thinking_msg = await update.message.reply_text("⏳")
         coroutine = self._run_agent_message(
             message=update.message,
             chat_id=chat_id,
             user_message=user_message,
-            thinking_msg=thinking_msg,
         )
         if self._app is not None:
             task = self._app.create_task(coroutine)
@@ -845,25 +846,111 @@ class TelegramBot:
 
         task.add_done_callback(_drop_finished_task)
 
+    async def _set_progress_stage(
+        self,
+        progress: TelegramProgressMessage,
+        *,
+        symbol: str,
+        label: str,
+        show_elapsed: bool,
+    ) -> None:
+        try:
+            await asyncio.wait_for(
+                progress.set_stage(
+                    symbol=symbol,
+                    label=label,
+                    show_elapsed=show_elapsed,
+                ),
+                timeout=self._progress_edit_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.debug(
+                "Timed out updating Telegram progress stage=%s",
+                label,
+            )
+
+    async def _call_agent_with_progress(
+        self,
+        chat_id: int,
+        user_message: str,
+        progress: TelegramProgressMessage | None,
+    ) -> AgentResult:
+        async def publish(stage: str) -> None:
+            if progress is None:
+                return
+            if stage == "executing":
+                await self._set_progress_stage(
+                    progress,
+                    symbol="⚙",
+                    label="正在执行操作",
+                    show_elapsed=True,
+                )
+                return
+            await self._set_progress_stage(
+                progress,
+                symbol="◌",
+                label="正在处理",
+                show_elapsed=True,
+            )
+
+        handle_message = self.agent.handle_message
+        try:
+            params = inspect.signature(handle_message).parameters
+        except (TypeError, ValueError):
+            params = {}
+        supports_progress = "progress_callback" in params or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in params.values()
+        )
+        if supports_progress:
+            return await handle_message(
+                chat_id,
+                user_message,
+                progress_callback=publish,
+            )
+        return await handle_message(chat_id, user_message)
+
     async def _run_agent_message(
         self,
         message,
         chat_id: int,
         user_message: str,
-        thinking_msg,
     ) -> None:
+        progress: TelegramProgressMessage | None = None
         try:
-            response = await self.agent.handle_message(chat_id, user_message)
             try:
-                await thinking_msg.delete()
+                progress = await TelegramProgressMessage.create(
+                    message,
+                    symbol="◌",
+                    label="正在处理",
+                    update_interval=self._progress_update_interval,
+                )
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                pass
+                logger.debug(
+                    "Failed to create Telegram progress message for chat_id=%s",
+                    chat_id,
+                    exc_info=True,
+                )
+
+            response = await self._call_agent_with_progress(
+                chat_id,
+                user_message,
+                progress,
+            )
+            if progress is not None:
+                await self._set_progress_stage(
+                    progress,
+                    symbol="⌁",
+                    label="正在整理结果",
+                    show_elapsed=False,
+                )
+                await progress.delete(fallback_text="处理完成。")
             await self._send_agent_result(message, response)
         except asyncio.CancelledError:
-            try:
-                await thinking_msg.delete()
-            except Exception:
-                pass
+            if progress is not None:
+                await progress.delete(fallback_text="任务已停止。")
             logger.info("Telegram task stopped for chat_id=%s", chat_id)
             raise
         except Exception as e:
@@ -873,9 +960,14 @@ class TelegramBot:
                 prefix="⚠️ 处理消息失败",
                 fallback="处理消息时发生未预期错误，请查看日志。",
             )
-            try:
-                await thinking_msg.edit_text(error_text)
-            except Exception:
+            shown = (
+                await progress.replace(error_text)
+                if progress is not None
+                else False
+            )
+            if not shown:
+                if progress is not None:
+                    await progress.delete(fallback_text="处理失败。")
                 await message.reply_text(error_text)
 
     # ----- Interactive Approval -----
@@ -973,18 +1065,20 @@ class TelegramBot:
             getattr(message, "text", "") or getattr(message, "caption", "") or ""
         )
         original_reply_markup = getattr(message, "reply_markup", None)
-        reason = str((snapshot or {}).get("reason", ""))
-        purpose = self._approval_purpose(message, reason=reason)
         context = command_context or CommandContext(
             source="telegram",
             chat_id=chat_id,
         )
         args = (approval_id,) if approval_id else ()
         details_delivered = False
+        progress: TelegramProgressMessage | None = None
         try:
-            await message.edit_text(
-                f"🔎 正在分析命令风险与影响…\n目的：{purpose}",
-                reply_markup=None,
+            progress = await TelegramProgressMessage.attach(
+                message,
+                symbol="🔎",
+                label="正在分析命令",
+                update_interval=self._progress_update_interval,
+                edit_kwargs={"reply_markup": None},
             )
             result = await self._dispatch_callback_command(
                 message,
@@ -1030,6 +1124,8 @@ class TelegramBot:
                     },
                 )
         finally:
+            if progress is not None:
+                await progress.stop()
             if details_delivered:
                 await self._retire_approval_request(message)
             else:
@@ -1143,10 +1239,8 @@ class TelegramBot:
             )
             return
 
-        status_msg = await message.reply_text("继续执行中…")
         coroutine = self._run_round_limit_resolution(
             message=message,
-            status_message=status_msg,
             chat_id=chat_id,
             action=normalized_action,
             command_context=command_context,
@@ -1167,13 +1261,30 @@ class TelegramBot:
     async def _run_round_limit_resolution(
         self,
         message: Any,
-        status_message: Any,
         chat_id: int,
         action: str,
         command_context: CommandContext | None = None,
     ) -> None:
         """Run round-limit continuation without tying it to callback query timeout."""
+        progress: TelegramProgressMessage | None = None
+        fallback_text = "处理完成。"
         try:
+            try:
+                progress = await TelegramProgressMessage.create(
+                    message,
+                    symbol="⚙",
+                    label="正在执行操作",
+                    update_interval=self._progress_update_interval,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug(
+                    "Failed to create round-limit progress for chat_id=%s",
+                    chat_id,
+                    exc_info=True,
+                )
+
             await self._dispatch_round_limit_command(
                 message,
                 chat_id,
@@ -1181,25 +1292,28 @@ class TelegramBot:
                 command_context,
             )
         except asyncio.CancelledError:
+            fallback_text = "任务已停止。"
             logger.warning("Round-limit continuation task cancelled for chat_id=%s", chat_id)
             raise
         except Exception as e:
             logger.exception("Round-limit continuation failed for chat_id=%s", chat_id)
-            await self._send_long_message(
-                message,
-                self._format_error_text(
-                    e,
-                    prefix="继续执行失败",
-                    fallback="继续执行失败，请稍后重试。",
-                ),
+            error_text = self._format_error_text(
+                e,
+                prefix="继续执行失败",
+                fallback="继续执行失败，请稍后重试。",
             )
+            fallback_text = error_text
+            shown = (
+                await progress.replace(error_text)
+                if progress is not None
+                else False
+            )
+            if not shown:
+                await self._send_long_message(message, error_text)
             return
         finally:
-            try:
-                await status_message.delete()
-            except Exception:
-                pass
-
+            if progress is not None:
+                await progress.delete(fallback_text=fallback_text)
 
     def _get_llm_manager(self):
         return getattr(self.agent, "llm_manager", None)
@@ -1319,7 +1433,7 @@ class TelegramBot:
     ) -> None:
         """Adapt Telegram callback UI around one shared semantic action."""
 
-        thinking_message = None
+        progress_message: TelegramProgressMessage | None = None
         if action == "sentinel_alert_analysis":
             await self._set_callback_message_markup(
                 query,
@@ -1329,7 +1443,20 @@ class TelegramBot:
                 ),
                 "sentinel alert analysis",
             )
-            thinking_message = await query.message.reply_text("⏳")
+            try:
+                progress_message = await TelegramProgressMessage.create(
+                    query.message,
+                    symbol="◌",
+                    label="正在处理",
+                    update_interval=self._progress_update_interval,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug(
+                    "Failed to create Sentinel analysis progress",
+                    exc_info=True,
+                )
         try:
             result = await self._dispatch_callback_command(
                 query.message,
@@ -1346,11 +1473,9 @@ class TelegramBot:
                     "expired sentinel alert action",
                 )
         finally:
-            if thinking_message is not None:
-                try:
-                    await thinking_message.delete()
-                except Exception:
-                    logger.debug("Failed to delete Sentinel analysis progress message")
+            if progress_message is not None:
+                await progress_message.delete(fallback_text="分析已结束。")
+
     async def _clear_callback_message_markup(self, query, context_label: str = "callback message") -> None:
         await self._set_callback_message_markup(query, None, context_label)
 
@@ -1503,7 +1628,6 @@ class TelegramBot:
                     fallback="按钮操作处理失败，请稍后重试。",
                 )
             )
-
 
     # ----- Utilities -----
 
@@ -1707,7 +1831,6 @@ class TelegramBot:
                 )
             )
         return InlineKeyboardMarkup([row])
-
 
     def _check_auth(self, update: Update) -> bool:
         """Check if the message sender is authorized."""

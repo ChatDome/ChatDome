@@ -7,6 +7,7 @@ Orchestrates the cycle:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import inspect
@@ -94,25 +95,43 @@ class Agent:
         detail = user_facing_error_message(exc, fallback="LLM is currently unavailable, please try again later.")
         return f"⚠️ {detail}"
 
+    @staticmethod
+    async def _publish_progress(progress_callback: Any, stage: str) -> None:
+        if not callable(progress_callback):
+            return
+        try:
+            published = progress_callback(stage)
+            if inspect.isawaitable(published):
+                await published
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Failed to publish agent progress stage=%s", stage, exc_info=True)
+
     async def _run_loop_compat(
         self,
         chat_id: int,
         session: Any,
         snapshot: LLMSnapshot,
         turn_context: TurnContext | None = None,
+        progress_callback: Any = None,
     ) -> AgentResult:
         """Call _run_loop while tolerating older test doubles without snapshot."""
         try:
             params = inspect.signature(self._run_loop).parameters
         except (TypeError, ValueError):
             params = {}
-        if "snapshot" in params:
-            if "turn_context" in params:
-                return coerce_agent_result(
-                    await self._run_loop(chat_id, session, snapshot, turn_context=turn_context)
-                )
-            return coerce_agent_result(await self._run_loop(chat_id, session, snapshot))
-        return coerce_agent_result(await self._run_loop(chat_id, session))
+        if "snapshot" not in params:
+            return coerce_agent_result(await self._run_loop(chat_id, session))
+
+        kwargs: dict[str, Any] = {}
+        if "turn_context" in params:
+            kwargs["turn_context"] = turn_context
+        if "progress_callback" in params:
+            kwargs["progress_callback"] = progress_callback
+        return coerce_agent_result(
+            await self._run_loop(chat_id, session, snapshot, **kwargs)
+        )
 
     async def _dispatch_tool_compat(
         self,
@@ -311,7 +330,13 @@ class Agent:
         ])
         return "\n".join(lines)
 
-    async def handle_message(self, chat_id: int, user_message: str) -> AgentResult:
+    async def handle_message(
+        self,
+        chat_id: int,
+        user_message: str,
+        *,
+        progress_callback: Any = None,
+    ) -> AgentResult:
         """Process a user message through the full ReAct loop."""
         session = self.session_manager.get_or_create(chat_id)
         if session.repair_missing_tool_outputs():
@@ -357,6 +382,7 @@ class Agent:
                 session,
                 snapshot,
                 turn_context=turn_context,
+                progress_callback=progress_callback,
             )
 
         return await self._run_session_task_scope(chat_id, session, run_task)
@@ -896,6 +922,7 @@ class Agent:
         snapshot: LLMSnapshot | None = None,
         *,
         turn_context: TurnContext | None = None,
+        progress_callback: Any = None,
     ) -> AgentResult:
         """Drive the ReAct loop forward."""
 
@@ -907,6 +934,7 @@ class Agent:
         window_limit = max(1, int(self.config.max_rounds_per_turn))
         end_round_exclusive = start_round + window_limit + 1
         for round_num in range(start_round + 1, end_round_exclusive):
+            await self._publish_progress(progress_callback, "processing")
             logger.info(
                 "Agent loop progress %d/%d for chat_id=%d",
                 round_num, start_round + window_limit, chat_id,
@@ -947,6 +975,7 @@ class Agent:
             )
 
             if response.tool_calls:
+                await self._publish_progress(progress_callback, "executing")
                 prior_tool_counts, prior_tool_results = self._tool_call_stats_since_last_user(session)
                 current_tool_counts: dict[str, int] = {}
                 tool_call_plans: list[tuple[Any, str, int, bool]] = []

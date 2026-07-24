@@ -10,6 +10,9 @@ class FakeStatusMessage:
     def __init__(self):
         self.deleted = False
 
+    async def edit_text(self, _text, **_kwargs):
+        return None
+
     async def delete(self):
         self.deleted = True
 
@@ -76,7 +79,7 @@ class TelegramRoundLimitTests(unittest.TestCase):
 
         self.assertEqual(agent.calls, [(123, "CONTINUE")])
         self.assertIn(123, bot._round_limit_tasks)
-        self.assertIn("继续执行中…", message.replies[0])
+        self.assertEqual(message.replies[0], "⚙ 正在执行操作")
         self.assertFalse(bot._round_limit_tasks[123].done())
 
         agent.release.set()

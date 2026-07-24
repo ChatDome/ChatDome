@@ -12,25 +12,36 @@ from chatdome.telegram.bot import TelegramBot
 class FakeStatusMessage:
     def __init__(self):
         self.deleted = False
+        self.delete_count = 0
         self.edited_text = None
+        self.edits = []
 
     async def delete(self):
         self.deleted = True
+        self.delete_count += 1
 
-    async def edit_text(self, text):
+    async def edit_text(self, text, **kwargs):
         self.edited_text = text
+        self.edits.append((text, kwargs))
+
+
+class HangingStatusMessage(FakeStatusMessage):
+    async def edit_text(self, text, **kwargs):
+        await super().edit_text(text, **kwargs)
+        await asyncio.Event().wait()
 
 
 class FakeMessage:
-    def __init__(self, text=""):
+    def __init__(self, text="", status_type=FakeStatusMessage):
         self.text = text
         self.replies = []
         self.status_messages = []
+        self.status_type = status_type
 
     async def reply_text(self, text, **kwargs):
         del kwargs
         self.replies.append(text)
-        status = FakeStatusMessage()
+        status = self.status_type()
         self.status_messages.append(status)
         return status
 
@@ -67,6 +78,37 @@ class BlockingAgent:
             self.cancelled.set()
             raise
         return "done"
+
+
+class ImmediateAgent:
+    def __init__(self):
+        self.session_manager = RecordingSessionManager()
+
+    async def handle_message(self, chat_id, user_message):
+        del chat_id, user_message
+        return "done"
+
+
+class StageReportingAgent:
+    def __init__(self):
+        self.session_manager = RecordingSessionManager()
+
+    async def handle_message(
+        self, chat_id, user_message, *, progress_callback=None
+    ):
+        del chat_id, user_message
+        if progress_callback is not None:
+            await progress_callback("executing")
+        return "done"
+
+
+class ErrorAgent:
+    def __init__(self):
+        self.session_manager = RecordingSessionManager()
+
+    async def handle_message(self, chat_id, user_message):
+        del chat_id, user_message
+        raise RuntimeError("agent failed")
 
 
 class PendingSessionManager(RecordingSessionManager):
@@ -123,6 +165,8 @@ class TelegramStopTests(unittest.TestCase):
         await bot._handle_message(FakeUpdate(first_message), SimpleNamespace())
         await asyncio.wait_for(agent.started.wait(), timeout=1)
 
+        self.assertEqual(first_message.replies[0], "◌ 正在处理")
+        self.assertNotIn("\n", first_message.replies[0])
         self.assertEqual(agent.calls, [(123, "run task")])
         self.assertIn(123, bot._message_tasks)
         self.assertFalse(bot._message_tasks[123].done())
@@ -148,6 +192,92 @@ class TelegramStopTests(unittest.TestCase):
         self.assertEqual(agent.session_manager.events[-1][1]["command"], "/stop")
         self.assertEqual(agent.session_manager.events[-1][1]["outcome"], "task_stopped")
 
+    def test_completed_message_retires_single_line_progress(self):
+        asyncio.run(self._run_completed_message_retires_single_line_progress())
+
+    async def _run_completed_message_retires_single_line_progress(self):
+        bot = TelegramBot(ChatDomeConfig(), ImmediateAgent())
+        message = FakeMessage("hello")
+
+        await bot._handle_message(FakeUpdate(message), SimpleNamespace())
+        task = bot._message_tasks[123]
+        await task
+        await asyncio.sleep(0)
+
+        self.assertEqual(message.replies[0], "◌ 正在处理")
+        self.assertEqual(message.replies[-1], "done")
+        self.assertNotIn("\n", message.replies[0])
+        self.assertTrue(message.status_messages[0].deleted)
+        self.assertEqual(message.status_messages[0].delete_count, 1)
+        self.assertNotIn(123, bot._message_tasks)
+
+    def test_slow_progress_edit_does_not_block_agent_result(self):
+        asyncio.run(self._run_slow_progress_edit_does_not_block_agent_result())
+
+    async def _run_slow_progress_edit_does_not_block_agent_result(self):
+        bot = TelegramBot(ChatDomeConfig(), StageReportingAgent())
+        bot._progress_edit_timeout = 0.01
+        message = FakeMessage("hello", status_type=HangingStatusMessage)
+
+        await bot._handle_message(FakeUpdate(message), SimpleNamespace())
+        task = bot._message_tasks[123]
+        await asyncio.wait_for(task, timeout=0.2)
+        await asyncio.sleep(0)
+
+        self.assertEqual(message.replies[-1], "done")
+        self.assertTrue(message.status_messages[0].deleted)
+
+    def test_message_error_replaces_progress_without_leaving_ticker(self):
+        asyncio.run(self._run_message_error_replaces_progress_without_leaving_ticker())
+
+    async def _run_message_error_replaces_progress_without_leaving_ticker(self):
+        bot = TelegramBot(ChatDomeConfig(), ErrorAgent())
+        bot._progress_update_interval = 0.05
+        message = FakeMessage("fail")
+
+        await bot._handle_message(FakeUpdate(message), SimpleNamespace())
+        task = bot._message_tasks[123]
+        await task
+        await asyncio.sleep(0)
+        edits_after_completion = list(message.status_messages[0].edits)
+        await asyncio.sleep(0.12)
+
+        self.assertEqual(message.replies, ["◌ 正在处理"])
+        self.assertFalse(message.status_messages[0].deleted)
+        self.assertTrue(
+            message.status_messages[0].edited_text.startswith("⚠️ 处理消息失败")
+        )
+        self.assertEqual(message.status_messages[0].edits, edits_after_completion)
+        self.assertNotIn(123, bot._message_tasks)
+
+    def test_concurrent_messages_reserve_one_owner_before_status_send(self):
+        asyncio.run(
+            self._run_concurrent_messages_reserve_one_owner_before_status_send()
+        )
+
+    async def _run_concurrent_messages_reserve_one_owner_before_status_send(self):
+        agent = BlockingAgent()
+        bot = TelegramBot(ChatDomeConfig(), agent)
+        first_message = FakeMessage("first")
+        second_message = FakeMessage("second")
+
+        await asyncio.gather(
+            bot._handle_message(FakeUpdate(first_message), SimpleNamespace()),
+            bot._handle_message(FakeUpdate(second_message), SimpleNamespace()),
+        )
+        await asyncio.wait_for(agent.started.wait(), timeout=1)
+
+        self.assertEqual(agent.calls, [(123, "first")])
+        self.assertEqual(
+            second_message.replies,
+            ["任务正在运行。\n发送 /stop 中止。"],
+        )
+        self.assertEqual(first_message.replies[0], "◌ 正在处理")
+
+        self.assertTrue(await bot._stop_task_for_chat(123))
+        await asyncio.wait_for(agent.cancelled.wait(), timeout=1)
+        self.assertTrue(first_message.status_messages[0].deleted)
+
     def test_stop_reports_no_running_task(self):
         asyncio.run(self._run_stop_reports_no_running_task())
 
@@ -172,7 +302,6 @@ class TelegramStopTests(unittest.TestCase):
         self.assertEqual(result.text, "No running task.")
         self.assertEqual(result.facts.operation, "stop_task")
         self.assertFalse(result.facts.changed)
-
 
     def test_stop_aborts_pending_approval_and_invalidates_tracked_card(self):
         asyncio.run(
@@ -272,15 +401,11 @@ class TelegramStopTests(unittest.TestCase):
         self.assertEqual(
             card.edits,
             [
-                (
-                    "🔎 正在分析命令风险与影响…\n目的：检查系统日志",
-                    {"reply_markup": None},
-                ),
+                ("🔎 正在分析命令", {"reply_markup": None}),
                 (original_text, {"reply_markup": original_markup}),
                 ("⏹️ 已中止\n命令未执行。", {"reply_markup": None}),
             ],
         )
-
 
     def test_stop_cancels_all_live_tasks_for_chat(self):
         asyncio.run(self._run_stop_cancels_all_live_tasks_for_chat())
@@ -376,6 +501,7 @@ class TelegramStopTests(unittest.TestCase):
         self.assertTrue(followup_task.cancelled())
         self.assertTrue(detail_task.cancelled())
         self.assertEqual(bot._approval_messages[123], ("AP-2", new_card))
+
 
 if __name__ == "__main__":
     unittest.main()
