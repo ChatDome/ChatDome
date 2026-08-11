@@ -364,9 +364,9 @@ chatdome hello
 | `/model_delete <profile>` | 删除未启用的 model profile |
 | `/model_cancel` | 取消当前 model 操作 |
 | `/codex_login [profile]` | 启动 Codex OAuth 设备码认证 |
-| `/details [approval_id] [full]` | 查看待审批动作详情 |
-| `/confirm [approval_id]` | 批准待审批命令 |
-| `/reject [approval_id]` | 拒绝待审批命令或停止暂停任务 |
+| `/details` | 查看当前待审批命令分析 |
+| `/confirm` | 执行当前待审批命令 |
+| `/reject` | 拒绝当前待审批命令并取消任务 |
 | `/continue` | 继续暂停中的任务 |
 | `/sentinel_status` | 查看 Sentinel 状态 |
 | `/sentinel_trigger` | 运行全部 Sentinel 检查 |
@@ -396,9 +396,9 @@ CLI 与 Telegram 加载同一命令目录并调用同一业务服务。每个已
 | `/model_delete <profile>` | 管理员删除未启用的 model profile |
 | `/model_cancel` | 取消当前 model 管理流程 |
 | `/codex_login [profile]` | 启动 Codex OAuth 设备码认证 |
-| `/details [approval_id] [full]` | 查看待审批命令分析 |
-| `/confirm [approval_id]` | 批准待审批命令 |
-| `/reject [approval_id]` | 拒绝待审批命令或放弃暂停任务 |
+| `/details` | 查看当前待审批命令分析 |
+| `/confirm` | 执行当前待审批命令 |
+| `/reject` | 拒绝当前待审批命令并取消任务 |
 | `/continue` | 继续暂停中的任务 |
 | `/sentinel_status` | 查看 Sentinel 状态 |
 | `/sentinel_trigger` | 运行全部 Sentinel 检查 |
@@ -408,6 +408,8 @@ CLI 与 Telegram 加载同一命令目录并调用同一业务服务。每个已
 | `/sentinel_resume` | 恢复 Sentinel 告警推送 |
 
 没有死板的命令格式——直接说话就行。
+
+审批按钮会在内部绑定当前审批记录；用户无需查看或输入审批编号。同一会话同时只处理一个活动 turn，拒绝待审批命令会取消整个 turn。
 
 ### 示例问题
 

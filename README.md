@@ -355,9 +355,9 @@ chatdome hello
 | `/audit [N]` | Show recent command audit events |
 | `/model <profile>` | Switch the model profile for this terminal session |
 | `/model_list` | Show configured model profiles and auth status |
-| `/details [approval_id] [full]` | Show pending approval details |
-| `/confirm [approval_id]` | Approve a pending command |
-| `/reject [approval_id]` | Reject a pending command or stop a paused task |
+| `/details` | Show analysis for the current pending command |
+| `/confirm` | Execute the current pending command |
+| `/reject` | Reject the current pending command and cancel its task |
 | `/continue` | Continue a paused task |
 | `/engram [delete <id>]` | List or delete persistent memory |
 | `/model_add` | Add an OpenAI-compatible or Codex model profile |
@@ -381,9 +381,9 @@ CLI and Telegram load the same command catalog and call the same business servic
 | *(any message)* | Talk to the AI agent in natural language |
 | `/clear` | Clear conversation context, start fresh |
 | `/stop` | Stop the current running, analyzing, or approval-waiting task |
-| `/details [approval_id] [full]` | Show pending approval details |
-| `/confirm [approval_id]` | Force-approve and execute the current pending high-risk command |
-| `/reject [approval_id]` | Reject a pending command or abandon a paused task |
+| `/details` | Show analysis for the current pending command |
+| `/confirm` | Execute the current pending command |
+| `/reject` | Reject the current pending command and cancel its task |
 | `/continue` | Continue a paused task |
 | `/env` | Show runtime environment summary from `/var/lib/chatdome/environment/profile.md` |
 | `/token` | Show token usage statistics for current chat |
@@ -405,6 +405,8 @@ CLI and Telegram load the same command catalog and call the same business servic
 | `/help` | Show usage guide and example questions |
 
 No rigid command syntax — just talk to it.
+
+Approval buttons bind the current internal approval record; users do not need to view or enter an approval ID. Each conversation has at most one active turn, and rejecting a pending command cancels that entire turn.
 
 ### Example Questions
 
