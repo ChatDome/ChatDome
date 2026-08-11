@@ -5,12 +5,25 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from chatdome.agent import audit
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.executor.sandbox import CommandResult, CommandSandbox
 from chatdome.logger import log_origin
 
 
 class SandboxLoggingTests(unittest.TestCase):
+    def test_audit_event_preserves_numeric_turn_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(audit, "AUDIT_DIR", Path(tmp)):
+                CommandAuditTracker.record_event(
+                    "command_approved",
+                    chat_id=7,
+                    turn_id=3,
+                )
+                event = CommandAuditTracker.get_recent_events(chat_id=7, limit=1)[0]
+
+        self.assertEqual(event["turn_id"], 3)
+
     def test_command_log_excerpt_is_single_line_and_truncated(self):
         command = "echo one\n" + ("awk '{print $1}' /var/log/auth.log; " * 20)
 

@@ -11,9 +11,14 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import sys
+from types import MappingProxyType
+from typing import Any, Mapping
 from typing import Optional
 
 _log_origin = contextvars.ContextVar("chatdome_log_origin", default="")
+_EMPTY_LOG_CONTEXT: Mapping[str, str] = MappingProxyType({})
+_log_fields = contextvars.ContextVar("chatdome_log_context", default=_EMPTY_LOG_CONTEXT)
+_LOG_CONTEXT_FIELDS = ("chat_id", "user_id", "turn_id", "approval_id")
 _CHATDOME_ORIGIN_FACTORY_ATTR = "_chatdome_origin_record_factory"
 
 
@@ -39,6 +44,47 @@ def current_log_origin() -> str:
     return _log_origin.get()
 
 
+class log_context:
+    """Temporarily attach task identifiers to logs in this async context."""
+
+    def __init__(
+        self,
+        *,
+        chat_id: Any = None,
+        user_id: Any = None,
+        turn_id: Any = None,
+        approval_id: Any = None,
+    ) -> None:
+        updates = {
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "turn_id": turn_id,
+            "approval_id": approval_id,
+        }
+        self._updates = {
+            key: str(value)
+            for key, value in updates.items()
+            if value is not None and str(value) != ""
+        }
+        self._token: Optional[contextvars.Token] = None
+
+    def __enter__(self) -> "log_context":
+        merged = dict(_log_fields.get())
+        merged.update(self._updates)
+        self._token = _log_fields.set(MappingProxyType(merged))
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._token is not None:
+            _log_fields.reset(self._token)
+            self._token = None
+
+
+def current_log_context() -> dict[str, str]:
+    """Return a copy of the current structured log fields."""
+    return dict(_log_fields.get())
+
+
 def _install_origin_record_factory() -> None:
     factory = logging.getLogRecordFactory()
     if getattr(factory, _CHATDOME_ORIGIN_FACTORY_ATTR, False):
@@ -48,6 +94,8 @@ def _install_origin_record_factory() -> None:
         record = factory(*args, **kwargs)
         if not hasattr(record, "chatdome_origin"):
             record.chatdome_origin = _log_origin.get()
+        if not hasattr(record, "chatdome_context"):
+            record.chatdome_context = dict(_log_fields.get())
         return record
 
     setattr(chatdome_record_factory, _CHATDOME_ORIGIN_FACTORY_ATTR, True)
@@ -65,6 +113,8 @@ class OriginFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if not hasattr(record, "chatdome_origin"):
             record.chatdome_origin = _log_origin.get()
+        if not hasattr(record, "chatdome_context"):
+            record.chatdome_context = dict(_log_fields.get())
         return True
 
 
@@ -181,10 +231,20 @@ class ChatDomeFormatter(logging.Formatter):
 
         component_part = self._colorize(f"[{name}]", component_color)
 
+        context = getattr(record, "chatdome_context", {})
+        if not isinstance(context, Mapping):
+            context = {}
+        context_fields = [
+            f"{key}={context[key]}"
+            for key in _LOG_CONTEXT_FIELDS
+            if key in context and str(context[key]) != ""
+        ]
+        context_part = f" [{' '.join(context_fields)}]" if context_fields else ""
+
         message = record.getMessage()
 
         # 4. Assemble
-        formatted = f"{timestamp_part} {level_part} {component_part} {message}"
+        formatted = f"{timestamp_part} {level_part} {component_part}{context_part} {message}"
 
         # Add stack trace if exists
         if record.exc_info:

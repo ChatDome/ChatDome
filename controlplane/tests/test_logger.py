@@ -5,7 +5,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from chatdome.logger import ChatDomeFormatter, _stream_supports_color, log_origin, setup_logging
+from chatdome.logger import (
+    ChatDomeFormatter,
+    _stream_supports_color,
+    current_log_context,
+    log_context,
+    log_origin,
+    setup_logging,
+)
 
 
 class _FakeStream:
@@ -71,6 +78,46 @@ class LoggerTests(unittest.TestCase):
         self.assertIn("\033[", output)
         self.assertIn("[INFO ]", output)
         self.assertIn("[telegram.bot]", output)
+
+    def test_formatter_includes_turn_context_captured_on_record(self):
+        capture = _CaptureHandler()
+        try:
+            with patch.dict(
+                os.environ,
+                {"CHATDOME_LOG_FILE": "", "CHATDOME_SENTINEL_LOG_FILE": ""},
+                clear=False,
+            ):
+                setup_logging(use_colors=False)
+            logging.getLogger().addHandler(capture)
+            with log_context(
+                chat_id=7,
+                user_id=70,
+                turn_id=3,
+                approval_id="AP-1",
+            ):
+                logging.getLogger("chatdome.agent.core").info("running")
+        finally:
+            self._clear_root_handlers()
+
+        line = ChatDomeFormatter(use_colors=False).format(capture.records[0])
+        self.assertIn(
+            "[agent.core] [chat_id=7 user_id=70 turn_id=3 approval_id=AP-1] running",
+            line,
+        )
+
+    def test_nested_log_context_merges_and_restores_fields(self):
+        self.assertEqual(current_log_context(), {})
+
+        with log_context(chat_id=7, user_id=70):
+            self.assertEqual(current_log_context(), {"chat_id": "7", "user_id": "70"})
+            with log_context(turn_id=3):
+                self.assertEqual(
+                    current_log_context(),
+                    {"chat_id": "7", "user_id": "70", "turn_id": "3"},
+                )
+            self.assertEqual(current_log_context(), {"chat_id": "7", "user_id": "70"})
+
+        self.assertEqual(current_log_context(), {})
 
 
     def test_file_handlers_route_sentinel_records(self):
