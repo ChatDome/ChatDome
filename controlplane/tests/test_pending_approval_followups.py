@@ -179,6 +179,7 @@ class FakeSessionManager:
     def __init__(self, session: AgentSession):
         self.session = session
         self.saved = 0
+        self.lock = None
 
     def get_or_create(self, chat_id: int) -> AgentSession:
         self.session.chat_id = chat_id
@@ -187,6 +188,11 @@ class FakeSessionManager:
     def save_session(self, session: AgentSession) -> None:
         self.saved += 1
         self.session = session
+
+    def get_turn_lock(self, _chat_id: int):
+        if self.lock is None:
+            self.lock = asyncio.Lock()
+        return self.lock
 
 
 class FakeSandbox:

@@ -20,12 +20,13 @@ from chatdome.agent.prompts import build_system_prompt, build_tools
 from chatdome.agent.result import AgentResult, coerce_agent_result
 from chatdome.agent.session import SessionManager
 from chatdome.agent.tools import ToolDispatcher
-from chatdome.agent.turns import TurnContext, create_turn_context
+from chatdome.agent.turns import TurnContext
 from chatdome.config import AgentConfig
 from chatdome.errors import LLMProfileNotReady, user_facing_error_message
 from chatdome.executor.sandbox import CommandSandbox
 from chatdome.llm.client import LLMClient
 from chatdome.llm.manager import LLMManager, LLMSnapshot
+from chatdome.logger import log_context
 
 logger = logging.getLogger(__name__)
 
@@ -162,12 +163,86 @@ class Agent:
         except Exception as e:
             logger.warning("Session persistence failed for chat_id=%s: %s", getattr(session, "chat_id", "?"), e)
 
+    @staticmethod
+    def _latest_user_message(session: Any) -> str:
+        """Return the latest persisted user message for legacy turn recovery."""
+        return next(
+            (
+                str(message.get("content") or "")
+                for message in reversed(getattr(session, "messages", []))
+                if isinstance(message, dict) and message.get("role") == "user"
+            ),
+            "",
+        )
+
+    def _record_turn_started(self, session: Any) -> None:
+        active_turn = getattr(session, "active_turn", None)
+        if active_turn is None:
+            return
+        session.add_control_event(
+            {
+                "event_type": "turn_started",
+                "turn_id": active_turn.turn_id,
+                "state": active_turn.state,
+                "round_count": session.round_count,
+            }
+        )
+        logger.info("Turn started")
+
+    def _transition_turn(self, session: Any, state: str) -> None:
+        active_turn = getattr(session, "active_turn", None)
+        if active_turn is None or active_turn.state == state:
+            return
+        previous_state = active_turn.state
+        transitioned = session.transition_turn(state)
+        session.add_control_event(
+            {
+                "event_type": "turn_state_changed",
+                "turn_id": transitioned.turn_id,
+                "from_state": previous_state,
+                "state": transitioned.state,
+                "round_count": session.round_count,
+            }
+        )
+        logger.info("Turn state changed: %s -> %s", previous_state, state)
+
+    def _finish_turn(self, session: Any, outcome: str) -> None:
+        if getattr(session, "active_turn", None) is None:
+            return
+        completed = session.finish_turn(outcome)
+        session.add_control_event(
+            {
+                "event_type": "turn_completed",
+                "turn_id": completed.turn_id,
+                "outcome": completed.state,
+                "round_count": session.round_count,
+            }
+        )
+        logger.info("Turn completed: outcome=%s rounds=%d", outcome, session.round_count)
+
+    def _ensure_active_turn(self, session: Any, state: str) -> TurnContext:
+        """Recover a lifecycle for legacy in-memory pending state."""
+        context = session.current_turn_context()
+        if context is None:
+            context = session.begin_turn(self._latest_user_message(session))
+            self._record_turn_started(session)
+        self._transition_turn(session, state)
+        return context
+
     async def _run_session_task_scope(self, chat_id: int, session: Any, runner: Any) -> Any:
         """Guard a live agent task against concurrent visible-context writes."""
         was_running = bool(getattr(session, "agent_running", False))
         session.agent_running = True
         try:
             return await runner()
+        except asyncio.CancelledError:
+            session.task_auto_approve = False
+            session.clear_pending_state()
+            session.clear_pending_round_limit()
+            session.take_deferred_message()
+            self._finish_turn(session, "cancelled")
+            self._persist_session(session)
+            raise
         finally:
             if was_running:
                 session.agent_running = True
@@ -335,45 +410,81 @@ class Agent:
         chat_id: int,
         user_message: str,
         *,
+        user_id: int | None = None,
         progress_callback: Any = None,
     ) -> AgentResult:
         """Process a user message through the full ReAct loop."""
         session = self.session_manager.get_or_create(chat_id)
-        if session.repair_missing_tool_outputs():
-            self._persist_session(session)
-
-        if session.pending_approval:
-            # Allow natural-language rejection while waiting approval.
-            if self._is_reject_intent(user_message):
-                session.add_pending_followup("user", user_message)
+        turn_lock = self.session_manager.get_turn_lock(chat_id)
+        route = "new"
+        turn_context: TurnContext | None = None
+        async with turn_lock:
+            if session.repair_missing_tool_outputs():
                 self._persist_session(session)
-                _, final_answer = await self.resume_session(chat_id, "REJECT")
-                return final_answer
-            try:
-                snapshot = await self.get_active_llm_snapshot()
-            except Exception as e:
-                return AgentResult.reply(await self._llm_unavailable_message(e))
-            return AgentResult.reply(await self._handle_pending_followup(chat_id, session, user_message, snapshot))
+            if session.pending_approval:
+                turn_context = self._ensure_active_turn(session, "waiting_approval")
+                route = "approval"
+            elif session.pending_round_limit:
+                turn_context = self._ensure_active_turn(session, "waiting_round_limit")
+                route = "round_limit"
+            elif session.active_turn is not None:
+                return AgentResult.reply("任务正在运行。发送 /stop 中止。")
+            else:
+                turn_context = session.begin_turn(user_message, user_id=user_id)
+                session.add_user_message(user_message, turn_id=turn_context.turn_id)
+                self._record_turn_started(session)
+                self._persist_session(session)
 
-        if session.pending_round_limit:
-            if self._is_reject_intent(user_message):
-                return await self.resolve_round_limit(chat_id, "ABANDON")
-            if self._is_continue_intent(user_message):
-                return await self.resolve_round_limit(chat_id, "CONTINUE")
-            window_limit = max(1, int(self.config.max_rounds_per_turn))
-            return AgentResult.reply(
-                f"\u5f53\u524d\u4efb\u52a1\u5df2\u6267\u884c {session.pending_round_count} \u8f6e\uff0c\u4ecd\u672a\u5b8c\u6210\u3002\n"
-                f"\u8bf7\u56de\u590d\u2018\u7ee7\u7eed\u2019\u4ee5\u518d\u6267\u884c {window_limit} \u8f6e\uff0c\u6216\u56de\u590d\u2018\u653e\u5f03\u2019\u7ed3\u675f\u5f53\u524d\u4efb\u52a1\u3002"
-            )
+        assert turn_context is not None
+        context_fields = {
+            "chat_id": chat_id,
+            "user_id": turn_context.user_id,
+            "turn_id": turn_context.turn_id,
+            "approval_id": session.pending_approval_id,
+        }
 
-        turn_context = create_turn_context(session.next_turn_id, user_message)
-        session.add_user_message(user_message, turn_id=turn_context.turn_id)
+        if route == "approval":
+            # Allow natural-language rejection while waiting approval.
+            with log_context(**context_fields):
+                if self._is_reject_intent(user_message):
+                    session.add_pending_followup("user", user_message)
+                    self._persist_session(session)
+                    _, final_answer = await self.resume_session(chat_id, "REJECT")
+                    return final_answer
+                try:
+                    snapshot = await self.get_active_llm_snapshot()
+                except Exception as e:
+                    return AgentResult.reply(await self._llm_unavailable_message(e))
+                return AgentResult.reply(
+                    await self._handle_pending_followup(
+                        chat_id,
+                        session,
+                        user_message,
+                        snapshot,
+                    )
+                )
+
+        if route == "round_limit":
+            with log_context(**context_fields):
+                if self._is_reject_intent(user_message):
+                    return await self.resolve_round_limit(chat_id, "ABANDON")
+                if self._is_continue_intent(user_message):
+                    return await self.resolve_round_limit(chat_id, "CONTINUE")
+                window_limit = max(1, int(self.config.max_rounds_per_turn))
+                return AgentResult.reply(
+                    f"\u5f53\u524d\u4efb\u52a1\u5df2\u6267\u884c {session.pending_round_count} \u8f6e\uff0c\u4ecd\u672a\u5b8c\u6210\u3002\n"
+                    f"\u8bf7\u56de\u590d\u2018\u7ee7\u7eed\u2019\u4ee5\u518d\u6267\u884c {window_limit} \u8f6e\uff0c\u6216\u56de\u590d\u2018\u653e\u5f03\u2019\u7ed3\u675f\u5f53\u524d\u4efb\u52a1\u3002"
+                )
 
         async def run_task() -> AgentResult:
             try:
                 snapshot = await self.get_active_llm_snapshot()
             except Exception as e:
-                return AgentResult.reply(await self._llm_unavailable_message(e))
+                content = await self._llm_unavailable_message(e)
+                session.add_assistant_message(content)
+                self._finish_turn(session, "failed")
+                self._persist_session(session)
+                return AgentResult.reply(content)
 
             await session.summarize_and_trim_history(snapshot.client, self.config.max_history_tokens)
             self._persist_session(session)
@@ -385,7 +496,8 @@ class Agent:
                 progress_callback=progress_callback,
             )
 
-        return await self._run_session_task_scope(chat_id, session, run_task)
+        with log_context(**context_fields):
+            return await self._run_session_task_scope(chat_id, session, run_task)
 
     async def resolve_round_limit(self, chat_id: int, action: str) -> AgentResult:
         """Resolve a round-limit confirmation by continuing or abandoning the task."""
@@ -393,29 +505,47 @@ class Agent:
         if not session.pending_round_limit:
             return AgentResult.reply("ℹ️ 当前没有等待继续执行的任务。")
 
+        turn_context = self._ensure_active_turn(session, "waiting_round_limit")
+
         async def resolve_task() -> AgentResult:
             normalized_action = (action or "").strip().upper()
             if normalized_action == "CONTINUE":
                 reached = session.pending_round_count
                 session.clear_pending_round_limit()
+                self._transition_turn(session, "running")
                 self._persist_session(session)
                 logger.info("User chose to continue task after %d rounds (chat_id=%d)", reached, chat_id)
                 try:
                     snapshot = await self.get_active_llm_snapshot()
                 except Exception as e:
-                    return AgentResult.reply(await self._llm_unavailable_message(e))
-                return await self._run_loop_compat(chat_id, session, snapshot)
+                    content = await self._llm_unavailable_message(e)
+                    session.add_assistant_message(content)
+                    self._finish_turn(session, "failed")
+                    self._persist_session(session)
+                    return AgentResult.reply(content)
+                return await self._run_loop_compat(
+                    chat_id,
+                    session,
+                    snapshot,
+                    turn_context=turn_context,
+                )
 
             reached = session.pending_round_count
             session.task_auto_approve = False
             session.clear_pending_round_limit()
             final_text = f"已放弃当前任务（累计执行 {reached} 轮）。如需继续，请发送新的指令。"
             session.add_assistant_message(final_text)
+            self._finish_turn(session, "cancelled")
             self._persist_session(session)
             logger.info("User abandoned task after %d rounds (chat_id=%d)", reached, chat_id)
             return AgentResult.reply(final_text)
 
-        return await self._run_session_task_scope(chat_id, session, resolve_task)
+        with log_context(
+            chat_id=chat_id,
+            user_id=turn_context.user_id,
+            turn_id=turn_context.turn_id,
+        ):
+            return await self._run_session_task_scope(chat_id, session, resolve_task)
 
     async def resume_session(
         self,
@@ -456,6 +586,8 @@ class Agent:
                 ),
             )
 
+        turn_context = self._ensure_active_turn(session, "waiting_approval")
+
         async def resume_task() -> tuple[str, AgentResult]:
             normalized_action = (action or "").strip().upper()
             if normalized_action not in {"APPROVE", "APPROVE_TASK", "REJECT"}:
@@ -495,11 +627,18 @@ class Agent:
                     snapshot = await self.get_active_llm_snapshot()
                 except Exception as e:
                     return "命令校验失败，已拒绝执行。", AgentResult.reply(await self._llm_unavailable_message(e))
-                final_answer = await self._run_loop_compat(chat_id, session, snapshot)
+                self._transition_turn(session, "running")
+                final_answer = await self._run_loop_compat(
+                    chat_id,
+                    session,
+                    snapshot,
+                    turn_context=turn_context,
+                )
                 return "命令校验失败，已拒绝执行。", final_answer
 
             # Clear pending state before continuing the normal loop.
             session.clear_pending_state()
+            self._transition_turn(session, "running")
             self._persist_session(session)
 
             if normalized_action == "REJECT":
@@ -559,15 +698,30 @@ class Agent:
             try:
                 snapshot = await self.get_active_llm_snapshot()
             except Exception as e:
-                return raw_result, AgentResult.reply(await self._llm_unavailable_message(e))
-            final_answer = await self._run_loop_compat(chat_id, session, snapshot)
+                content = await self._llm_unavailable_message(e)
+                session.add_assistant_message(content)
+                self._finish_turn(session, "failed")
+                self._persist_session(session)
+                return raw_result, AgentResult.reply(content)
+            final_answer = await self._run_loop_compat(
+                chat_id,
+                session,
+                snapshot,
+                turn_context=turn_context,
+            )
             return raw_result, final_answer
 
         session.approval_processing = True
         session.processing_approval_id = pending_approval_id or None
         self._persist_session(session)
         try:
-            return await self._run_session_task_scope(chat_id, session, resume_task)
+            with log_context(
+                chat_id=chat_id,
+                user_id=turn_context.user_id,
+                turn_id=turn_context.turn_id,
+                approval_id=pending_approval_id,
+            ):
+                return await self._run_session_task_scope(chat_id, session, resume_task)
         finally:
             session.approval_processing = False
             session.processing_approval_id = None
@@ -928,6 +1082,8 @@ class Agent:
 
         if snapshot is None:
             snapshot = await self.get_active_llm_snapshot()
+        if turn_context is None:
+            turn_context = session.current_turn_context()
         llm = snapshot.client
         self.llm = llm
         start_round = session.round_count
@@ -953,7 +1109,11 @@ class Agent:
             except Exception as e:
                 logger.error("LLM call failed: %s", e)
                 detail = user_facing_error_message(e, fallback="LLM 调用失败，请稍后重试。")
-                return AgentResult.reply(f"⚠️ {detail}")
+                final_content = f"⚠️ {detail}"
+                session.add_assistant_message(final_content)
+                self._finish_turn(session, "failed")
+                self._persist_session(session)
+                return AgentResult.reply(final_content)
 
             logger.debug(
                 "LLM response: content=%s, tool_calls=%d, tokens=%d",
@@ -1086,9 +1246,15 @@ class Agent:
                         session.pending_analysis = None
                         session.pending_since = time.time()
                         session.pending_followups.clear()
+                        self._transition_turn(session, "waiting_approval")
                         CommandAuditTracker.record_event(
                             "command_approval_created",
                             chat_id=chat_id,
+                            turn_id=(
+                                session.active_turn.turn_id
+                                if session.active_turn is not None
+                                else None
+                            ),
                             approval_id=approval_id,
                             run_id=run_id,
                             tool_call_id=e.tool_call_id,
@@ -1112,6 +1278,11 @@ class Agent:
                         payload = {
                             "approval_id": approval_id,
                             "run_id": run_id,
+                            "turn_id": (
+                                session.active_turn.turn_id
+                                if session.active_turn is not None
+                                else None
+                            ),
                             "command": e.command,
                             "command_hash": command_hash,
                             "reason": getattr(e, 'reason', ''),
@@ -1134,6 +1305,7 @@ class Agent:
                     session.task_auto_approve = False
                     session.clear_pending_round_limit()
                     session.add_assistant_message(final_content)
+                    self._finish_turn(session, "completed")
                     self._persist_session(session)
                     logger.warning(
                         "Tool storm stopped for chat_id=%d repeat_count=%d signature=%s",
@@ -1159,6 +1331,7 @@ class Agent:
                 session.task_auto_approve = False
                 session.clear_pending_round_limit()
                 session.add_assistant_message(final_content)
+                self._finish_turn(session, "completed")
                 self._persist_session(session)
                 logger.info("Agent completed for chat_id=%d in %d rounds", chat_id, round_num)
                 return AgentResult.reply(final_content)
@@ -1167,6 +1340,7 @@ class Agent:
         session.pending_round_limit = True
         session.pending_round_count = reached_rounds
         session.task_auto_approve = False
+        self._transition_turn(session, "waiting_round_limit")
         self._persist_session(session)
         logger.warning("Round limit window reached for chat_id=%d (rounds=%d)", chat_id, reached_rounds)
         return AgentResult.round_limit({"rounds": reached_rounds, "window": window_limit})

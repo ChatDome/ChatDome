@@ -12,12 +12,18 @@ from chatdome.llm.client import LLMResponse
 class _SessionManager:
     def __init__(self, session: AgentSession) -> None:
         self.session = session
+        self.lock: asyncio.Lock | None = None
 
     def get_or_create(self, _chat_id: int) -> AgentSession:
         return self.session
 
     def save_session(self, _session: AgentSession) -> None:
         return None
+
+    def get_turn_lock(self, _chat_id: int) -> asyncio.Lock:
+        if self.lock is None:
+            self.lock = asyncio.Lock()
+        return self.lock
 
 
 class _LLM:
