@@ -69,7 +69,7 @@ class CommandHandlerRuntime:
     defer_commands: bool = False
     model_admin_allowed: bool = True
     abort_pending_request: Callable[[], Any] | None = None
-    handle_deferred_message: Callable[[str], Any] | None = None
+    handle_deferred_message: Callable[[str, int | None], Any] | None = None
 
 
 class CommandErrorMapper:
@@ -261,15 +261,32 @@ class CommandHandlerService:
             return result
 
         executed = False
+        execution_lock: asyncio.Lock | None = None
 
-        async def run_once() -> None:
-            nonlocal executed
-            if executed:
-                return
-            executed = True
-            value = callback(message)
-            if inspect.isawaitable(value):
-                await value
+        async def run_once() -> Any:
+            nonlocal executed, execution_lock
+            if execution_lock is None:
+                execution_lock = asyncio.Lock()
+            async with execution_lock:
+                if executed:
+                    return None
+                try:
+                    callback_params = inspect.signature(callback).parameters
+                except (TypeError, ValueError):
+                    callback_params = {}
+                supports_user_id = len(callback_params) >= 2 or any(
+                    parameter.kind == inspect.Parameter.VAR_POSITIONAL
+                    for parameter in callback_params.values()
+                )
+                value = (
+                    callback(message, result.deferred_user_id)
+                    if supports_user_id
+                    else callback(message)
+                )
+                if inspect.isawaitable(value):
+                    value = await value
+                executed = True
+                return value
         return replace(result, post_delivery=run_once)
 
     @staticmethod

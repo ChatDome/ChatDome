@@ -69,6 +69,7 @@ class CommandResult:
     outbound: OutboundMessage | None = field(default=None, repr=False, compare=False)
     lifecycle_phase: str = "final"
     deferred_user_message: str = field(default="", repr=False, compare=False)
+    deferred_user_id: int | None = field(default=None, repr=False, compare=False)
     post_delivery: Callable[[], Any] | None = field(
         default=None,
         repr=False,
@@ -76,14 +77,25 @@ class CommandResult:
     )
 
 
-async def run_command_post_delivery(result: CommandResult) -> None:
+async def run_command_post_delivery(result: CommandResult) -> Any:
     """Run a command's continuation after its current outbound message is sent."""
     callback = result.post_delivery
     if callback is None:
-        return
+        return None
     value = callback()
     if inspect.isawaitable(value):
-        await value
+        return await value
+    return value
+
+
+def apply_post_delivery_state(
+    result: CommandResult,
+    continuation: Any,
+) -> CommandResult:
+    """Project a continuation state without replacing the delivered command result."""
+    if not isinstance(continuation, CommandResult) or continuation.state is None:
+        return result
+    return replace(result, state=continuation.state)
 
 
 @dataclass(frozen=True)
@@ -376,7 +388,8 @@ class CommandRegistry:
             handled = self._result_handler(invocation, result)
             if inspect.isawaitable(handled):
                 await handled
-            await run_command_post_delivery(result)
+            continuation = await run_command_post_delivery(result)
+            result = apply_post_delivery_state(result, continuation)
         return result
 
     def match_commands(self, text: str) -> list[CommandDef]:
@@ -903,6 +916,8 @@ async def approval_action_command_result(
         outcome = "approval_processing"
     elif approval_status == "unavailable":
         outcome = "approval_unavailable"
+    elif approval_status == "review_required":
+        outcome = "approval_review_required"
     else:
         outcome = "approval_confirmed"
     outbound = _with_command_outcome(
@@ -910,7 +925,11 @@ async def approval_action_command_result(
         outcome,
     )
     return CommandResult(
-        state=outbound.status,
+        state=(
+            "approval_review_required"
+            if approval_status == "review_required"
+            else outbound.status
+        ),
         outcome=outcome,
         event_summary="用户批准了待审批命令。",
         visible_to_agent=True,
@@ -919,6 +938,7 @@ async def approval_action_command_result(
             getattr(result, "payload", {}).get("deferred_user_message", "")
             or ""
         ),
+        deferred_user_id=getattr(result, "payload", {}).get("deferred_user_id"),
         outbound=outbound,
     )
 
@@ -1022,6 +1042,7 @@ async def reject_command_result(
             getattr(result, "payload", {}).get("deferred_user_message", "")
             or ""
         ),
+        deferred_user_id=getattr(result, "payload", {}).get("deferred_user_id"),
         outbound=outbound,
     )
 

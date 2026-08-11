@@ -284,6 +284,7 @@ class AgentSession:
     next_turn_id: int = 1
     active_turn: ActiveTurn | None = None
     deferred_user_message: str | None = None
+    deferred_user_id: int | None = None
     
     # Pause/Resume state for Human-in-the-loop
     pending_approval: bool = False
@@ -320,6 +321,7 @@ class AgentSession:
             "next_turn_id": self.next_turn_id,
             "active_turn": self.active_turn.to_snapshot() if self.active_turn else None,
             "deferred_user_message": self.deferred_user_message,
+            "deferred_user_id": self.deferred_user_id,
             "pending_approval": self.pending_approval,
             "pending_approval_id": self.pending_approval_id,
             "pending_run_id": self.pending_run_id,
@@ -375,6 +377,8 @@ class AgentSession:
         )
         if active_turn is not None:
             next_turn_id = max(next_turn_id, active_turn.turn_id + 1)
+            if active_turn.state in TERMINAL_TURN_STATES:
+                active_turn = None
 
         pending_approval = bool(payload.get("pending_approval", False))
         pending_round_limit = bool(payload.get("pending_round_limit", False))
@@ -403,6 +407,11 @@ class AgentSession:
         deferred_user_message = payload.get("deferred_user_message")
         if not isinstance(deferred_user_message, str) or not deferred_user_message:
             deferred_user_message = None
+        deferred_user_id = payload.get("deferred_user_id")
+        if isinstance(deferred_user_id, bool) or not isinstance(deferred_user_id, int):
+            deferred_user_id = None
+        if deferred_user_message is None:
+            deferred_user_id = None
 
         return cls(
             chat_id=chat_id,
@@ -414,6 +423,7 @@ class AgentSession:
             next_turn_id=next_turn_id,
             active_turn=active_turn,
             deferred_user_message=deferred_user_message,
+            deferred_user_id=deferred_user_id,
             pending_approval=pending_approval,
             pending_approval_id=payload.get("pending_approval_id"),
             pending_run_id=payload.get("pending_run_id"),
@@ -499,7 +509,7 @@ class AgentSession:
         self.last_active = completed.updated_at
         return completed
 
-    def defer_user_message(self, message: str) -> None:
+    def defer_user_message(self, message: str, user_id: int | None = None) -> None:
         """Store one user message until the active turn reaches a terminal state."""
         if self.deferred_user_message is not None:
             raise RuntimeError("deferred user message already exists")
@@ -507,12 +517,28 @@ class AgentSession:
         if not value:
             raise ValueError("deferred user message must not be empty")
         self.deferred_user_message = value
+        self.deferred_user_id = (
+            user_id
+            if isinstance(user_id, int) and not isinstance(user_id, bool)
+            else None
+        )
         self.last_active = time.time()
+
+    def peek_deferred_input(self) -> tuple[str | None, int | None]:
+        """Return deferred input without consuming it."""
+        return self.deferred_user_message, self.deferred_user_id
+
+    def take_deferred_input(self) -> tuple[str | None, int | None]:
+        """Consume deferred input and its original actor identity."""
+        message = self.deferred_user_message
+        user_id = self.deferred_user_id
+        self.deferred_user_message = None
+        self.deferred_user_id = None
+        return message, user_id
 
     def take_deferred_message(self) -> str | None:
         """Consume the deferred user message, if present."""
-        message = self.deferred_user_message
-        self.deferred_user_message = None
+        message, _ = self.take_deferred_input()
         return message
 
     def add_user_message(self, content: str, *, turn_id: int | None = None) -> None:
@@ -977,6 +1003,7 @@ class AgentSession:
         self._deferred_visible_contexts.clear()
         self.active_turn = None
         self.deferred_user_message = None
+        self.deferred_user_id = None
         self.clear_pending_state()
         self.clear_pending_round_limit()
         self.last_active = time.time()
@@ -1108,11 +1135,94 @@ class SessionManager:
         session.chat_id = chat_id
         session.add_system_message(self._build_memory_prompt(chat_id))
 
+        if (
+            session.pending_approval
+            and session.active_turn is not None
+            and session.active_turn.state == "answering_approval_question"
+        ):
+            session.transition_turn("waiting_approval")
+
+        if (
+            session.active_turn is not None
+            and not session.pending_approval
+            and not session.pending_round_limit
+        ):
+            completed = session.finish_turn("failed")
+            session.agent_running = False
+            session.add_control_event(
+                {
+                    "event_type": "turn_completed",
+                    "turn_id": completed.turn_id,
+                    "outcome": "failed",
+                    "reason": "interrupted_during_restart",
+                }
+            )
+
+        approval_binding_complete = all(
+            isinstance(value, str) and bool(value.strip())
+            for value in (
+                session.pending_approval_id,
+                session.pending_tool_call_id,
+                session.pending_command,
+                session.pending_command_hash,
+            )
+        )
+        if session.pending_approval and not approval_binding_complete:
+            turn_id = (
+                session.active_turn.turn_id
+                if session.active_turn is not None
+                else None
+            )
+            logger.warning(
+                "Discarding incomplete pending approval for chat_id=%d turn_id=%s",
+                chat_id,
+                turn_id or "-",
+            )
+            session.clear_pending_state()
+            session.clear_pending_round_limit()
+            session.take_deferred_message()
+            session.agent_running = False
+            if session.active_turn is not None:
+                completed = session.finish_turn("failed")
+                session.add_control_event(
+                    {
+                        "event_type": "turn_completed",
+                        "turn_id": completed.turn_id,
+                        "outcome": "failed",
+                        "reason": "invalid_approval_snapshot",
+                    }
+                )
+
         if session.pending_approval:
             pending_since = session.pending_since or session.last_active
             if (time.time() - pending_since) > self.pending_approval_timeout:
-                logger.info("Pending approval expired while offline for chat_id=%d", chat_id)
+                turn_id = (
+                    session.active_turn.turn_id
+                    if session.active_turn is not None
+                    else None
+                )
+                approval_id = session.pending_approval_id or ""
+                logger.info(
+                    "Pending approval expired while offline for chat_id=%d "
+                    "turn_id=%s approval_id=%s",
+                    chat_id,
+                    turn_id or "-",
+                    approval_id or "-",
+                )
                 session.clear_pending_state()
+                session.clear_pending_round_limit()
+                session.take_deferred_message()
+                session.agent_running = False
+                if session.active_turn is not None:
+                    completed = session.finish_turn("cancelled")
+                    session.add_control_event(
+                        {
+                            "event_type": "turn_completed",
+                            "turn_id": completed.turn_id,
+                            "outcome": "cancelled",
+                            "reason": "approval_expired",
+                        }
+                    )
 
         session.repair_missing_tool_outputs()
 

@@ -1558,18 +1558,20 @@ class PendingApprovalFollowupTests(unittest.TestCase):
 
     def test_reject_releases_deferred_message_after_cancellation(self):
         session = _pending_session()
-        session.deferred_user_message = "inspect disk"
+        session.defer_user_message("inspect disk", user_id=456)
         agent = _resume_agent(session)
 
         with patch("chatdome.agent.audit.CommandAuditTracker.record_event"):
             _, result = asyncio.run(agent.resume_session(123, "REJECT"))
 
         self.assertEqual(result.payload["deferred_user_message"], "inspect disk")
-        self.assertIsNone(session.deferred_user_message)
+        self.assertEqual(result.payload["deferred_user_id"], 456)
+        self.assertEqual(session.deferred_user_message, "inspect disk")
+        self.assertEqual(session.deferred_user_id, 456)
 
     def test_approve_releases_deferred_message_only_after_completed(self):
         session = _pending_session()
-        session.deferred_user_message = "inspect disk"
+        session.defer_user_message("inspect disk", user_id=456)
         llm = SequenceLLM(LLMResponse(content="done"))
         agent = _pending_agent(session, llm)
 
@@ -1586,12 +1588,14 @@ class PendingApprovalFollowupTests(unittest.TestCase):
 
         self.assertEqual(result.content, "done")
         self.assertEqual(result.payload["deferred_user_message"], "inspect disk")
-        self.assertIsNone(session.deferred_user_message)
+        self.assertEqual(result.payload["deferred_user_id"], 456)
+        self.assertEqual(session.deferred_user_message, "inspect disk")
+        self.assertEqual(session.deferred_user_id, 456)
 
     def test_approve_retains_deferred_message_when_another_approval_is_created(self):
         session = AgentSession(chat_id=123)
         session.add_user_message("restart services")
-        session.deferred_user_message = "inspect disk"
+        session.defer_user_message("inspect disk", user_id=456)
         llm = SequenceLLM(
             LLMResponse(
                 tool_calls=[
@@ -1618,6 +1622,7 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         session.pending_tool_call_id = "call-1"
         session.pending_command = "systemctl restart sshd"
         session.pending_command_hash = Agent._command_hash(session.pending_command)
+        session.pending_reason = "重启 SSH 服务"
 
         with patch("chatdome.agent.audit.CommandAuditTracker.record_event"), patch(
             "chatdome.agent.tracker.TokenTracker.record_usage"
@@ -1629,6 +1634,79 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         self.assertEqual(result.kind, "pending_approval")
         self.assertEqual(session.deferred_user_message, "inspect disk")
         self.assertNotIn("deferred_user_message", result.payload)
+
+    def test_missing_reason_requires_details_before_natural_or_typed_approval(self):
+        session = _pending_session()
+        session.pending_reason = "无说明"
+        context = session.begin_turn("inspect", user_id=123)
+        session.transition_turn("waiting_approval")
+        agent = _resume_agent(session)
+
+        _, result = asyncio.run(
+            agent.resume_session(
+                123,
+                "APPROVE",
+                approval_id=session.pending_approval_id,
+            )
+        )
+
+        self.assertEqual(result.payload["approval_status"], "review_required")
+        self.assertIn("/details", result.content)
+        self.assertTrue(session.pending_approval)
+        self.assertEqual(session.active_turn.turn_id, context.turn_id)
+        self.assertEqual(agent.tool_dispatcher.sandbox.commands, [])
+
+    def test_stale_classifier_result_cannot_mutate_rejected_approval(self):
+        class GatedClassifierLLM:
+            model = "fake-model"
+
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def chat_completion(self, messages, tools=None, response_format=None):
+                del messages, tools, response_format
+                self.started.set()
+                await self.release.wait()
+                return LLMResponse(
+                    content=json.dumps(
+                        {
+                            "classification": "unknown",
+                            "answer": "",
+                        }
+                    )
+                )
+
+        async def scenario():
+            session = _pending_session()
+            session.begin_turn("inspect", user_id=123)
+            session.transition_turn("waiting_approval")
+            llm = GatedClassifierLLM()
+            agent = _pending_agent(session, llm)
+
+            classify_task = asyncio.create_task(
+                agent.handle_message(123, "换个方法", user_id=456)
+            )
+            await llm.started.wait()
+            _, rejected = await agent.resume_session(
+                123,
+                "REJECT",
+                approval_id=session.pending_approval_id,
+            )
+            llm.release.set()
+            classified = await classify_task
+            return session, agent, rejected, classified
+
+        with patch("chatdome.agent.audit.CommandAuditTracker.record_event"), patch(
+            "chatdome.agent.tracker.TokenTracker.record_usage"
+        ):
+            session, agent, rejected, classified = asyncio.run(scenario())
+
+        self.assertEqual(rejected.content, "已拒绝当前命令，任务已取消。")
+        self.assertEqual(classified.content, "审批状态已变化，请查看最新消息。")
+        self.assertIsNone(session.active_turn)
+        self.assertIsNone(session.deferred_user_message)
+        self.assertEqual(agent.tool_dispatcher.sandbox.commands, [])
 
     def test_hash_mismatch_fails_turn_without_execution_or_llm_call(self):
         session = _pending_session()

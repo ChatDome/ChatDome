@@ -310,6 +310,32 @@ def test_platform_adapter_runs_post_delivery_once_after_current_message() -> Non
     assert events == ["current result", "deferred"]
 
 
+def test_platform_adapter_does_not_consume_continuation_after_delivery_failure() -> None:
+    events = []
+
+    async def handler(_invocation):
+        return CommandResult(
+            text="current result",
+            post_delivery=lambda: events.append("deferred"),
+        )
+
+    def fail_delivery(_target, _rendered):
+        raise RuntimeError("send failed")
+
+    adapter = CLIPlatformAdapter(fail_delivery)
+    command = CommandDef("/test", "test", "test", handler=handler)
+    invocation = adapter.receive_command(
+        raw="/test",
+        command=command,
+        args=(),
+        context=CommandContext(source="cli"),
+    )
+
+    with pytest.raises(RuntimeError, match="send failed"):
+        asyncio.run(adapter.dispatch(invocation))
+    assert events == []
+
+
 def test_command_handler_attaches_one_shot_deferred_message_callback() -> None:
     handled_messages = []
 
@@ -318,12 +344,17 @@ def test_command_handler_attaches_one_shot_deferred_message_callback() -> None:
             assert (chat_id, action, approval_id) == (7, "APPROVE", "AP-1")
             return "", AgentResult.reply(
                 "approved",
-                payload={"deferred_user_message": "inspect disk"},
+                payload={
+                    "deferred_user_message": "inspect disk",
+                    "deferred_user_id": 456,
+                },
             )
 
     runtime = CommandHandlerRuntime(
         agent=Agent(),
-        handle_deferred_message=lambda message: handled_messages.append(message),
+        handle_deferred_message=lambda message, user_id: handled_messages.append(
+            (message, user_id)
+        ),
     )
     service = CommandHandlerService(lambda _invocation: runtime)
     command = CommandDef("/confirm", "confirm", "approval", handler=service.handle)
@@ -342,7 +373,39 @@ def test_command_handler_attaches_one_shot_deferred_message_callback() -> None:
     asyncio.run(result.post_delivery())
 
     assert result.deferred_user_message == "inspect disk"
-    assert handled_messages == ["inspect disk"]
+    assert result.deferred_user_id == 456
+    assert handled_messages == [("inspect disk", 456)]
+
+
+def test_deferred_callback_can_retry_after_failure() -> None:
+    attempts = []
+
+    async def callback(message, user_id):
+        attempts.append((message, user_id))
+        if len(attempts) == 1:
+            raise RuntimeError("temporary failure")
+        return "done"
+
+    runtime = CommandHandlerRuntime(handle_deferred_message=callback)
+    result = CommandHandlerService._attach_deferred_post_delivery(
+        CommandResult(
+            deferred_user_message="inspect disk",
+            deferred_user_id=456,
+        ),
+        runtime,
+    )
+
+    async def scenario():
+        with pytest.raises(RuntimeError, match="temporary failure"):
+            await result.post_delivery()
+        second = await result.post_delivery()
+        third = await result.post_delivery()
+        return second, third
+
+    second, third = asyncio.run(scenario())
+    assert second == "done"
+    assert third is None
+    assert attempts == [("inspect disk", 456), ("inspect disk", 456)]
 
 
 def test_command_registry_converts_result_before_platform_handler() -> None:

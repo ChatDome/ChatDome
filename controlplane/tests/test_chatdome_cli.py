@@ -565,6 +565,39 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertIn("reject ok", printed)
         self.assertNotIn("Approval ID:", printed)
 
+    def test_terminal_approval_text_uses_agent_classifier_and_keeps_state(self):
+        class FakeSessionManager:
+            def get_or_create(self, _chat_id):
+                return SimpleNamespace(pending_approval=True)
+
+        class FakeAgent:
+            def __init__(self):
+                self.calls = []
+                self.session_manager = FakeSessionManager()
+
+            async def handle_message(self, chat_id, message, *, user_id=None):
+                self.calls.append((chat_id, user_id, message))
+                return self_result.reply("The command may restart the service.")
+
+        self_result = self.cli.AgentResult
+        agent = FakeAgent()
+        runtime = self.cli._TerminalChatRuntime(agent, -11)
+        provider = self.cli._StaticTerminalRuntimeProvider(runtime)
+
+        with patch.object(self.cli, "_print_chatdome_message"):
+            result = asyncio.run(
+                self.cli._handle_terminal_approval_choice(
+                    provider,
+                    "What is the risk?",
+                )
+            )
+
+        self.assertEqual(agent.calls, [(-11, -11, "What is the risk?")])
+        self.assertEqual(
+            result.state,
+            self.cli.ChatSessionState.APPROVAL_REQUIRED.value,
+        )
+
 
     def test_terminal_details_full_expands_reason_and_impact_without_hash(self):
         class FakeAgent:
@@ -679,6 +712,38 @@ class ChatDomeCLITests(unittest.TestCase):
         )
         self.assertLess(approved_index, deferred_index)
         self.assertLess(deferred_index, next_answer_index)
+
+    def test_terminal_deferred_approval_updates_controller_result_state(self):
+        agent_result = self.cli.AgentResult
+
+        class FakeAgent:
+            async def resume_session(self, chat_id, action, approval_id=None):
+                del chat_id, action, approval_id
+                return "", agent_result.reply(
+                    "approved",
+                    {"deferred_user_message": "next question"},
+                )
+
+            async def handle_message(self, chat_id, message, *, user_id=None):
+                del chat_id, message, user_id
+                return agent_result.pending_approval(
+                    {
+                        "approval_id": "AP-2",
+                        "reason": "Run the next command.",
+                    }
+                )
+
+        runtime = self.cli._TerminalChatRuntime(FakeAgent(), -6)
+
+        with patch.object(self.cli, "_print_chatdome_message"):
+            result = asyncio.run(
+                self.cli._dispatch_terminal_interaction(runtime, "/confirm", ())
+            )
+
+        self.assertEqual(
+            result.state,
+            self.cli.ChatSessionState.APPROVAL_REQUIRED.value,
+        )
 
     def test_terminal_round_limit_accepts_yes_no_choice(self):
         class FakeSessionManager:

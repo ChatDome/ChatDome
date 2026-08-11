@@ -332,7 +332,10 @@ class TelegramBot:
                 return self._app.create_task(awaitable)
             return asyncio.create_task(awaitable)
 
-        async def handle_deferred_message(message: str) -> None:
+        async def handle_deferred_message(
+            message: str,
+            original_user_id: int | None,
+        ) -> None:
             delivery_target = target
             if delivery_target is None and self._app is not None:
                 delivery_target = TelegramDeliveryTarget(
@@ -344,7 +347,7 @@ class TelegramBot:
             await self._run_deferred_user_message(
                 delivery_target,
                 invocation.context.chat_id,
-                user_id,
+                original_user_id if original_user_id is not None else user_id,
                 message,
             )
 
@@ -493,6 +496,7 @@ class TelegramBot:
                 chat_id=chat_id,
                 user_message=message,
                 user_id=user_id,
+                deferred=True,
             )
         finally:
             if registered_here and self._message_tasks.get(chat_id) is current_task:
@@ -932,6 +936,7 @@ class TelegramBot:
         progress: TelegramProgressMessage | None,
         *,
         user_id: int | None = None,
+        deferred: bool = False,
     ) -> AgentResult:
         async def publish(stage: str) -> None:
             if progress is None:
@@ -965,6 +970,8 @@ class TelegramBot:
             kwargs["progress_callback"] = publish
         if "user_id" in params or supports_kwargs:
             kwargs["user_id"] = user_id
+        if "deferred" in params or supports_kwargs:
+            kwargs["deferred"] = deferred
         return await handle_message(chat_id, user_message, **kwargs)
 
     async def _run_agent_message(
@@ -973,6 +980,7 @@ class TelegramBot:
         chat_id: int,
         user_message: str,
         user_id: int | None = None,
+        deferred: bool = False,
     ) -> None:
         progress: TelegramProgressMessage | None = None
         try:
@@ -997,6 +1005,7 @@ class TelegramBot:
                 user_message,
                 progress,
                 user_id=user_id,
+                deferred=deferred,
             )
             if progress is not None:
                 await self._set_progress_stage(

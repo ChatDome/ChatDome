@@ -196,13 +196,14 @@ class TelegramStopTests(unittest.TestCase):
         bot._run_agent_message = AsyncMock()
 
         runtime = bot._command_runtime(invocation)
-        await runtime.handle_deferred_message("next question")
+        await runtime.handle_deferred_message("next question", 789)
 
         bot._run_agent_message.assert_awaited_once_with(
             message=target,
             chat_id=123,
             user_message="next question",
-            user_id=456,
+            user_id=789,
+            deferred=True,
         )
         self.assertNotIn(123, bot._message_tasks)
 

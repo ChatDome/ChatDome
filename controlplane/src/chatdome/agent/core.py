@@ -31,6 +31,7 @@ from chatdome.executor.sandbox import CommandSandbox
 from chatdome.llm.client import LLMClient
 from chatdome.llm.manager import LLMManager, LLMSnapshot
 from chatdome.logger import log_context
+from chatdome.outbound.policy import has_meaningful_approval_reason
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,7 @@ class Agent:
             {
                 "event_type": "turn_started",
                 "turn_id": active_turn.turn_id,
+                "user_id": active_turn.user_id,
                 "state": active_turn.state,
                 "round_count": session.round_count,
             }
@@ -232,11 +234,12 @@ class Agent:
         """Attach deferred input only after the active turn has ended."""
         if getattr(session, "active_turn", None) is not None:
             return result
-        deferred_message = session.take_deferred_message()
+        deferred_message, deferred_user_id = session.peek_deferred_input()
         if not deferred_message:
             return result
         payload = dict(result.payload)
         payload["deferred_user_message"] = deferred_message
+        payload["deferred_user_id"] = deferred_user_id
         return AgentResult(
             kind=result.kind,
             content=result.content,
@@ -248,7 +251,12 @@ class Agent:
         context = session.current_turn_context()
         if context is None:
             context = session.begin_turn(self._latest_user_message(session))
-            self._record_turn_started(session)
+            with log_context(
+                chat_id=session.chat_id,
+                user_id=context.user_id,
+                turn_id=context.turn_id,
+            ):
+                self._record_turn_started(session)
         self._transition_turn(session, state)
         return context
 
@@ -430,6 +438,7 @@ class Agent:
         *,
         user_id: int | None = None,
         progress_callback: Any = None,
+        deferred: bool = False,
     ) -> AgentResult:
         """Process a user message through the full ReAct loop."""
         session = self.session_manager.get_or_create(chat_id)
@@ -440,6 +449,13 @@ class Agent:
             if session.repair_missing_tool_outputs():
                 self._persist_session(session)
             if session.pending_approval:
+                if session.approval_processing:
+                    processing_id = session.processing_approval_id or "当前命令"
+                    return AgentResult(
+                        kind="reply",
+                        content=f"ℹ️ {processing_id} 已完成审批，正在处理中。",
+                        payload={"approval_status": "processing"},
+                    )
                 pending_state = (
                     session.active_turn.state
                     if session.active_turn is not None
@@ -459,9 +475,21 @@ class Agent:
             elif session.active_turn is not None:
                 return AgentResult.reply("任务正在运行。发送 /stop 中止。")
             else:
+                if deferred:
+                    deferred_message, deferred_user_id = session.peek_deferred_input()
+                    if deferred_message != user_message:
+                        return AgentResult.reply("该暂存任务已处理。")
+                    session.take_deferred_input()
+                    if deferred_user_id is not None:
+                        user_id = deferred_user_id
                 turn_context = session.begin_turn(user_message, user_id=user_id)
                 session.add_user_message(user_message, turn_id=turn_context.turn_id)
-                self._record_turn_started(session)
+                with log_context(
+                    chat_id=chat_id,
+                    user_id=turn_context.user_id,
+                    turn_id=turn_context.turn_id,
+                ):
+                    self._record_turn_started(session)
                 self._persist_session(session)
 
         assert turn_context is not None
@@ -478,6 +506,7 @@ class Agent:
                     chat_id,
                     session,
                     user_message,
+                    user_id=user_id,
                 )
 
         if route == "round_limit":
@@ -570,6 +599,17 @@ class Agent:
         approval_id: str | None = None,
     ) -> tuple[str, AgentResult]:
         """Resume a suspended session after user approval/rejection. Returns (raw_result, agent_result)."""
+        turn_lock = self.session_manager.get_turn_lock(chat_id)
+        async with turn_lock:
+            return await self._resume_session_locked(chat_id, action, approval_id)
+
+    async def _resume_session_locked(
+        self,
+        chat_id: int,
+        action: str,
+        approval_id: str | None = None,
+    ) -> tuple[str, AgentResult]:
+        """Resolve an approval while holding the chat turn lock."""
         session = self.session_manager.get_or_create(chat_id)
         if session.approval_processing:
             processing_id = session.processing_approval_id or "当前命令"
@@ -588,8 +628,11 @@ class Agent:
         tool_call_id = session.pending_tool_call_id
         command = session.pending_command or ""
         pending_approval_id = session.pending_approval_id or ""
-        pending_command_hash = session.pending_command_hash or self._command_hash(command)
+        pending_command_hash = session.pending_command_hash or ""
         requested_approval_id = (approval_id or "").strip()
+        normalized_action = (action or "").strip().upper()
+        if normalized_action not in {"APPROVE", "REJECT"}:
+            normalized_action = "REJECT"
 
         if requested_approval_id and pending_approval_id and requested_approval_id != pending_approval_id:
             return (
@@ -601,17 +644,34 @@ class Agent:
                 ),
             )
 
+        if (
+            normalized_action == "APPROVE"
+            and not has_meaningful_approval_reason(session.pending_reason)
+            and not isinstance(session.pending_analysis, dict)
+        ):
+            return "", AgentResult(
+                kind="reply",
+                content="请先使用 /details 查看当前命令分析，再决定是否执行。",
+                payload={"approval_status": "review_required"},
+            )
+
         turn_context = self._ensure_active_turn(session, "waiting_approval")
 
         async def resume_task() -> tuple[str, AgentResult]:
-            normalized_action = (action or "").strip().upper()
-            if normalized_action not in {"APPROVE", "REJECT"}:
-                normalized_action = "REJECT"
             followup_summary = self._summarize_pending_followups(session)
             turn_id = turn_context.turn_id
 
             current_command_hash = self._command_hash(command)
-            if normalized_action == "APPROVE" and pending_command_hash != current_command_hash:
+            approval_binding_complete = bool(
+                pending_approval_id
+                and tool_call_id
+                and command
+                and pending_command_hash
+            )
+            if normalized_action == "APPROVE" and (
+                not approval_binding_complete
+                or pending_command_hash != current_command_hash
+            ):
                 logger.warning(
                     "Pending approval command hash mismatch: approval_id=%s expected=%s actual=%s",
                     pending_approval_id,
@@ -648,7 +708,12 @@ class Agent:
 
             if normalized_action == "REJECT":
                 session.task_auto_approve = False
-                logger.info("User rejected command: %s", command)
+                logger.info(
+                    "User rejected command: approval_id=%s tool_call_id=%s command_hash=%s",
+                    pending_approval_id or "-",
+                    tool_call_id,
+                    pending_command_hash or "-",
+                )
                 CommandAuditTracker.record_event(
                     "command_rejected",
                     chat_id=chat_id,
@@ -678,7 +743,12 @@ class Agent:
                 return "用户已拒绝执行该命令。", result
 
             session.task_auto_approve = False
-            logger.info("User approved command: %s", command)
+            logger.info(
+                "User approved command: approval_id=%s tool_call_id=%s command_hash=%s",
+                pending_approval_id,
+                tool_call_id,
+                pending_command_hash,
+            )
             CommandAuditTracker.record_event(
                 "command_approved",
                 chat_id=chat_id,
@@ -997,20 +1067,49 @@ class Agent:
         chat_id: int,
         session: Any,
         user_message: str,
+        *,
+        user_id: int | None = None,
     ) -> AgentResult:
         """Classify one message received while a command waits for approval."""
-        self._prune_pending_followups(session)
-        if (
-            session.active_turn is not None
-            and session.active_turn.state == "waiting_approval_decision"
-        ):
-            return AgentResult.reply(self._pending_approval_decision_message())
+        turn_lock = self.session_manager.get_turn_lock(chat_id)
+        async with turn_lock:
+            self._prune_pending_followups(session)
+            if session.approval_processing:
+                processing_id = session.processing_approval_id or "当前命令"
+                return AgentResult(
+                    kind="reply",
+                    content=f"ℹ️ {processing_id} 已完成审批，正在处理中。",
+                    payload={"approval_status": "processing"},
+                )
+            if not session.pending_approval:
+                return AgentResult.reply("当前审批已处理。")
+            if (
+                session.active_turn is not None
+                and session.active_turn.state == "answering_approval_question"
+            ):
+                return AgentResult.reply("上一条审批消息正在处理中。")
+            if (
+                session.active_turn is not None
+                and session.active_turn.state == "waiting_approval_decision"
+            ):
+                return AgentResult.reply(self._pending_approval_decision_message())
 
-        pending_cmd = session.pending_command or ""
-        pending_approval_id = session.pending_approval_id or ""
-        pending_reason = session.pending_reason or ""
-        pending_risk_level = session.pending_risk_level or ""
-        self._transition_turn(session, "answering_approval_question")
+            pending_cmd = session.pending_command or ""
+            pending_approval_id = session.pending_approval_id or ""
+            pending_tool_call_id = session.pending_tool_call_id or ""
+            pending_command_hash = session.pending_command_hash or ""
+            pending_reason = session.pending_reason or ""
+            pending_risk_level = session.pending_risk_level or ""
+            turn_id = session.active_turn.turn_id if session.active_turn is not None else None
+            approval_binding = (
+                turn_id,
+                pending_approval_id,
+                pending_tool_call_id,
+                pending_command_hash,
+            )
+            self._transition_turn(session, "answering_approval_question")
+            self._persist_session(session)
+
         try:
             snapshot = await self.get_active_llm_snapshot()
             decision = await classify_approval_input(
@@ -1033,64 +1132,88 @@ class Agent:
             logger.warning("Approval input classification unavailable: %s", exc)
             decision = ApprovalInputDecision(classification="unknown")
 
-        if decision.classification in {"approve", "reject"}:
-            outcome = "approval_resumed"
-        elif decision.classification == "approval_question":
-            outcome = "answered"
-        else:
-            outcome = "decision_required"
-
-        turn_id = session.active_turn.turn_id if session.active_turn is not None else None
-        event = {
-            "event_type": "approval_input_classified",
-            "turn_id": turn_id,
-            "approval_id": pending_approval_id,
-            "classification": decision.classification,
-            "outcome": outcome,
-        }
-        session.add_control_event(event)
-        CommandAuditTracker.record_event(
-            "approval_input_classified",
-            chat_id=chat_id,
-            turn_id=turn_id,
-            approval_id=pending_approval_id,
-            classification=decision.classification,
-            outcome=outcome,
-        )
-        logger.info(
-            "Approval input classified: classification=%s outcome=%s",
-            decision.classification,
-            outcome,
-        )
-
-        if decision.classification == "approve":
-            self._persist_session(session)
-            _, result = await self.resume_session(
-                chat_id,
-                "APPROVE",
-                approval_id=pending_approval_id or None,
+        async with turn_lock:
+            current_turn_id = (
+                session.active_turn.turn_id
+                if session.active_turn is not None
+                else None
             )
-            return result
-        if decision.classification == "reject":
-            self._persist_session(session)
-            _, result = await self.resume_session(
-                chat_id,
-                "REJECT",
-                approval_id=pending_approval_id or None,
+            current_binding = (
+                current_turn_id,
+                session.pending_approval_id or "",
+                session.pending_tool_call_id or "",
+                session.pending_command_hash or "",
             )
-            return result
-        if decision.classification == "approval_question":
-            session.add_pending_followup("user", user_message)
-            session.add_pending_followup("assistant", decision.answer)
-            self._transition_turn(session, "waiting_approval")
-            self._persist_session(session)
-            return AgentResult.reply(decision.answer)
+            if session.approval_processing:
+                processing_id = session.processing_approval_id or "当前命令"
+                return AgentResult(
+                    kind="reply",
+                    content=f"ℹ️ {processing_id} 已完成审批，正在处理中。",
+                    payload={"approval_status": "processing"},
+                )
+            if not session.pending_approval or current_binding != approval_binding:
+                return AgentResult.reply("审批状态已变化，请查看最新消息。")
 
-        if session.deferred_user_message is None:
-            session.defer_user_message(user_message)
-        self._transition_turn(session, "waiting_approval_decision")
-        self._persist_session(session)
-        return AgentResult.reply(self._pending_approval_decision_message())
+            if decision.classification == "approve":
+                outcome = (
+                    "approval_resumed"
+                    if has_meaningful_approval_reason(session.pending_reason)
+                    or isinstance(session.pending_analysis, dict)
+                    else "review_required"
+                )
+            elif decision.classification == "reject":
+                outcome = "approval_resumed"
+            elif decision.classification == "approval_question":
+                outcome = "answered"
+            else:
+                outcome = "decision_required"
+
+            event = {
+                "event_type": "approval_input_classified",
+                "turn_id": turn_id,
+                "user_id": user_id,
+                "approval_id": pending_approval_id,
+                "classification": decision.classification,
+                "outcome": outcome,
+            }
+            session.add_control_event(event)
+            CommandAuditTracker.record_event(
+                "approval_input_classified",
+                chat_id=chat_id,
+                user_id=user_id,
+                turn_id=turn_id,
+                approval_id=pending_approval_id,
+                classification=decision.classification,
+                outcome=outcome,
+            )
+            logger.info(
+                "Approval input classified: classification=%s outcome=%s",
+                decision.classification,
+                outcome,
+            )
+
+            if decision.classification == "approval_question":
+                session.add_pending_followup("user", user_message)
+                session.add_pending_followup("assistant", decision.answer)
+                self._transition_turn(session, "waiting_approval")
+                self._persist_session(session)
+                return AgentResult.reply(decision.answer)
+
+            if decision.classification not in {"approve", "reject"}:
+                if session.deferred_user_message is None:
+                    session.defer_user_message(user_message, user_id=user_id)
+                self._transition_turn(session, "waiting_approval_decision")
+                self._persist_session(session)
+                return AgentResult.reply(self._pending_approval_decision_message())
+
+            self._persist_session(session)
+
+        _, result = await self.resume_session(
+            chat_id,
+            "APPROVE" if decision.classification == "approve" else "REJECT",
+            approval_id=pending_approval_id or None,
+        )
+        return result
 
     async def _run_loop(
         self,

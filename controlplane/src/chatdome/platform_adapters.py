@@ -16,6 +16,7 @@ from chatdome.slash_commands import (
     CommandInvocation,
     CommandRegistry,
     CommandResult,
+    apply_post_delivery_state,
     execute_command,
     run_command_post_delivery,
 )
@@ -105,8 +106,8 @@ class PlatformAdapter(ABC):
 
         result = await execute_command(invocation)
         await self.deliver_result(result, target=target)
-        await run_command_post_delivery(result)
-        return result
+        continuation = await run_command_post_delivery(result)
+        return apply_post_delivery_state(result, continuation)
 
 
 class CLIPlatformAdapter(PlatformAdapter):

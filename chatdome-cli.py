@@ -727,7 +727,14 @@ def _build_terminal_command_registry(
             reload_domains=lambda domains, reason: _request_reload(list(domains), reason),
             publish_deferred=lambda result: adapter.deliver_result(result),
             handle_deferred_message=(
-                (lambda message: _send_terminal_user_message(runtime_provider, message))
+                (
+                    lambda message, user_id: _send_terminal_user_message(
+                        runtime_provider,
+                        message,
+                        user_id=user_id,
+                        deferred=True,
+                    )
+                )
                 if runtime_provider is not None
                 else None
             ),
@@ -1320,13 +1327,12 @@ async def _handle_terminal_approval_choice(
         shown = await _show_terminal_details(provider.get(), None, full=True)
         state = ChatSessionState.APPROVAL_DETAILS if shown else fallback_state
         return CommandResult(state=state.value)
-    if not approval_allowed:
-        action = "Review command analysis before approval.  n=reject  d=details"
-    else:
-        action = _TERMINAL_APPROVAL_ACTION if details_shown else _TERMINAL_APPROVAL_ACTION_WITH_DETAILS
-    _print_chatdome_message(action)
-    state = ChatSessionState.APPROVAL_DETAILS if details_shown else fallback_state
-    return CommandResult(state=state.value)
+    result = await _send_terminal_user_message(provider, text)
+    session = _terminal_session(provider.get())
+    if bool(getattr(session, "pending_approval", False)):
+        state = ChatSessionState.APPROVAL_DETAILS if details_shown else fallback_state
+        return replace(result, state=state.value)
+    return result
 
 
 async def _handle_terminal_continuation_choice(provider: Any, text: str) -> CommandResult:
@@ -1355,7 +1361,13 @@ async def _handle_unknown_terminal_command(_line: str) -> CommandResult:
     return CommandResult()
 
 
-async def _send_terminal_user_message(provider: Any, text: str) -> CommandResult:
+async def _send_terminal_user_message(
+    provider: Any,
+    text: str,
+    *,
+    user_id: int | None = None,
+    deferred: bool = False,
+) -> CommandResult:
     provider.last_message = text
     _print_chatdome_message(_status_label("⏳", "[...]", "Working..."))
     try:
@@ -1370,11 +1382,15 @@ async def _send_terminal_user_message(provider: Any, text: str) -> CommandResult
             params = inspect.signature(handle_message).parameters
         except (TypeError, ValueError):
             params = {}
-        supports_user_id = "user_id" in params or any(
+        supports_kwargs = any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD
             for parameter in params.values()
         )
-        kwargs = {"user_id": runtime.chat_id} if supports_user_id else {}
+        kwargs: dict[str, Any] = {}
+        if "user_id" in params or supports_kwargs:
+            kwargs["user_id"] = runtime.chat_id if user_id is None else user_id
+        if "deferred" in params or supports_kwargs:
+            kwargs["deferred"] = deferred
         result = await handle_message(runtime.chat_id, text, **kwargs)
     except Exception as exc:
         log_path, logged = _append_cli_exception_log("Terminal chat request", exc)
