@@ -25,7 +25,6 @@ class ActionKind(str, Enum):
     """Platform-independent operations offered by an outbound message."""
 
     APPROVE = "approve"
-    APPROVE_TASK = "approve_task"
     REJECT = "reject"
     SHOW_DETAILS = "show_details"
     ANALYZE = "analyze"

@@ -17,7 +17,7 @@ from chatdome.outbound.models import (
 logger = logging.getLogger(__name__)
 
 _EMPTY_APPROVAL_REASONS = frozenset({"无说明", "not provided", "unknown"})
-_APPROVAL_ACTIONS = frozenset({ActionKind.APPROVE, ActionKind.APPROVE_TASK})
+_APPROVAL_ACTIONS = frozenset({ActionKind.APPROVE})
 
 
 class OutboundContractError(ValueError):

@@ -61,12 +61,6 @@ def _approval_actions(
             params={"approval_id": approval_id},
         ),
         OutboundAction(
-            ActionKind.APPROVE_TASK,
-            "Allow for task",
-            approval_id,
-            params={"approval_id": approval_id},
-        ),
-        OutboundAction(
             ActionKind.REJECT,
             "Reject",
             approval_id,

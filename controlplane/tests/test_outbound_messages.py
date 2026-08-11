@@ -48,7 +48,6 @@ class OutboundMessageTests(unittest.TestCase):
             {action.kind for action in message.actions},
             {
                 ActionKind.APPROVE,
-                ActionKind.APPROVE_TASK,
                 ActionKind.REJECT,
                 ActionKind.SHOW_DETAILS,
             },
@@ -62,15 +61,15 @@ class OutboundMessageTests(unittest.TestCase):
         message = build_approval_request(payload)
 
         self.assertNotIn(ActionKind.APPROVE, {action.kind for action in message.actions})
-        self.assertNotIn(ActionKind.APPROVE_TASK, {action.kind for action in message.actions})
         self.assertIn(ActionKind.REJECT, {action.kind for action in message.actions})
         self.assertIn(ActionKind.SHOW_DETAILS, {action.kind for action in message.actions})
         terminal = TerminalOutboundRenderer().render(message).text_parts[0]
         plaintext = PlainTextOutboundRenderer().render(message).text_parts[0]
         self.assertIn("n=reject", terminal)
         self.assertNotIn("Allow operation", terminal)
-        self.assertIn("/reject AP-1", plaintext)
-        self.assertNotIn("/confirm AP-1", plaintext)
+        self.assertIn("/reject", plaintext)
+        self.assertNotIn("/reject AP-1", plaintext)
+        self.assertNotIn("/confirm", plaintext)
         with self.assertRaises(OutboundContractError):
             validate_outbound_message(message)
 
@@ -224,9 +223,10 @@ class OutboundMessageTests(unittest.TestCase):
         self.assertIn(details["command"], terminal)
         self.assertEqual(
             {control.kind for control in telegram.controls},
-            {ActionKind.APPROVE, ActionKind.APPROVE_TASK, ActionKind.REJECT},
+            {ActionKind.APPROVE, ActionKind.REJECT},
         )
-        self.assertIn("/confirm AP-1", plaintext)
+        self.assertIn("/confirm", plaintext)
+        self.assertNotIn("/confirm AP-1", plaintext)
 
     def test_failed_details_are_unavailable_but_keep_pending_approval_controls(self):
         details = {
@@ -265,8 +265,9 @@ class OutboundMessageTests(unittest.TestCase):
         self.assertIn(details["command"], terminal)
         self.assertNotIn("LLM 解析失败", terminal)
         self.assertNotIn("Impact:", terminal)
-        self.assertEqual(len(telegram.controls), 3)
-        self.assertIn("/confirm AP-1", plaintext)
+        self.assertEqual(len(telegram.controls), 2)
+        self.assertIn("/confirm", plaintext)
+        self.assertNotIn("/confirm AP-1", plaintext)
 
     def test_reviewer_error_mode_marks_legacy_fallback_unavailable(self):
         message = build_approval_details(

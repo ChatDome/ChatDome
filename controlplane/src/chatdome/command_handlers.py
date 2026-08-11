@@ -24,7 +24,6 @@ from chatdome.slash_commands import (
     abandon_command_result,
     approval_details_command_result,
     approve_command_result,
-    approve_task_command_result,
     audit_command_result,
     clear_session_command_result,
     command_echo_command_result,
@@ -70,6 +69,7 @@ class CommandHandlerRuntime:
     defer_commands: bool = False
     model_admin_allowed: bool = True
     abort_pending_request: Callable[[], Any] | None = None
+    handle_deferred_message: Callable[[str], Any] | None = None
 
 
 class CommandErrorMapper:
@@ -155,7 +155,6 @@ class CommandHandlerService:
             "/codex_login": self._codex_login,
             "/details": self._details,
             "/confirm": self._confirm,
-            "/confirm_task": self._confirm_task,
             "/reject": self._reject,
             "/continue": self._continue,
             "/sentinel_status": self._sentinel_status,
@@ -234,7 +233,7 @@ class CommandHandlerService:
             result = handler(invocation, runtime)
             if inspect.isawaitable(result):
                 result = await result
-            return result
+            return self._attach_deferred_post_delivery(result, runtime)
         except asyncio.CancelledError:
             raise
         except (ChatDomeError, ValueError) as exc:
@@ -250,6 +249,28 @@ class CommandHandlerService:
                 invocation.command.name,
             )
             return self.error_mapper.from_exception(invocation, exc)
+
+    @staticmethod
+    def _attach_deferred_post_delivery(
+        result: CommandResult,
+        runtime: CommandHandlerRuntime,
+    ) -> CommandResult:
+        message = str(result.deferred_user_message or "")
+        callback = runtime.handle_deferred_message
+        if not message or callback is None:
+            return result
+
+        executed = False
+
+        async def run_once() -> None:
+            nonlocal executed
+            if executed:
+                return
+            executed = True
+            value = callback(message)
+            if inspect.isawaitable(value):
+                await value
+        return replace(result, post_delivery=run_once)
 
     @staticmethod
     def _require(value: Any, label: str) -> Any:
@@ -467,17 +488,18 @@ class CommandHandlerService:
 
     async def _details(self, invocation: CommandInvocation, runtime: CommandHandlerRuntime) -> CommandResult:
         return await approval_details_command_result(
-            self._require(runtime.agent, "agent"), invocation.context, invocation.args
+            self._require(runtime.agent, "agent"),
+            invocation.context,
+            invocation.args,
+            approval_id=str(invocation.params.get("approval_id") or "") or None,
         )
 
     async def _confirm(self, invocation: CommandInvocation, runtime: CommandHandlerRuntime) -> CommandResult:
         return await approve_command_result(
-            self._require(runtime.agent, "agent"), invocation.context, invocation.args
-        )
-
-    async def _confirm_task(self, invocation: CommandInvocation, runtime: CommandHandlerRuntime) -> CommandResult:
-        return await approve_task_command_result(
-            self._require(runtime.agent, "agent"), invocation.context, invocation.args
+            self._require(runtime.agent, "agent"),
+            invocation.context,
+            invocation.args,
+            approval_id=str(invocation.params.get("approval_id") or "") or None,
         )
     async def _continue(
         self,
@@ -503,6 +525,7 @@ class CommandHandlerService:
             self._require(runtime.agent, "agent"),
             invocation.context,
             invocation.args,
+            approval_id=str(invocation.params.get("approval_id") or "") or None,
         )
 
     @staticmethod

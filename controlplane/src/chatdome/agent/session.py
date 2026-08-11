@@ -433,7 +433,7 @@ class AgentSession:
             else None,
             approval_processing=False,
             processing_approval_id=None,
-            task_auto_approve=bool(payload.get("task_auto_approve", False)),
+            task_auto_approve=False,
             pending_round_limit=pending_round_limit,
             pending_round_count=int(payload.get("pending_round_count", 0)),
             command_echo=bool(payload.get("command_echo", False)),

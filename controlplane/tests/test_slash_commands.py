@@ -10,6 +10,7 @@ from chatdome.slash_commands import (
     CommandRegistry,
     CommandResult,
     approval_details_command_result,
+    approve_command_result,
     bind_command_catalog,
     command_help_result,
     command_catalog,
@@ -205,6 +206,39 @@ def test_cli_and_telegram_share_one_command_catalog() -> None:
     assert cli_help.text == telegram_help.text
     assert cli_help.facts == telegram_help.facts
     assert all(item.name != "/exit" for item in cli_help.facts.commands)
+
+
+def test_approval_commands_do_not_show_approval_id_arguments() -> None:
+    usages = {item.name: item.usage for item in command_catalog()}
+
+    assert usages["/details"] == "/details [full]"
+    assert usages["/confirm"] == "/confirm"
+    assert usages["/reject"] == "/reject"
+    assert "/confirm_task" not in usages
+
+
+def test_typed_confirm_resolves_current_approval_without_id() -> None:
+    class Agent:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def resume_session(self, chat_id, action, approval_id=None):
+            self.calls.append((chat_id, action, approval_id))
+            from chatdome.agent.result import AgentResult
+
+            return "", AgentResult.reply("done")
+
+    agent = Agent()
+    result = asyncio.run(
+        approve_command_result(
+            agent,
+            CommandContext(source="cli", chat_id=7),
+            ("AP-user-supplied",),
+        )
+    )
+
+    assert result.outbound.body == "done"
+    assert agent.calls == [(7, "APPROVE", None)]
 
 
 def test_platform_catalogs_bind_to_one_shared_handler() -> None:

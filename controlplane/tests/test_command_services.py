@@ -275,13 +275,74 @@ def test_agent_followup_keeps_command_outcome_in_outbound_message() -> None:
     assert result.outbound.status == "idle"
 
 
-def test_cli_and_telegram_share_task_approval_command() -> None:
+def test_cli_and_telegram_hide_task_scope_approval_command() -> None:
     cli_names = {command.name for command in command_catalog("cli")}
     telegram_names = {command.name for command in command_catalog("telegram")}
 
-    assert "/confirm_task" in cli_names
-    assert "/confirm_task" in telegram_names
+    assert "/confirm_task" not in cli_names
+    assert "/confirm_task" not in telegram_names
     assert cli_names == telegram_names
+
+
+def test_platform_adapter_runs_post_delivery_once_after_current_message() -> None:
+    events = []
+
+    async def handler(_invocation):
+        return CommandResult(
+            text="current result",
+            post_delivery=lambda: events.append("deferred"),
+        )
+
+    adapter = CLIPlatformAdapter(
+        lambda _target, rendered: events.append(rendered.text_parts[0])
+    )
+    command = CommandDef("/test", "test", "test", handler=handler)
+    invocation = adapter.receive_command(
+        raw="/test",
+        command=command,
+        args=(),
+        context=CommandContext(source="cli"),
+    )
+
+    result = asyncio.run(adapter.dispatch(invocation))
+
+    assert result.outbound.body == "current result"
+    assert events == ["current result", "deferred"]
+
+
+def test_command_handler_attaches_one_shot_deferred_message_callback() -> None:
+    handled_messages = []
+
+    class Agent:
+        async def resume_session(self, chat_id, action, approval_id=None):
+            assert (chat_id, action, approval_id) == (7, "APPROVE", "AP-1")
+            return "", AgentResult.reply(
+                "approved",
+                payload={"deferred_user_message": "inspect disk"},
+            )
+
+    runtime = CommandHandlerRuntime(
+        agent=Agent(),
+        handle_deferred_message=lambda message: handled_messages.append(message),
+    )
+    service = CommandHandlerService(lambda _invocation: runtime)
+    command = CommandDef("/confirm", "confirm", "approval", handler=service.handle)
+    invocation = CommandInvocation(
+        raw="/confirm",
+        raw_name="/confirm",
+        args=(),
+        arg_text="",
+        command=command,
+        context=CommandContext(source="telegram", chat_id=7),
+        params={"approval_id": "AP-1"},
+    )
+
+    result = asyncio.run(service.handle(invocation))
+    asyncio.run(result.post_delivery())
+    asyncio.run(result.post_delivery())
+
+    assert result.deferred_user_message == "inspect disk"
+    assert handled_messages == ["inspect disk"]
 
 
 def test_command_registry_converts_result_before_platform_handler() -> None:

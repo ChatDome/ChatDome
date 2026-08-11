@@ -68,6 +68,22 @@ class CommandResult:
     presentation: Mapping[str, Any] = field(default_factory=dict)
     outbound: OutboundMessage | None = field(default=None, repr=False, compare=False)
     lifecycle_phase: str = "final"
+    deferred_user_message: str = field(default="", repr=False, compare=False)
+    post_delivery: Callable[[], Any] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+
+async def run_command_post_delivery(result: CommandResult) -> None:
+    """Run a command's continuation after its current outbound message is sent."""
+    callback = result.post_delivery
+    if callback is None:
+        return
+    value = callback()
+    if inspect.isawaitable(value):
+        await value
 
 
 @dataclass(frozen=True)
@@ -143,25 +159,17 @@ COMMAND_CATALOG: tuple[CommandDef, ...] = (
         "/details",
         "Show pending approval details",
         "approval",
-        args_hint="[approval_id] [full]",
+        args_hint="[full]",
     ),
     CommandDef(
         "/confirm",
         "Approve a pending command",
         "approval",
-        args_hint="[approval_id]",
-    ),
-    CommandDef(
-        "/confirm_task",
-        "Approve a pending command for the current task",
-        "approval",
-        args_hint="[approval_id]",
     ),
     CommandDef(
         "/reject",
         "Reject a pending command or paused task",
         "approval",
-        args_hint="[approval_id]",
     ),
     CommandDef("/continue", "Continue a paused task", "approval"),
     CommandDef("/sentinel_status", "Show Sentinel status", "sentinel"),
@@ -368,6 +376,7 @@ class CommandRegistry:
             handled = self._result_handler(invocation, result)
             if inspect.isawaitable(handled):
                 await handled
+            await run_command_post_delivery(result)
         return result
 
     def match_commands(self, text: str) -> list[CommandDef]:
@@ -837,12 +846,14 @@ async def approval_details_command_result(
     agent: Any,
     context: CommandContext,
     args: Iterable[str],
+    *,
+    approval_id: str | None = None,
 ) -> CommandResult:
     """Load one approval analysis and return it through unified outbound content."""
 
     from chatdome.outbound.builders import build_approval_details
 
-    approval_id, full = parse_details_options(args)
+    full = parse_details_options(args)
     details = await get_agent_approval_details(
         agent,
         context.chat_id,
@@ -870,30 +881,30 @@ async def approval_action_command_result(
     context: CommandContext,
     action: str,
     args: Iterable[str],
+    *,
+    approval_id: str | None = None,
 ) -> CommandResult:
     """Resolve one approval action through the shared business path."""
 
     from chatdome.outbound.builders import OutboundMessageBuilder
 
     normalized_action = str(action or "").strip().upper()
-    if normalized_action not in {"APPROVE", "APPROVE_TASK"}:
+    if normalized_action != "APPROVE":
         raise ValueError("unsupported approval action")
-    values = tuple(args)
-    approval_id = str(values[0]).strip() if values else None
+    _ = args
     result = await resume_agent_approval(
         agent,
         context.chat_id,
         normalized_action,
         approval_id=approval_id,
     )
-    task_scope = normalized_action == "APPROVE_TASK"
     approval_status = str(getattr(result, "payload", {}).get("approval_status", ""))
     if approval_status == "processing":
         outcome = "approval_processing"
     elif approval_status == "unavailable":
         outcome = "approval_unavailable"
     else:
-        outcome = "approval_task_confirmed" if task_scope else "approval_confirmed"
+        outcome = "approval_confirmed"
     outbound = _with_command_outcome(
         OutboundMessageBuilder().from_agent_result(result),
         outcome,
@@ -901,13 +912,13 @@ async def approval_action_command_result(
     return CommandResult(
         state=outbound.status,
         outcome=outcome,
-        event_summary=(
-            "用户为当前任务批准了待审批命令。"
-            if task_scope
-            else "用户批准了待审批命令。"
-        ),
+        event_summary="用户批准了待审批命令。",
         visible_to_agent=True,
         event_refs={"approval_id": approval_id or ""},
+        deferred_user_message=str(
+            getattr(result, "payload", {}).get("deferred_user_message", "")
+            or ""
+        ),
         outbound=outbound,
     )
 
@@ -916,6 +927,8 @@ async def approve_command_result(
     agent: Any,
     context: CommandContext,
     args: Iterable[str],
+    *,
+    approval_id: str | None = None,
 ) -> CommandResult:
     """Approve one pending operation through the shared business path."""
 
@@ -924,21 +937,7 @@ async def approve_command_result(
         context,
         "APPROVE",
         args,
-    )
-
-
-async def approve_task_command_result(
-    agent: Any,
-    context: CommandContext,
-    args: Iterable[str],
-) -> CommandResult:
-    """Approve one pending operation for the current task."""
-
-    return await approval_action_command_result(
-        agent,
-        context,
-        "APPROVE_TASK",
-        args,
+        approval_id=approval_id,
     )
 
 
@@ -990,13 +989,14 @@ async def reject_command_result(
     agent: Any,
     context: CommandContext,
     args: Iterable[str],
+    *,
+    approval_id: str | None = None,
 ) -> CommandResult:
     """Reject an approval or abandon a paused task through one business path."""
 
     from chatdome.outbound.builders import OutboundMessageBuilder
 
-    values = tuple(args)
-    approval_id = str(values[0]).strip() if values else None
+    _ = args
     abandons_task = rejection_targets_round_limit(agent, context.chat_id)
     result = await reject_agent_action(
         agent,
@@ -1018,6 +1018,10 @@ async def reject_command_result(
         ),
         visible_to_agent=True,
         event_refs={"approval_id": approval_id or ""},
+        deferred_user_message=str(
+            getattr(result, "payload", {}).get("deferred_user_message", "")
+            or ""
+        ),
         outbound=outbound,
     )
 
@@ -1077,20 +1081,13 @@ def command_echo_command_result(
     )
 
 
-def parse_details_options(args: Iterable[str]) -> tuple[str | None, bool]:
-    """Parse the shared `/details [approval_id] [full]` arguments."""
+def parse_details_options(args: Iterable[str]) -> bool:
+    """Return whether `/details` requested the full analysis."""
 
-    approval_id: str | None = None
-    full = False
-    for arg in args:
-        value = str(arg or "").strip()
-        if not value:
-            continue
-        if value.lower() in {"full", "--full", "-f"}:
-            full = True
-        elif approval_id is None:
-            approval_id = value
-    return approval_id, full
+    return any(
+        str(arg or "").strip().lower() in {"full", "--full", "-f"}
+        for arg in args
+    )
 
 
 def rejection_targets_round_limit(agent: Any, chat_id: int) -> bool:

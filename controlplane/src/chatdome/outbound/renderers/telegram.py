@@ -28,7 +28,6 @@ from chatdome.outbound.renderers.common import compact_approval_purpose, compact
 
 _ACTION_LABELS = {
     ActionKind.APPROVE: "✅ 允许",
-    ActionKind.APPROVE_TASK: "✅ 本次任务允许",
     ActionKind.REJECT: "❌ 拒绝",
     ActionKind.ANALYZE: "🤖 告警分析",
     ActionKind.SHOW_DETAILS: "🔎 命令分析",
@@ -41,7 +40,6 @@ _ACTION_LABELS = {
 
 _CALLBACK_ACTIONS = {
     ActionKind.APPROVE: "approve",
-    ActionKind.APPROVE_TASK: "approve_task",
     ActionKind.REJECT: "reject",
     ActionKind.SHOW_DETAILS: "details",
 }
@@ -67,7 +65,6 @@ class TelegramOutboundRenderer:
     def _approval_controls(self, message: OutboundMessage) -> tuple[RenderedControl, ...]:
         rows = {
             ActionKind.APPROVE: 0,
-            ActionKind.APPROVE_TASK: 0,
             ActionKind.REJECT: 1,
             ActionKind.SHOW_DETAILS: 1,
         }

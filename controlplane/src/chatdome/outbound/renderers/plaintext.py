@@ -19,21 +19,18 @@ class PlainTextOutboundRenderer:
             facts = message.facts
             if not isinstance(facts, ApprovalRequestFacts):
                 raise TypeError("approval request facts are required")
-            approval_id = str(message.refs.get("approval_id", "")).strip()
             purpose = compact_approval_purpose(
                 facts.reason,
                 fallback="信息不可用，请先查看命令分析。",
             )
-            lines = [f"待审批 {approval_id}".rstrip(), f"目的：{purpose}"]
+            lines = ["待审批", f"目的：{purpose}"]
             action_kinds = {action.kind for action in message.actions}
-            if approval_id and ActionKind.APPROVE in action_kinds:
-                lines.append(f"回复 /confirm {approval_id} 允许，或 /reject {approval_id} 拒绝。")
-                if ActionKind.APPROVE_TASK in action_kinds:
-                    lines.append(f"回复 /confirm_task {approval_id} 允许当前任务中的同类操作。")
-            elif approval_id and ActionKind.REJECT in action_kinds:
-                lines.append(f"回复 /reject {approval_id} 拒绝。")
-            if approval_id and facts.details_available:
-                lines.append(f"发送 /details {approval_id} 查看命令分析。")
+            if ActionKind.APPROVE in action_kinds:
+                lines.append("回复 /confirm 允许，或 /reject 拒绝。")
+            elif ActionKind.REJECT in action_kinds:
+                lines.append("回复 /reject 拒绝。")
+            if facts.details_available:
+                lines.append("发送 /details 查看命令分析。")
             return RenderedMessage(text_parts=("\n".join(lines),))
         if message.kind == OutboundMessageKind.APPROVAL_DETAILS:
             facts = message.facts
@@ -72,9 +69,8 @@ class PlainTextOutboundRenderer:
                         f"影响：{compact_impact(facts.impact_analysis, full=False)}",
                     ]
                 )
-            approval_id = str(message.refs.get("approval_id", "")).strip()
             action_kinds = {action.kind for action in message.actions}
-            if approval_id and ActionKind.APPROVE in action_kinds:
-                lines.append(f"回复 /confirm {approval_id} 允许，或 /reject {approval_id} 拒绝。")
+            if ActionKind.APPROVE in action_kinds:
+                lines.append("回复 /confirm 允许，或 /reject 拒绝。")
             return RenderedMessage(text_parts=("\n".join(lines),))
         return RenderedMessage(text_parts=((message.body or message.summary),))

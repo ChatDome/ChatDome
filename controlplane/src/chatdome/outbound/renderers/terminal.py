@@ -45,8 +45,6 @@ class TerminalOutboundRenderer:
         kinds = {action.kind for action in message.actions}
         if ActionKind.APPROVE in kinds:
             prompts = ["Allow operation? [y/n]"]
-            if ActionKind.APPROVE_TASK in kinds:
-                prompts.append("t=allow for task")
             if include_details:
                 prompts.append("d=details")
             return "  ".join(prompts)

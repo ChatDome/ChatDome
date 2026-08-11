@@ -17,6 +17,7 @@ from chatdome.slash_commands import (
     CommandRegistry,
     CommandResult,
     execute_command,
+    run_command_post_delivery,
 )
 InvocationTransformer = Callable[[CommandInvocation], Any]
 ActionResolver = Callable[[CommandInvocation, CommandResult], Any]
@@ -104,6 +105,7 @@ class PlatformAdapter(ABC):
 
         result = await execute_command(invocation)
         await self.deliver_result(result, target=target)
+        await run_command_post_delivery(result)
         return result
 
 
