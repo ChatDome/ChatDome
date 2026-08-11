@@ -726,6 +726,11 @@ def _build_terminal_command_registry(
             ),
             reload_domains=lambda domains, reason: _request_reload(list(domains), reason),
             publish_deferred=lambda result: adapter.deliver_result(result),
+            handle_deferred_message=(
+                (lambda message: _send_terminal_user_message(runtime_provider, message))
+                if runtime_provider is not None
+                else None
+            ),
             defer_commands=False,
             model_admin_allowed=True,
         )
@@ -895,8 +900,8 @@ def _terminal_message_title(first_line: str) -> str:
     return "ChatDome"
 
 
-_TERMINAL_APPROVAL_ACTION = "Allow operation? [y/n]  t=allow for task"
-_TERMINAL_APPROVAL_ACTION_WITH_DETAILS = "Allow operation? [y/n]  t=allow for task  d=details"
+_TERMINAL_APPROVAL_ACTION = "Allow operation? [y/n]"
+_TERMINAL_APPROVAL_ACTION_WITH_DETAILS = "Allow operation? [y/n]  d=details"
 _TERMINAL_ACTION_LINES = frozenset(
     {
         _TERMINAL_APPROVAL_ACTION,
@@ -1204,6 +1209,7 @@ async def _dispatch_terminal_interaction(
     args: tuple[str, ...],
     *,
     action: str = "",
+    params: dict[str, Any] | None = None,
 ) -> CommandResult:
     """Run terminal shortcuts through the canonical command service."""
 
@@ -1219,6 +1225,7 @@ async def _dispatch_terminal_interaction(
         args=args,
         context=_terminal_command_context(provider),
         action=action,
+        params=params,
     )
     return await registry.execute_invocation(invocation)
 
@@ -1232,12 +1239,13 @@ async def _show_terminal_details(
     _print_chatdome_message(
         _status_label("🔎", "[details]", "Loading approval details...")
     )
-    args = tuple(
-        value
-        for value in (approval_id, "full" if full else None)
-        if value is not None
+    args = ("full",) if full else ()
+    result = await _dispatch_terminal_interaction(
+        runtime,
+        "/details",
+        args,
+        params={"approval_id": approval_id or ""},
     )
-    result = await _dispatch_terminal_interaction(runtime, "/details", args)
     return result.outcome == "details_shown"
 
 
@@ -1245,17 +1253,12 @@ async def _resolve_terminal_confirm(
     runtime: _TerminalChatRuntime,
     approval_id: str | None,
 ) -> str:
-    args = (approval_id,) if approval_id else ()
-    result = await _dispatch_terminal_interaction(runtime, "/confirm", args)
-    return result.state or ChatSessionState.IDLE.value
-
-
-async def _resolve_terminal_confirm_task(
-    runtime: _TerminalChatRuntime,
-    approval_id: str | None,
-) -> str:
-    args = (approval_id,) if approval_id else ()
-    result = await _dispatch_terminal_interaction(runtime, "/confirm_task", args)
+    result = await _dispatch_terminal_interaction(
+        runtime,
+        "/confirm",
+        (),
+        params={"approval_id": approval_id or ""},
+    )
     return result.state or ChatSessionState.IDLE.value
 
 
@@ -1268,8 +1271,12 @@ async def _resolve_terminal_reject(
     runtime: _TerminalChatRuntime,
     approval_id: str | None,
 ) -> str:
-    args = (approval_id,) if approval_id else ()
-    result = await _dispatch_terminal_interaction(runtime, "/reject", args)
+    result = await _dispatch_terminal_interaction(
+        runtime,
+        "/reject",
+        (),
+        params={"approval_id": approval_id or ""},
+    )
     return result.state or ChatSessionState.IDLE.value
 
 
@@ -1301,12 +1308,6 @@ async def _handle_terminal_approval_choice(
             _print_chatdome_message("Review command analysis before approval.")
             return CommandResult(state=ChatSessionState.APPROVAL_REVIEW_REQUIRED.value)
         state = await _resolve_terminal_confirm(provider.get(), None)
-        return CommandResult(state=state)
-    if value in {"t", "task", "task_allow"}:
-        if not approval_allowed:
-            _print_chatdome_message("Review command analysis before approval.")
-            return CommandResult(state=ChatSessionState.APPROVAL_REVIEW_REQUIRED.value)
-        state = await _resolve_terminal_confirm_task(provider.get(), None)
         return CommandResult(state=state)
     if value in {"n", "no"}:
         state = await _resolve_terminal_reject(provider.get(), None)
@@ -1364,7 +1365,17 @@ async def _send_terminal_user_message(provider: Any, text: str) -> CommandResult
             runtime.chat_id,
             _terminal_log_excerpt(text),
         )
-        result = await runtime.agent.handle_message(runtime.chat_id, text)
+        handle_message = runtime.agent.handle_message
+        try:
+            params = inspect.signature(handle_message).parameters
+        except (TypeError, ValueError):
+            params = {}
+        supports_user_id = "user_id" in params or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in params.values()
+        )
+        kwargs = {"user_id": runtime.chat_id} if supports_user_id else {}
+        result = await handle_message(runtime.chat_id, text, **kwargs)
     except Exception as exc:
         log_path, logged = _append_cli_exception_log("Terminal chat request", exc)
         message = user_facing_error_message(exc, fallback="Request failed.")

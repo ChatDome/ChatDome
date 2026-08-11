@@ -605,13 +605,13 @@ class Agent:
 
         async def resume_task() -> tuple[str, AgentResult]:
             normalized_action = (action or "").strip().upper()
-            if normalized_action not in {"APPROVE", "APPROVE_TASK", "REJECT"}:
+            if normalized_action not in {"APPROVE", "REJECT"}:
                 normalized_action = "REJECT"
             followup_summary = self._summarize_pending_followups(session)
             turn_id = turn_context.turn_id
 
             current_command_hash = self._command_hash(command)
-            if normalized_action in {"APPROVE", "APPROVE_TASK"} and pending_command_hash != current_command_hash:
+            if normalized_action == "APPROVE" and pending_command_hash != current_command_hash:
                 logger.warning(
                     "Pending approval command hash mismatch: approval_id=%s expected=%s actual=%s",
                     pending_approval_id,
@@ -677,7 +677,7 @@ class Agent:
                 self._persist_session(session)
                 return "用户已拒绝执行该命令。", result
 
-            session.task_auto_approve = normalized_action == "APPROVE_TASK"
+            session.task_auto_approve = False
             logger.info("User approved command: %s", command)
             CommandAuditTracker.record_event(
                 "command_approved",
@@ -1229,31 +1229,6 @@ class Agent:
                         self._persist_session(session)
                         logger.debug("Tool result for %s: %s", tc.id, result[:200])
                     except PendingApprovalError as e:
-                        if session.task_auto_approve and e.command:
-                            logger.info("Task-scope auto-approval applied for command: %s", e.command)
-                            CommandAuditTracker.record_event(
-                                "command_auto_approved_task_scope",
-                                chat_id=chat_id,
-                                tool_call_id=tc.id,
-                                command=e.command,
-                            )
-                            try:
-                                res = await self.tool_dispatcher.sandbox.execute_shell_command(
-                                    e.command,
-                                    "Task Scope Approved",
-                                    chat_id=chat_id,
-                                    tool_call_id=tc.id,
-                                )
-                                formatted = self.tool_dispatcher._format_command_result(res)
-                                session.add_tool_result(tc.id, formatted)
-                                prior_tool_results[signature] = formatted
-                            except Exception as ex:
-                                formatted = f"Command execution failed: {ex}"
-                                session.add_tool_result(tc.id, formatted)
-                                prior_tool_results[signature] = formatted
-                            self._persist_session(session)
-                            continue
-
                         logger.info("Execution suspended for user approval: %s", tc.id)
                         approval_id = self._new_approval_id()
                         command_hash = self._command_hash(e.command)

@@ -334,7 +334,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         labels = [button.text for row in markup.inline_keyboard for button in row]
         self.assertEqual(
             labels,
-            ["✅ 允许", "✅ 本次任务允许", "❌ 拒绝", "🔎 命令分析"],
+            ["✅ 允许", "❌ 拒绝", "🔎 命令分析"],
         )
 
         await bot._send_approval_request(message, {"approval_id": "AP-2", "reason": "无说明"})
@@ -535,6 +535,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         event = manager.record_control_event.call_args.args[1]
         self.assertEqual(event["command"], "/confirm")
         self.assertEqual(event["outcome"], "approval_confirmed")
+        self.assertEqual(event["argument_count"], 0)
 
     async def test_approval_resolution_reserves_slot_before_editing_card(self):
         bot = _bot()
@@ -567,7 +568,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
             approval_id="AP-1",
             data="approval:approve:AP-1",
             command_name="/confirm",
-            args=("AP-1",),
+            params={"approval_id": "AP-1"},
             command_context=command_context,
         )
         reject_started = bot._start_approval_resolution(
@@ -578,7 +579,7 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
             approval_id="AP-1",
             data="approval:reject:AP-1",
             command_name="/reject",
-            args=("AP-1",),
+            params={"approval_id": "AP-1"},
             command_context=command_context,
         )
         task = bot._approval_resolution_tasks[123]

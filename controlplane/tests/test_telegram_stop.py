@@ -47,10 +47,12 @@ class FakeMessage:
 
 
 class FakeUpdate:
-    def __init__(self, message, chat_id=123):
+    def __init__(self, message, chat_id=123, user_id=None):
         self.message = message
         self.effective_chat = SimpleNamespace(id=chat_id)
-        self.effective_user = None
+        self.effective_user = (
+            SimpleNamespace(id=user_id) if user_id is not None else None
+        )
 
 
 class RecordingSessionManager:
@@ -102,6 +104,24 @@ class StageReportingAgent:
         return "done"
 
 
+class UserAwareAgent:
+    def __init__(self):
+        self.calls = []
+        self.session_manager = RecordingSessionManager()
+
+    async def handle_message(
+        self,
+        chat_id,
+        user_message,
+        *,
+        user_id=None,
+        progress_callback=None,
+    ):
+        del progress_callback
+        self.calls.append((chat_id, user_id, user_message))
+        return "done"
+
+
 class ErrorAgent:
     def __init__(self):
         self.session_manager = RecordingSessionManager()
@@ -133,6 +153,7 @@ class PendingApprovalAgent:
             return False
         session.task_auto_approve = False
         session.clear_pending_state()
+        session.take_deferred_message()
         return True
 
 
@@ -154,6 +175,77 @@ class FakeApprovalCard:
 
 
 class TelegramStopTests(unittest.TestCase):
+    def test_command_runtime_routes_deferred_message_to_same_chat_and_user(self):
+        asyncio.run(
+            self._run_command_runtime_routes_deferred_message_to_same_chat_and_user()
+        )
+
+    async def _run_command_runtime_routes_deferred_message_to_same_chat_and_user(self):
+        bot = TelegramBot(ChatDomeConfig(), UserAwareAgent())
+        target = FakeMessage()
+        request_id = "REQ-1"
+        bot._command_targets[request_id] = target
+        invocation = SimpleNamespace(
+            context=SimpleNamespace(
+                request_id=request_id,
+                actor_id="456",
+                chat_id=123,
+                capabilities=frozenset(),
+            )
+        )
+        bot._run_agent_message = AsyncMock()
+
+        runtime = bot._command_runtime(invocation)
+        await runtime.handle_deferred_message("next question")
+
+        bot._run_agent_message.assert_awaited_once_with(
+            message=target,
+            chat_id=123,
+            user_message="next question",
+            user_id=456,
+        )
+        self.assertNotIn(123, bot._message_tasks)
+
+    def test_deferred_message_rejects_a_different_active_task_owner(self):
+        asyncio.run(
+            self._run_deferred_message_rejects_a_different_active_task_owner()
+        )
+
+    async def _run_deferred_message_rejects_a_different_active_task_owner(self):
+        bot = TelegramBot(ChatDomeConfig(), UserAwareAgent())
+        owner = asyncio.create_task(asyncio.Event().wait())
+        bot._message_tasks[123] = owner
+        bot._run_agent_message = AsyncMock()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "active task"):
+                await bot._run_deferred_user_message(
+                    FakeMessage(),
+                    123,
+                    456,
+                    "next question",
+                )
+        finally:
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+
+        bot._run_agent_message.assert_not_awaited()
+
+    def test_message_passes_effective_user_id_to_agent(self):
+        asyncio.run(self._run_message_passes_effective_user_id_to_agent())
+
+    async def _run_message_passes_effective_user_id_to_agent(self):
+        agent = UserAwareAgent()
+        bot = TelegramBot(ChatDomeConfig(), agent)
+        message = FakeMessage("hello")
+
+        await bot._handle_message(
+            FakeUpdate(message, chat_id=123, user_id=456),
+            SimpleNamespace(),
+        )
+        await bot._message_tasks[123]
+
+        self.assertEqual(agent.calls, [(123, 456, "hello")])
+
     def test_stop_cancels_running_message_task(self):
         asyncio.run(self._run_stop_cancels_running_message_task())
 
@@ -316,6 +408,7 @@ class TelegramStopTests(unittest.TestCase):
             pending_tool_call_id="CALL-1",
             pending_command="systemctl restart chatdome",
             pending_reason="重启 ChatDome 服务",
+            deferred_user_message="新的问题",
         )
         agent = PendingApprovalAgent(session)
         bot = TelegramBot(ChatDomeConfig(), agent)
@@ -350,6 +443,7 @@ class TelegramStopTests(unittest.TestCase):
 
         self.assertEqual(agent.abort_calls, [123])
         self.assertFalse(session.pending_approval)
+        self.assertIsNone(session.deferred_user_message)
         self.assertNotIn(123, bot._approval_messages)
         self.assertEqual(
             card.edits[-1],
@@ -492,7 +586,7 @@ class TelegramStopTests(unittest.TestCase):
             approval_id="AP-1",
             data="approval:approve:AP-1",
             command_name="/confirm",
-            args=("AP-1",),
+            params={"approval_id": "AP-1"},
             command_context=SimpleNamespace(),
             original_text=old_card.text,
             original_reply_markup=old_card.reply_markup,

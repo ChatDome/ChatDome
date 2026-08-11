@@ -309,6 +309,11 @@ class TelegramBot:
         invocation: CommandInvocation,
     ) -> CommandHandlerRuntime:
         target = self._command_targets.pop(invocation.context.request_id, None)
+        user_id = (
+            int(invocation.context.actor_id)
+            if str(invocation.context.actor_id).isdigit()
+            else None
+        )
 
         async def publish_deferred(result: CommandResult) -> None:
             delivery_target = target
@@ -326,6 +331,22 @@ class TelegramBot:
             if self._app is not None:
                 return self._app.create_task(awaitable)
             return asyncio.create_task(awaitable)
+
+        async def handle_deferred_message(message: str) -> None:
+            delivery_target = target
+            if delivery_target is None and self._app is not None:
+                delivery_target = TelegramDeliveryTarget(
+                    self._app.bot,
+                    invocation.context.chat_id,
+                )
+            if delivery_target is None:
+                raise RuntimeError("Telegram delivery target is unavailable")
+            await self._run_deferred_user_message(
+                delivery_target,
+                invocation.context.chat_id,
+                user_id,
+                message,
+            )
 
         return CommandHandlerRuntime(
             agent=self.agent,
@@ -349,6 +370,7 @@ class TelegramBot:
             sync_model=self._sync_model_manager,
             publish_deferred=publish_deferred,
             schedule_task=schedule_task,
+            handle_deferred_message=handle_deferred_message,
             defer_commands=True,
             model_admin_allowed="model_admin" in invocation.context.capabilities,
         )
@@ -445,6 +467,36 @@ class TelegramBot:
 
     def _active_task_for_chat(self, chat_id: int) -> asyncio.Task | None:
         return next(iter(self._active_tasks_for_chat(chat_id)), None)
+
+    async def _run_deferred_user_message(
+        self,
+        target: Any,
+        chat_id: int,
+        user_id: int | None,
+        message: str,
+    ) -> None:
+        current_task = asyncio.current_task()
+        if current_task is None:
+            raise RuntimeError("deferred message task is unavailable")
+        if any(
+            task is not current_task
+            for task in self._active_tasks_for_chat(chat_id)
+        ):
+            raise RuntimeError("chat already has an active task")
+
+        registered_here = self._message_tasks.get(chat_id) is not current_task
+        if registered_here:
+            self._message_tasks[chat_id] = current_task
+        try:
+            await self._run_agent_message(
+                message=target,
+                chat_id=chat_id,
+                user_message=message,
+                user_id=user_id,
+            )
+        finally:
+            if registered_here and self._message_tasks.get(chat_id) is current_task:
+                self._message_tasks.pop(chat_id, None)
 
     @staticmethod
     def _message_chat_id(message: Any) -> int | None:
@@ -631,7 +683,7 @@ class TelegramBot:
         approval_id: str | None,
         data: str,
         command_name: str,
-        args: tuple[str, ...],
+        params: dict[str, Any],
         command_context: CommandContext,
     ) -> bool:
         existing_task = self._approval_resolution_tasks.get(chat_id)
@@ -648,7 +700,7 @@ class TelegramBot:
             approval_id=approval_id,
             data=data,
             command_name=command_name,
-            args=args,
+            params=params,
             command_context=command_context,
             original_text=str(
                 getattr(message, "text", "") or getattr(message, "caption", "") or ""
@@ -676,7 +728,7 @@ class TelegramBot:
         approval_id: str | None,
         data: str,
         command_name: str,
-        args: tuple[str, ...],
+        params: dict[str, Any],
         command_context: CommandContext,
         original_text: str,
         original_reply_markup: Any,
@@ -698,8 +750,9 @@ class TelegramBot:
                 message,
                 data=data,
                 command_name=command_name,
-                args=args,
+                args=(),
                 command_context=command_context,
+                params=params,
             )
             resolved = True
         except asyncio.CancelledError:
@@ -815,6 +868,8 @@ class TelegramBot:
             return
 
         chat_id = update.effective_chat.id
+        effective_user = getattr(update, "effective_user", None)
+        user_id = getattr(effective_user, "id", None)
         user_message = self._platform_adapter.receive_message(
             update.message.text
         )
@@ -832,6 +887,7 @@ class TelegramBot:
             message=update.message,
             chat_id=chat_id,
             user_message=user_message,
+            user_id=user_id,
         )
         if self._app is not None:
             task = self._app.create_task(coroutine)
@@ -874,6 +930,8 @@ class TelegramBot:
         chat_id: int,
         user_message: str,
         progress: TelegramProgressMessage | None,
+        *,
+        user_id: int | None = None,
     ) -> AgentResult:
         async def publish(stage: str) -> None:
             if progress is None:
@@ -898,23 +956,23 @@ class TelegramBot:
             params = inspect.signature(handle_message).parameters
         except (TypeError, ValueError):
             params = {}
-        supports_progress = "progress_callback" in params or any(
+        supports_kwargs = any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD
             for parameter in params.values()
         )
-        if supports_progress:
-            return await handle_message(
-                chat_id,
-                user_message,
-                progress_callback=publish,
-            )
-        return await handle_message(chat_id, user_message)
+        kwargs: dict[str, Any] = {}
+        if "progress_callback" in params or supports_kwargs:
+            kwargs["progress_callback"] = publish
+        if "user_id" in params or supports_kwargs:
+            kwargs["user_id"] = user_id
+        return await handle_message(chat_id, user_message, **kwargs)
 
     async def _run_agent_message(
         self,
         message,
         chat_id: int,
         user_message: str,
+        user_id: int | None = None,
     ) -> None:
         progress: TelegramProgressMessage | None = None
         try:
@@ -938,6 +996,7 @@ class TelegramBot:
                 chat_id,
                 user_message,
                 progress,
+                user_id=user_id,
             )
             if progress is not None:
                 await self._set_progress_stage(
@@ -1069,7 +1128,6 @@ class TelegramBot:
             source="telegram",
             chat_id=chat_id,
         )
-        args = (approval_id,) if approval_id else ()
         details_delivered = False
         progress: TelegramProgressMessage | None = None
         try:
@@ -1084,8 +1142,9 @@ class TelegramBot:
                 message,
                 data="approval:details",
                 command_name="/details",
-                args=args,
+                args=(),
                 command_context=context,
+                params={"approval_id": approval_id or ""},
             )
         except asyncio.CancelledError:
             logger.info("Approval detail analysis stopped for chat_id=%s", chat_id)
@@ -1561,23 +1620,21 @@ class TelegramBot:
                     self._command_context_for_update(update),
                 )
                 return
-            if approval_action == "approve_task":
-                action = "APPROVE_TASK"
-            elif approval_action == "approve":
+            if approval_action == "approve":
                 action = "APPROVE"
             elif approval_action == "reject":
                 action = "REJECT"
-            elif callback_data == "approve_task_cmd":
-                action = "APPROVE_TASK"
             elif callback_data == "approve_cmd":
                 action = "APPROVE"
             elif callback_data == "reject_cmd":
                 action = "REJECT"
             else:
-                await self._send_long_message(query.message, "Unknown action button. Please retry.")
+                await self._send_long_message(
+                    query.message,
+                    "按钮已失效，请使用最新卡片。",
+                )
                 return
             command_name = {
-                "APPROVE_TASK": "/confirm_task",
                 "APPROVE": "/confirm",
                 "REJECT": "/reject",
             }[action]
@@ -1608,7 +1665,7 @@ class TelegramBot:
                 approval_id=approval_id or None,
                 data=callback_data,
                 command_name=command_name,
-                args=(approval_id,) if approval_id else (),
+                params={"approval_id": approval_id or ""},
                 command_context=self._command_context_for_update(update),
             )
             if not started:

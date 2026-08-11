@@ -453,7 +453,7 @@ class ChatDomeCLITests(unittest.TestCase):
         )
         self.assertIn("Approval required", compact)
         self.assertIn("Purpose: Restart the SSH service to apply its configuration.", compact)
-        self.assertIn("Allow operation? [y/n]  t=allow for task  d=details", compact)
+        self.assertIn("Allow operation? [y/n]  d=details", compact)
         self.assertNotIn("Approval ID", compact)
         self.assertNotIn("systemctl restart sshd", compact)
 
@@ -558,7 +558,7 @@ class ChatDomeCLITests(unittest.TestCase):
         )
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
         self.assertIn("ChatDome · approval", printed)
-        self.assertIn("Allow operation? [y/n]  t=allow for task  d=details", printed)
+        self.assertIn("Allow operation? [y/n]  d=details", printed)
         self.assertIn("Approval details", printed)
         self.assertNotIn("│ Allow operation? [y/n]", printed)
         self.assertIn("approve ok", printed)
@@ -635,12 +635,50 @@ class ChatDomeCLITests(unittest.TestCase):
         fake_agent = FakeAgent()
         runtime = self.cli._TerminalChatRuntime(fake_agent, -6)
         with patch.object(self.cli, "_create_terminal_chat_runtime", return_value=runtime):
-            with patch("builtins.input", side_effect=["/continue", "/confirm AP-1", "/exit"]):
+            with patch("builtins.input", side_effect=["/continue", "/confirm", "/exit"]):
                 with patch("builtins.print"):
                     self.cli.hello(SimpleNamespace(chat_id=-6))
 
         self.assertEqual(fake_agent.continued, [(-6, "CONTINUE")])
-        self.assertEqual(fake_agent.resume_calls, [(-6, "APPROVE", "AP-1")])
+        self.assertEqual(fake_agent.resume_calls, [(-6, "APPROVE", None)])
+
+    def test_terminal_runs_deferred_message_after_approval_result_delivery(self):
+        events = []
+        agent_result = self.cli.AgentResult
+
+        class FakeAgent:
+            async def resume_session(self, chat_id, action, approval_id=None):
+                events.append(("resume", chat_id, action, approval_id))
+                return "", agent_result.reply(
+                    "approved",
+                    {"deferred_user_message": "next question"},
+                )
+
+            async def handle_message(self, chat_id, message, *, user_id=None):
+                events.append(("message", chat_id, user_id, message))
+                return agent_result.reply("next answer")
+
+        runtime = self.cli._TerminalChatRuntime(FakeAgent(), -6)
+
+        def record_output(text):
+            events.append(("output", text))
+
+        with patch.object(self.cli, "_print_chatdome_message", side_effect=record_output):
+            asyncio.run(self.cli._dispatch_terminal_interaction(runtime, "/confirm", ()))
+
+        approved_index = next(
+            index
+            for index, event in enumerate(events)
+            if event[0] == "output" and "approved" in event[1]
+        )
+        deferred_index = events.index(("message", -6, -6, "next question"))
+        next_answer_index = next(
+            index
+            for index, event in enumerate(events)
+            if event[0] == "output" and "next answer" in event[1]
+        )
+        self.assertLess(approved_index, deferred_index)
+        self.assertLess(deferred_index, next_answer_index)
 
     def test_terminal_round_limit_accepts_yes_no_choice(self):
         class FakeSessionManager:

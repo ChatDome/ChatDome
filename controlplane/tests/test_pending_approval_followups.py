@@ -1544,6 +1544,18 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         self.assertEqual(session.messages[-2]["role"], "tool")
         self.assertEqual(session.messages[-1]["role"], "assistant")
 
+    def test_removed_task_scope_approval_alias_cancels_without_execution(self):
+        session = _pending_session()
+        agent = _resume_agent(session)
+
+        with patch("chatdome.agent.audit.CommandAuditTracker.record_event"):
+            _, result = asyncio.run(agent.resume_session(123, "APPROVE_TASK"))
+
+        self.assertEqual(result.content, "已拒绝当前命令，任务已取消。")
+        self.assertEqual(agent.tool_dispatcher.sandbox.commands, [])
+        self.assertFalse(session.task_auto_approve)
+        self.assertIsNone(session.active_turn)
+
     def test_reject_releases_deferred_message_after_cancellation(self):
         session = _pending_session()
         session.deferred_user_message = "inspect disk"
