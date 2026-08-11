@@ -362,6 +362,21 @@ def _details_agent(session: AgentSession, dispatcher) -> Agent:
     return agent
 
 
+def _pending_agent(session: AgentSession, llm) -> Agent:
+    agent = object.__new__(Agent)
+    agent.llm = llm
+    agent.llm_manager = None
+    agent.config = SimpleNamespace(
+        model="fake-model",
+        max_history_tokens=16000,
+        max_rounds_per_turn=10,
+    )
+    agent.tools = []
+    agent.session_manager = FakeSessionManager(session)
+    agent.tool_dispatcher = FakeToolDispatcher()
+    return agent
+
+
 def _loop_agent(llm, dispatcher, max_rounds_per_turn: int = 10) -> Agent:
     agent = object.__new__(Agent)
     agent.llm = llm
@@ -1344,25 +1359,90 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         self.assertNotIn("<tool_call>", summary)
         self.assertNotIn("<function=run_shell_command>", summary)
 
-    def test_new_query_while_pending_does_not_call_llm_or_store_followup(self):
-        llm = FakeLLM(LLMResponse(content="should not be used"))
-        agent = _agent_with_llm(llm)
+    def test_new_query_while_pending_uses_one_classifier_call_and_defers_message(self):
+        llm = FakeLLM(
+            LLMResponse(content='{"classification":"new_task","answer":""}')
+        )
         session = _pending_session()
+        agent = _pending_agent(session, llm)
 
-        response = asyncio.run(
-            agent._handle_pending_followup(
-                123,
-                session,
-                "我想知道目前有多少IP已经被封禁了",
-            )
+        result = asyncio.run(
+            agent.handle_message(123, "我想知道目前有多少IP已经被封禁了")
         )
 
-        self.assertEqual(llm.calls, [])
-        self.assertIn("可以继续问不需要执行命令的问题", response)
-        self.assertIn("fail2ban-client status sshd", response)
+        self.assertEqual(
+            result.content,
+            "当前命令等待处理。发送 /confirm 执行，或发送 /reject 取消。",
+        )
+        self.assertEqual(len(llm.calls), 1)
+        self.assertIsNone(llm.calls[0]["tools"])
+        self.assertEqual(llm.calls[0]["response_format"], {"type": "json_object"})
+        self.assertEqual(session.deferred_user_message, "我想知道目前有多少IP已经被封禁了")
+        self.assertEqual(session.active_turn.state, "waiting_approval_decision")
         self.assertEqual(session.pending_followups, [])
 
-    def test_tool_like_pending_followup_response_is_not_persisted(self):
+    def test_approval_question_uses_classifier_answer_without_second_llm_call(self):
+        llm = FakeLLM(
+            LLMResponse(
+                content=(
+                    '{"classification":"approval_question",'
+                    '"answer":"该命令只查询 fail2ban 状态，不修改配置。"}'
+                )
+            )
+        )
+        session = _pending_session()
+        agent = _pending_agent(session, llm)
+
+        with patch("chatdome.agent.tracker.TokenTracker.record_usage"):
+            result = asyncio.run(agent.handle_message(123, "这条命令有什么风险？"))
+
+        self.assertEqual(result.content, "该命令只查询 fail2ban 状态，不修改配置。")
+        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(
+            session.pending_followups,
+            [
+                {"role": "user", "content": "这条命令有什么风险？"},
+                {
+                    "role": "assistant",
+                    "content": "该命令只查询 fail2ban 状态，不修改配置。",
+                },
+            ],
+        )
+        self.assertEqual(session.active_turn.state, "waiting_approval")
+
+    def test_waiting_decision_repeats_prompt_without_reclassifying_or_replacing(self):
+        llm = FakeLLM(
+            LLMResponse(content='{"classification":"tool_required","answer":""}')
+        )
+        session = _pending_session()
+        agent = _pending_agent(session, llm)
+
+        first = asyncio.run(agent.handle_message(123, "检查磁盘"))
+        second = asyncio.run(agent.handle_message(123, "改成检查内存"))
+
+        self.assertEqual(first.content, second.content)
+        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(session.deferred_user_message, "检查磁盘")
+
+    def test_natural_approval_is_classified_then_resumes_same_turn(self):
+        llm = SequenceLLM(
+            LLMResponse(content='{"classification":"approve","answer":""}'),
+            LLMResponse(content="done"),
+        )
+        session = _pending_session()
+        agent = _pending_agent(session, llm)
+
+        with patch("chatdome.agent.audit.CommandAuditTracker.record_event"), patch(
+            "chatdome.agent.tracker.TokenTracker.record_usage"
+        ):
+            result = asyncio.run(agent.handle_message(123, "同意执行"))
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(len(agent.tool_dispatcher.sandbox.commands), 1)
+        self.assertIsNone(session.active_turn)
+
+    def test_tool_like_classifier_response_becomes_unknown_and_defers_input(self):
         llm = FakeLLM(
             LLMResponse(
                 content=(
@@ -1383,25 +1463,19 @@ class PendingApprovalFollowupTests(unittest.TestCase):
                 ],
             )
         )
-        agent = _agent_with_llm(llm)
         session = _pending_session()
+        agent = _pending_agent(session, llm)
 
         with patch("chatdome.agent.tracker.TokenTracker.record_usage"):
-            response = asyncio.run(
-                agent._handle_pending_followup(
-                    123,
-                    session,
-                    "这个命令安全吗？",
-                )
-            )
+            result = asyncio.run(agent.handle_message(123, "这个命令安全吗？"))
 
-        self.assertIn("可以继续问不需要执行命令的问题", response)
-        self.assertNotIn("<tool_call>", response)
+        self.assertEqual(
+            result.content,
+            "当前命令等待处理。发送 /confirm 执行，或发送 /reject 取消。",
+        )
         self.assertEqual(len(llm.calls), 1)
-        self.assertFalse(any("tool_calls" in message for message in llm.calls[0]["messages"]))
-        persisted_text = "\n".join(item["content"] for item in session.pending_followups)
-        self.assertNotIn("<tool_call>", persisted_text)
-        self.assertNotIn("<function=run_shell_command>", persisted_text)
+        self.assertEqual(session.pending_followups, [])
+        self.assertEqual(session.deferred_user_message, "这个命令安全吗？")
 
     def test_abort_pending_task_clears_approval_without_resuming(self):
         session = _pending_session()

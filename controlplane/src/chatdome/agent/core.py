@@ -15,6 +15,10 @@ import secrets
 import time
 from typing import Any
 
+from chatdome.agent.approval_input import (
+    ApprovalInputDecision,
+    classify_approval_input,
+)
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.agent.prompts import build_system_prompt, build_tools
 from chatdome.agent.result import AgentResult, coerce_agent_result
@@ -422,7 +426,18 @@ class Agent:
             if session.repair_missing_tool_outputs():
                 self._persist_session(session)
             if session.pending_approval:
-                turn_context = self._ensure_active_turn(session, "waiting_approval")
+                pending_state = (
+                    session.active_turn.state
+                    if session.active_turn is not None
+                    and session.active_turn.state
+                    in {
+                        "waiting_approval",
+                        "answering_approval_question",
+                        "waiting_approval_decision",
+                    }
+                    else "waiting_approval"
+                )
+                turn_context = self._ensure_active_turn(session, pending_state)
                 route = "approval"
             elif session.pending_round_limit:
                 turn_context = self._ensure_active_turn(session, "waiting_round_limit")
@@ -444,24 +459,11 @@ class Agent:
         }
 
         if route == "approval":
-            # Allow natural-language rejection while waiting approval.
             with log_context(**context_fields):
-                if self._is_reject_intent(user_message):
-                    session.add_pending_followup("user", user_message)
-                    self._persist_session(session)
-                    _, final_answer = await self.resume_session(chat_id, "REJECT")
-                    return final_answer
-                try:
-                    snapshot = await self.get_active_llm_snapshot()
-                except Exception as e:
-                    return AgentResult.reply(await self._llm_unavailable_message(e))
-                return AgentResult.reply(
-                    await self._handle_pending_followup(
-                        chat_id,
-                        session,
-                        user_message,
-                        snapshot,
-                    )
+                return await self._handle_pending_input(
+                    chat_id,
+                    session,
+                    user_message,
                 )
 
         if route == "round_limit":
@@ -944,39 +946,9 @@ class Agent:
         return any(marker in text for marker in markers)
 
     @staticmethod
-    def _is_new_execution_request_while_pending(user_message: str) -> bool:
-        """Detect requests that would require starting another command while one is pending."""
-        text = (user_message or "").strip().lower()
-        if not text:
-            return False
-
-        explanation_keywords = (
-            "为什么", "原因", "风险", "危险", "安全吗", "安全么", "影响", "会做什么",
-            "什么意思", "解释", "详细", "命令内容", "这个命令", "这条命令", "替代方案",
-            "why", "risk", "safe", "explain", "detail", "details", "alternative",
-        )
-        if any(keyword in text for keyword in explanation_keywords):
-            return False
-
-        execution_keywords = (
-            "查询", "查看", "检查", "执行", "运行", "跑一下", "看一下", "看下",
-            "多少", "有没有", "是否", "列出", "统计", "状态", "封禁", "拉取",
-            "show", "list", "check", "status", "run", "execute", "how many",
-        )
-        return any(keyword in text for keyword in execution_keywords)
-
-    @staticmethod
-    def _pending_command_waiting_message(command: str, approval_id: str | None = None) -> str:
-        """Deterministic response for new requests while a command waits for approval."""
-        approval_line = f"审批编号: `{approval_id}`\n" if approval_id else ""
-        return (
-            "当前已有一条命令等待确认。你可以继续问不需要执行命令的问题；"
-            "但涉及实时主机状态的新查询，需要先处理这条待确认命令。\n\n"
-            f"{approval_line}"
-            f"待确认命令: `{command or '(unknown)'}`\n\n"
-            "如果你想得到这条命令的结果，请点击“允许”或发送 `/confirm <审批编号>`；"
-            "如果不想执行，请点击“拒绝”或发送 `/reject <审批编号>`。"
-        )
+    def _pending_approval_decision_message() -> str:
+        """Prompt for the only two decisions accepted while input is deferred."""
+        return "当前命令等待处理。发送 /confirm 执行，或发送 /reject 取消。"
 
     @classmethod
     def _prune_pending_followups(cls, session: Any) -> None:
@@ -992,82 +964,105 @@ class Agent:
             cleaned.append({"role": role, "content": content})
         session.pending_followups = cleaned[-12:]
 
-    async def _handle_pending_followup(
+    async def _handle_pending_input(
         self,
         chat_id: int,
         session: Any,
         user_message: str,
-        snapshot: LLMSnapshot | None = None,
-    ) -> str:
-        """
-        Handle user follow-up while a risky command is pending approval.
-
-        Keep these follow-ups out of the main message chain to avoid breaking
-        tool_call -> tool_result ordering required by the LLM API.
-        """
+    ) -> AgentResult:
+        """Classify one message received while a command waits for approval."""
         self._prune_pending_followups(session)
-        if snapshot is None:
-            snapshot = await self.get_active_llm_snapshot()
-        pending_cmd = session.pending_command or "(unknown)"
+        if (
+            session.active_turn is not None
+            and session.active_turn.state == "waiting_approval_decision"
+        ):
+            return AgentResult.reply(self._pending_approval_decision_message())
+
+        pending_cmd = session.pending_command or ""
         pending_approval_id = session.pending_approval_id or ""
         pending_reason = session.pending_reason or ""
-
-        if self._is_new_execution_request_while_pending(user_message):
-            session.last_active = time.time()
-            self._persist_session(session)
-            return self._pending_command_waiting_message(pending_cmd, pending_approval_id)
-
-        session.add_pending_followup("user", user_message)
-        self._persist_session(session)
-
-        followup_messages = [
-            {"role": item["role"], "content": item["content"]}
-            for item in session.pending_followups
-            if item.get("role") in {"user", "assistant"} and item.get("content")
-        ]
-
-        approval_context = (
-            "现在有一条命令正在等待人工确认，尚未执行。\n"
-            f"待确认命令: {pending_cmd}\n"
-            f"申请理由: {pending_reason or '未提供'}\n\n"
-            "你只能解释这条待确认命令的目的、风险、影响和替代方案。"
-            "不要调用工具，不要输出 tool_call/XML/函数调用，不要声称已经执行命令。"
-            "如果用户要求查询新的系统状态或执行新任务，请说明必须先允许或拒绝当前待确认命令。"
-            "最后提醒用户：发送 /confirm 执行，或回复“拒绝/取消”来拒绝。"
-        )
-
-        ephemeral_messages = [{"role": "system", "content": approval_context}] + followup_messages
-
+        pending_risk_level = session.pending_risk_level or ""
+        self._transition_turn(session, "answering_approval_question")
         try:
-            response = await snapshot.client.chat_completion(
-                messages=ephemeral_messages,
-                tools=None,
+            snapshot = await self.get_active_llm_snapshot()
+            decision = await classify_approval_input(
+                snapshot.client,
+                command=pending_cmd,
+                reason=pending_reason,
+                risk_level=pending_risk_level,
+                user_message=user_message,
             )
-            content = response.content or "我已记录你的问题。该命令还在等待确认，我可以继续解释风险与替代方案。"
-            if response.tool_calls or self._looks_like_tool_call_text(content):
-                logger.warning("LLM returned tool-like content during pending approval follow-up")
-                content = self._pending_command_waiting_message(pending_cmd, pending_approval_id)
-
             from chatdome.agent.tracker import TokenTracker
             TokenTracker.record_usage(
                 chat_id=chat_id,
                 model=getattr(snapshot.client, "model", "unknown"),
-                action="pending_followup",
-                prompt_tokens=response.prompt_tokens,
-                completion_tokens=response.completion_tokens,
-                total_tokens=response.total_tokens,
+                action="approval_input_classification",
+                prompt_tokens=decision.prompt_tokens,
+                completion_tokens=decision.completion_tokens,
+                total_tokens=decision.total_tokens,
             )
-        except Exception as e:
-            logger.error("Pending follow-up handling failed: %s", e)
-            content = (
-                "我收到你的追问了，但这条命令还在审批等待中。"
-                "你可以继续问风险和替代方案；若决定执行请发 /confirm，若放弃请回复“拒绝执行”。"
-            )
+        except Exception as exc:
+            logger.warning("Approval input classification unavailable: %s", exc)
+            decision = ApprovalInputDecision(classification="unknown")
 
-        if not self._looks_like_tool_call_text(content):
-            session.add_pending_followup("assistant", content)
+        if decision.classification in {"approve", "reject"}:
+            outcome = "approval_resumed"
+        elif decision.classification == "approval_question":
+            outcome = "answered"
+        else:
+            outcome = "decision_required"
+
+        turn_id = session.active_turn.turn_id if session.active_turn is not None else None
+        event = {
+            "event_type": "approval_input_classified",
+            "turn_id": turn_id,
+            "approval_id": pending_approval_id,
+            "classification": decision.classification,
+            "outcome": outcome,
+        }
+        session.add_control_event(event)
+        CommandAuditTracker.record_event(
+            "approval_input_classified",
+            chat_id=chat_id,
+            turn_id=turn_id,
+            approval_id=pending_approval_id,
+            classification=decision.classification,
+            outcome=outcome,
+        )
+        logger.info(
+            "Approval input classified: classification=%s outcome=%s",
+            decision.classification,
+            outcome,
+        )
+
+        if decision.classification == "approve":
+            self._persist_session(session)
+            _, result = await self.resume_session(
+                chat_id,
+                "APPROVE",
+                approval_id=pending_approval_id or None,
+            )
+            return result
+        if decision.classification == "reject":
+            self._persist_session(session)
+            _, result = await self.resume_session(
+                chat_id,
+                "REJECT",
+                approval_id=pending_approval_id or None,
+            )
+            return result
+        if decision.classification == "approval_question":
+            session.add_pending_followup("user", user_message)
+            session.add_pending_followup("assistant", decision.answer)
+            self._transition_turn(session, "waiting_approval")
+            self._persist_session(session)
+            return AgentResult.reply(decision.answer)
+
+        if session.deferred_user_message is None:
+            session.defer_user_message(user_message)
+        self._transition_turn(session, "waiting_approval_decision")
         self._persist_session(session)
-        return content
+        return AgentResult.reply(self._pending_approval_decision_message())
 
     async def _run_loop(
         self,
