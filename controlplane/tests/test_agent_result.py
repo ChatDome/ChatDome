@@ -25,6 +25,15 @@ class AgentResultTests(unittest.TestCase):
         self.assertEqual(result.kind, "reply")
         self.assertEqual(result.content, "hello")
 
+    def test_reply_can_carry_internal_deferred_message_metadata(self):
+        result = AgentResult.reply(
+            "done",
+            payload={"deferred_user_message": "inspect disk"},
+        )
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(result.payload["deferred_user_message"], "inspect disk")
+
     def test_approval_purpose_is_normalized_and_truncated(self):
         purpose = format_approval_purpose(
             {"reason": "  restart   the SSH service " + "safely " * 30},

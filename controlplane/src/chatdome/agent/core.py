@@ -224,6 +224,25 @@ class Agent:
         )
         logger.info("Turn completed: outcome=%s rounds=%d", outcome, session.round_count)
 
+    @staticmethod
+    def _release_deferred_after_terminal(
+        session: Any,
+        result: AgentResult,
+    ) -> AgentResult:
+        """Attach deferred input only after the active turn has ended."""
+        if getattr(session, "active_turn", None) is not None:
+            return result
+        deferred_message = session.take_deferred_message()
+        if not deferred_message:
+            return result
+        payload = dict(result.payload)
+        payload["deferred_user_message"] = deferred_message
+        return AgentResult(
+            kind=result.kind,
+            content=result.content,
+            payload=payload,
+        )
+
     def _ensure_active_turn(self, session: Any, state: str) -> TurnContext:
         """Recover a lifecycle for legacy in-memory pending state."""
         context = session.current_turn_context()
@@ -264,11 +283,6 @@ class Agent:
     def _new_approval_id() -> str:
         """Generate a short user-facing approval identifier."""
         return f"AP-{time.strftime('%Y%m%d-%H%M%S', time.localtime())}-{secrets.token_hex(3).upper()}"
-
-    @staticmethod
-    def _new_run_id(chat_id: int) -> str:
-        """Generate a lightweight run id for binding the pending approval."""
-        return f"RUN-{chat_id}-{time.strftime('%Y%m%d-%H%M%S', time.localtime())}-{secrets.token_hex(3).upper()}"
 
     @staticmethod
     def _command_hash(command: str | None) -> str:
@@ -574,7 +588,6 @@ class Agent:
         tool_call_id = session.pending_tool_call_id
         command = session.pending_command or ""
         pending_approval_id = session.pending_approval_id or ""
-        pending_run_id = session.pending_run_id or ""
         pending_command_hash = session.pending_command_hash or self._command_hash(command)
         requested_approval_id = (approval_id or "").strip()
 
@@ -595,8 +608,7 @@ class Agent:
             if normalized_action not in {"APPROVE", "APPROVE_TASK", "REJECT"}:
                 normalized_action = "REJECT"
             followup_summary = self._summarize_pending_followups(session)
-            if normalized_action == "APPROVE_TASK":
-                session.task_auto_approve = True
+            turn_id = turn_context.turn_id
 
             current_command_hash = self._command_hash(command)
             if normalized_action in {"APPROVE", "APPROVE_TASK"} and pending_command_hash != current_command_hash:
@@ -609,8 +621,8 @@ class Agent:
                 CommandAuditTracker.record_event(
                     "command_approval_hash_mismatch",
                     chat_id=chat_id,
+                    turn_id=turn_id,
                     approval_id=pending_approval_id,
-                    run_id=pending_run_id,
                     tool_call_id=tool_call_id,
                     command=command,
                     expected_command_hash=pending_command_hash,
@@ -619,29 +631,20 @@ class Agent:
                 )
                 session.task_auto_approve = False
                 session.clear_pending_state()
-                tool_result_for_llm = (
+                session.add_tool_result(
+                    tool_call_id,
                     "审批恢复失败：待执行命令的哈希与审批单不一致。"
-                    "系统已按 fail-safe 策略拒绝执行该命令。"
+                    "该命令未执行，当前任务已终止。",
                 )
-                session.add_tool_result(tool_call_id, tool_result_for_llm)
-                self._persist_session(session)
-                try:
-                    snapshot = await self.get_active_llm_snapshot()
-                except Exception as e:
-                    return "命令校验失败，已拒绝执行。", AgentResult.reply(await self._llm_unavailable_message(e))
-                self._transition_turn(session, "running")
-                final_answer = await self._run_loop_compat(
-                    chat_id,
+                final_text = "命令校验失败，任务已终止。"
+                session.add_assistant_message(final_text)
+                self._finish_turn(session, "failed")
+                result = self._release_deferred_after_terminal(
                     session,
-                    snapshot,
-                    turn_context=turn_context,
+                    AgentResult.reply(final_text),
                 )
-                return "命令校验失败，已拒绝执行。", final_answer
-
-            # Clear pending state before continuing the normal loop.
-            session.clear_pending_state()
-            self._transition_turn(session, "running")
-            self._persist_session(session)
+                self._persist_session(session)
+                return "命令校验失败，已拒绝执行。", result
 
             if normalized_action == "REJECT":
                 session.task_auto_approve = False
@@ -649,52 +652,65 @@ class Agent:
                 CommandAuditTracker.record_event(
                     "command_rejected",
                     chat_id=chat_id,
+                    turn_id=turn_id,
                     approval_id=pending_approval_id,
-                    run_id=pending_run_id,
                     tool_call_id=tool_call_id,
                     command=command,
                     command_hash=pending_command_hash,
                     approval_action="REJECT",
                 )
-                tool_result_for_llm = "由于存在安全风险，用户已拒绝执行该命令。请提供其他解决方案或向用户解释。"
+                tool_result_for_llm = "用户已拒绝当前命令。该命令未执行，当前任务已取消。"
                 if followup_summary:
                     tool_result_for_llm += (
                         "\n\n[审批等待阶段的补充对话]\n"
                         f"{followup_summary}"
                     )
+                session.clear_pending_state()
                 session.add_tool_result(tool_call_id, tool_result_for_llm)
-                raw_result = "用户已拒绝执行该命令。"
-            else:
-                logger.info("User approved command: %s", command)
-                CommandAuditTracker.record_event(
-                    "command_approved",
-                    chat_id=chat_id,
-                    approval_id=pending_approval_id,
-                    run_id=pending_run_id,
-                    tool_call_id=tool_call_id,
-                    command=command,
-                    command_hash=pending_command_hash,
-                    approval_action=normalized_action,
+                final_text = "已拒绝当前命令，任务已取消。"
+                session.add_assistant_message(final_text)
+                self._finish_turn(session, "cancelled")
+                result = self._release_deferred_after_terminal(
+                    session,
+                    AgentResult.reply(final_text),
                 )
-                try:
-                    # Bypass Reviewer, go straight to sandbox
-                    res = await self.tool_dispatcher.sandbox.execute_shell_command(
-                        command,
-                        "User Approved",
-                        chat_id=chat_id,
-                        tool_call_id=tool_call_id,
-                    )
-                    raw_result = self.tool_dispatcher._format_command_result(res)
-                except Exception as e:
-                    raw_result = f"执行过程中发生异常: {e}"
+                self._persist_session(session)
+                return "用户已拒绝执行该命令。", result
 
-                tool_result_for_llm = raw_result
-                if followup_summary:
-                    tool_result_for_llm += (
-                        "\n\n[审批等待阶段的补充对话]\n"
-                        f"{followup_summary}"
-                    )
-                session.add_tool_result(tool_call_id, tool_result_for_llm)
+            session.task_auto_approve = normalized_action == "APPROVE_TASK"
+            logger.info("User approved command: %s", command)
+            CommandAuditTracker.record_event(
+                "command_approved",
+                chat_id=chat_id,
+                turn_id=turn_id,
+                approval_id=pending_approval_id,
+                tool_call_id=tool_call_id,
+                command=command,
+                command_hash=pending_command_hash,
+                approval_action=normalized_action,
+            )
+            session.clear_pending_state()
+            self._transition_turn(session, "running")
+            self._persist_session(session)
+
+            try:
+                res = await self.tool_dispatcher.sandbox.execute_shell_command(
+                    command,
+                    "User Approved",
+                    chat_id=chat_id,
+                    tool_call_id=tool_call_id,
+                )
+                raw_result = self.tool_dispatcher._format_command_result(res)
+            except Exception as e:
+                raw_result = f"执行过程中发生异常: {e}"
+
+            tool_result_for_llm = raw_result
+            if followup_summary:
+                tool_result_for_llm += (
+                    "\n\n[审批等待阶段的补充对话]\n"
+                    f"{followup_summary}"
+                )
+            session.add_tool_result(tool_call_id, tool_result_for_llm)
             self._persist_session(session)
 
             try:
@@ -703,14 +719,23 @@ class Agent:
                 content = await self._llm_unavailable_message(e)
                 session.add_assistant_message(content)
                 self._finish_turn(session, "failed")
+                result = self._release_deferred_after_terminal(
+                    session,
+                    AgentResult.reply(content),
+                )
                 self._persist_session(session)
-                return raw_result, AgentResult.reply(content)
+                return raw_result, result
             final_answer = await self._run_loop_compat(
                 chat_id,
                 session,
                 snapshot,
                 turn_context=turn_context,
             )
+            final_answer = self._release_deferred_after_terminal(
+                session,
+                final_answer,
+            )
+            self._persist_session(session)
             return raw_result, final_answer
 
         session.approval_processing = True
@@ -744,9 +769,9 @@ class Agent:
         if requested_approval_id and pending_approval_id != requested_approval_id:
             return False
 
+        turn_context = self._ensure_active_turn(session, "waiting_approval")
         tool_call_id = session.pending_tool_call_id or ""
         command = session.pending_command or ""
-        run_id = session.pending_run_id or ""
         command_hash = session.pending_command_hash or self._command_hash(command)
 
         if tool_call_id:
@@ -760,13 +785,16 @@ class Agent:
             )
         session.task_auto_approve = False
         session.clear_pending_state()
+        session.clear_pending_round_limit()
+        session.take_deferred_message()
+        self._finish_turn(session, "cancelled")
         self._persist_session(session)
 
         CommandAuditTracker.record_event(
             "command_task_aborted",
             chat_id=chat_id,
+            turn_id=turn_context.turn_id,
             approval_id=pending_approval_id,
-            run_id=run_id,
             tool_call_id=tool_call_id,
             command=command,
             command_hash=command_hash,
@@ -1228,11 +1256,10 @@ class Agent:
 
                         logger.info("Execution suspended for user approval: %s", tc.id)
                         approval_id = self._new_approval_id()
-                        run_id = self._new_run_id(chat_id)
                         command_hash = self._command_hash(e.command)
                         session.pending_approval = True
                         session.pending_approval_id = approval_id
-                        session.pending_run_id = run_id
+                        session.pending_run_id = None
                         session.pending_tool_call_id = e.tool_call_id
                         session.pending_command = e.command
                         session.pending_command_hash = command_hash
@@ -1251,7 +1278,6 @@ class Agent:
                                 else None
                             ),
                             approval_id=approval_id,
-                            run_id=run_id,
                             tool_call_id=e.tool_call_id,
                             command=e.command,
                             command_hash=command_hash,
@@ -1272,7 +1298,6 @@ class Agent:
                             )
                         payload = {
                             "approval_id": approval_id,
-                            "run_id": run_id,
                             "turn_id": (
                                 session.active_turn.turn_id
                                 if session.active_turn is not None

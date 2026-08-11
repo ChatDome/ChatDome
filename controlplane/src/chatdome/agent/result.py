@@ -23,8 +23,12 @@ class AgentResult:
     payload: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def reply(cls, content: str) -> "AgentResult":
-        return cls(kind="reply", content=content or "")
+    def reply(
+        cls,
+        content: str,
+        payload: dict[str, Any] | None = None,
+    ) -> "AgentResult":
+        return cls(kind="reply", content=content or "", payload=dict(payload or {}))
 
     @classmethod
     def pending_approval(cls, payload: dict[str, Any]) -> "AgentResult":
