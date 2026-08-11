@@ -16,6 +16,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from chatdome.agent.turns import (
+    ActiveTurn,
+    TERMINAL_TURN_STATES,
+    TURN_STATES,
+    TurnContext,
+    TurnState,
+    create_turn_context,
+)
 from chatdome.runtime_paths import compression_log_path, data_dir, memory_file_path
 
 logger = logging.getLogger(__name__)
@@ -273,6 +281,9 @@ class AgentSession:
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
     round_count: int = 0
+    next_turn_id: int = 1
+    active_turn: ActiveTurn | None = None
+    deferred_user_message: str | None = None
     
     # Pause/Resume state for Human-in-the-loop
     pending_approval: bool = False
@@ -306,6 +317,9 @@ class AgentSession:
             "created_at": self.created_at,
             "last_active": self.last_active,
             "round_count": self.round_count,
+            "next_turn_id": self.next_turn_id,
+            "active_turn": self.active_turn.to_snapshot() if self.active_turn else None,
+            "deferred_user_message": self.deferred_user_message,
             "pending_approval": self.pending_approval,
             "pending_approval_id": self.pending_approval_id,
             "pending_run_id": self.pending_run_id,
@@ -345,6 +359,51 @@ class AgentSession:
         except (TypeError, ValueError):
             chat_id = 0
 
+        raw_active_turn = payload.get("active_turn")
+        active_turn = (
+            ActiveTurn.from_snapshot(raw_active_turn)
+            if isinstance(raw_active_turn, dict)
+            else None
+        )
+        raw_next_turn_id = payload.get("next_turn_id", 1)
+        next_turn_id = (
+            raw_next_turn_id
+            if isinstance(raw_next_turn_id, int)
+            and not isinstance(raw_next_turn_id, bool)
+            and raw_next_turn_id >= 1
+            else 1
+        )
+        if active_turn is not None:
+            next_turn_id = max(next_turn_id, active_turn.turn_id + 1)
+
+        pending_approval = bool(payload.get("pending_approval", False))
+        pending_round_limit = bool(payload.get("pending_round_limit", False))
+        if active_turn is None and (pending_approval or pending_round_limit):
+            raw_message = next(
+                (
+                    str(item.get("content") or "")
+                    for item in reversed(messages)
+                    if isinstance(item, dict) and item.get("role") == "user"
+                ),
+                "",
+            )
+            timestamp = float(payload.get("pending_since") or payload.get("last_active") or time.time())
+            state: TurnState = (
+                "waiting_approval" if pending_approval else "waiting_round_limit"
+            )
+            active_turn = ActiveTurn(
+                turn_id=next_turn_id,
+                raw_message=raw_message,
+                state=state,
+                started_at=timestamp,
+                updated_at=timestamp,
+            )
+            next_turn_id += 1
+
+        deferred_user_message = payload.get("deferred_user_message")
+        if not isinstance(deferred_user_message, str) or not deferred_user_message:
+            deferred_user_message = None
+
         return cls(
             chat_id=chat_id,
             messages=messages,
@@ -352,7 +411,10 @@ class AgentSession:
             created_at=float(payload.get("created_at", time.time())),
             last_active=float(payload.get("last_active", time.time())),
             round_count=int(payload.get("round_count", 0)),
-            pending_approval=bool(payload.get("pending_approval", False)),
+            next_turn_id=next_turn_id,
+            active_turn=active_turn,
+            deferred_user_message=deferred_user_message,
+            pending_approval=pending_approval,
             pending_approval_id=payload.get("pending_approval_id"),
             pending_run_id=payload.get("pending_run_id"),
             pending_tool_call_id=payload.get("pending_tool_call_id"),
@@ -372,7 +434,7 @@ class AgentSession:
             approval_processing=False,
             processing_approval_id=None,
             task_auto_approve=bool(payload.get("task_auto_approve", False)),
-            pending_round_limit=bool(payload.get("pending_round_limit", False)),
+            pending_round_limit=pending_round_limit,
             pending_round_count=int(payload.get("pending_round_count", 0)),
             command_echo=bool(payload.get("command_echo", False)),
         )
@@ -384,10 +446,79 @@ class AgentSession:
         else:
             self.messages.insert(0, {"role": "system", "content": content})
 
-    def add_user_message(self, content: str, *, turn_id: str | None = None) -> None:
+    def begin_turn(self, message: str, user_id: int | None = None) -> TurnContext:
+        """Allocate and activate the next numeric turn for this chat."""
+        if self.active_turn is not None:
+            raise RuntimeError("active turn already exists")
+
+        context = create_turn_context(self.next_turn_id, message, user_id)
+        now = time.time()
+        self.active_turn = ActiveTurn(
+            turn_id=context.turn_id,
+            raw_message=context.raw_message,
+            state="running",
+            started_at=now,
+            updated_at=now,
+            user_id=context.user_id,
+        )
+        self.next_turn_id += 1
+        self.last_active = now
+        return context
+
+    def current_turn_context(self) -> TurnContext | None:
+        """Return the runtime context for the active turn."""
+        if self.active_turn is None:
+            return None
+        return create_turn_context(
+            self.active_turn.turn_id,
+            self.active_turn.raw_message,
+            self.active_turn.user_id,
+        )
+
+    def transition_turn(self, state: TurnState) -> ActiveTurn:
+        """Move the active turn to another non-terminal state."""
+        if self.active_turn is None:
+            raise RuntimeError("active turn does not exist")
+        if state not in TURN_STATES or state in TERMINAL_TURN_STATES:
+            raise ValueError("turn transition requires a non-terminal state")
+        self.active_turn.state = state
+        self.active_turn.updated_at = time.time()
+        self.last_active = self.active_turn.updated_at
+        return self.active_turn
+
+    def finish_turn(self, outcome: TurnState) -> ActiveTurn:
+        """Finish and release the active turn with a terminal outcome."""
+        if outcome not in TERMINAL_TURN_STATES:
+            raise ValueError("turn outcome must be terminal")
+        if self.active_turn is None:
+            raise RuntimeError("active turn does not exist")
+        completed = self.active_turn
+        completed.state = outcome
+        completed.updated_at = time.time()
+        self.active_turn = None
+        self.last_active = completed.updated_at
+        return completed
+
+    def defer_user_message(self, message: str) -> None:
+        """Store one user message until the active turn reaches a terminal state."""
+        if self.deferred_user_message is not None:
+            raise RuntimeError("deferred user message already exists")
+        value = str(message or "")
+        if not value:
+            raise ValueError("deferred user message must not be empty")
+        self.deferred_user_message = value
+        self.last_active = time.time()
+
+    def take_deferred_message(self) -> str | None:
+        """Consume the deferred user message, if present."""
+        message = self.deferred_user_message
+        self.deferred_user_message = None
+        return message
+
+    def add_user_message(self, content: str, *, turn_id: int | None = None) -> None:
         """Append a user message and reset round counter."""
         message: dict[str, Any] = {"role": "user", "content": content}
-        if turn_id:
+        if turn_id is not None:
             message["_chatdome_turn_id"] = turn_id
         self.messages.append(message)
         self.last_active = time.time()
@@ -844,6 +975,8 @@ class AgentSession:
         self.round_count = 0
         self.agent_running = False
         self._deferred_visible_contexts.clear()
+        self.active_turn = None
+        self.deferred_user_message = None
         self.clear_pending_state()
         self.clear_pending_round_limit()
         self.last_active = time.time()
@@ -905,11 +1038,20 @@ class SessionManager:
         self.system_prompt = system_prompt
         self.engram_store = engram_store
         self._sessions: dict[int, AgentSession] = {}
+        self._turn_locks: dict[int, asyncio.Lock] = {}
         self._cleanup_task: asyncio.Task | None = None
         self._chat_data_dir = data_dir()
         self._session_store_dir = self._chat_data_dir / "sessions"
         self._chat_data_dir.mkdir(parents=True, exist_ok=True)
         self._session_store_dir.mkdir(parents=True, exist_ok=True)
+
+    def get_turn_lock(self, chat_id: int) -> asyncio.Lock:
+        """Return the lock that serializes turn-state changes for one chat."""
+        lock = self._turn_locks.get(chat_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._turn_locks[chat_id] = lock
+        return lock
 
     def _is_session_expired(self, session: AgentSession) -> bool:
         """
@@ -982,7 +1124,7 @@ class SessionManager:
         """Persist current session snapshot to disk."""
         path = self._session_snapshot_path(session.chat_id)
         payload = {
-            "version": 1,
+            "version": 2,
             "saved_at": time.time(),
             "session": session.to_snapshot(),
         }
@@ -1057,7 +1199,7 @@ class SessionManager:
                         path.write_text(
                             json.dumps(
                                 {
-                                    "version": 1,
+                                    "version": 2,
                                     "saved_at": 0,
                                     "session": tombstone.to_snapshot(),
                                 },
@@ -1239,7 +1381,7 @@ def record_persisted_control_event(chat_id: int, event: dict[str, Any]) -> bool:
                 source=str(event.get("source") or "chatdome"),
             )
         snapshot = {
-            "version": 1,
+            "version": 2,
             "saved_at": time.time(),
             "session": session.to_snapshot(),
         }

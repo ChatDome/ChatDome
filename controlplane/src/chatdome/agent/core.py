@@ -366,7 +366,7 @@ class Agent:
                 f"\u8bf7\u56de\u590d\u2018\u7ee7\u7eed\u2019\u4ee5\u518d\u6267\u884c {window_limit} \u8f6e\uff0c\u6216\u56de\u590d\u2018\u653e\u5f03\u2019\u7ed3\u675f\u5f53\u524d\u4efb\u52a1\u3002"
             )
 
-        turn_context = create_turn_context(user_message)
+        turn_context = create_turn_context(session.next_turn_id, user_message)
         session.add_user_message(user_message, turn_id=turn_context.turn_id)
 
         async def run_task() -> AgentResult:

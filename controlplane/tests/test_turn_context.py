@@ -69,7 +69,7 @@ def test_llm_view_marks_current_turn_and_keeps_raw_session_message():
         {"role": "user", "content": "查看升级日志"},
         {"role": "assistant", "content": "旧任务回答"},
     ])
-    context = create_turn_context("检查当前磁盘使用率")
+    context = create_turn_context(1, "检查当前磁盘使用率")
     session.add_user_message(context.raw_message, turn_id=context.turn_id)
 
     messages = session.build_llm_messages(context)
@@ -82,7 +82,7 @@ def test_llm_view_marks_current_turn_and_keeps_raw_session_message():
 
 
 def test_continuation_text_is_preserved_without_keyword_classification():
-    context = create_turn_context("继续查看刚才的日志")
+    context = create_turn_context(1, "继续查看刚才的日志")
 
     session = AgentSession(chat_id=1, messages=[{"role": "system", "content": "system"}])
     session.add_user_message(context.raw_message, turn_id=context.turn_id)
