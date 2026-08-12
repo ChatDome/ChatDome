@@ -173,7 +173,7 @@ def main() -> None:
     logger.info("  Model:    %s", active_profile.model)
     logger.info("  Profiles: %d configured", len(config.ai_profiles))
     logger.info("  Allowed chats: %s", config.telegram.allowed_chat_ids or "(all)")
-    logger.info("  Generated commands: %s", config.agent.allow_generated_commands)
+    logger.info("  Command approval mode: %s", config.agent.command_approval_mode)
     logger.info(
         "  Command output archive: %s",
         "enabled" if config.agent.persist_command_outputs else "disabled",
@@ -184,8 +184,6 @@ def main() -> None:
         config.agent.pending_approval_timeout,
         config.agent.persisted_session_ttl,
     )
-    if config.agent.allow_unrestricted_commands:
-        logger.warning("  ⚠️  UNRESTRICTED commands: ENABLED — ALL validation bypassed!")
     logger.info("=" * 60)
 
     # ── Initialize components ──
@@ -210,8 +208,6 @@ def main() -> None:
     sandbox = CommandSandbox(
         default_timeout=config.agent.command_timeout,
         max_output_chars=config.agent.max_output_chars,
-        allow_generated_commands=config.agent.allow_generated_commands,
-        allow_unrestricted_commands=config.agent.allow_unrestricted_commands,
         persist_command_outputs=config.agent.persist_command_outputs,
         command_output_retention_days=config.agent.command_output_retention_days,
         command_output_max_chars=config.agent.command_output_max_chars,
@@ -328,7 +324,6 @@ def main() -> None:
 
     def _agent_system_prompt() -> str:
         return build_system_prompt(
-            allow_unrestricted_commands=config.agent.allow_unrestricted_commands,
             runtime_environment_context=runtime_environment_context,
             pack_loader=pack_loader,
         )
@@ -340,7 +335,6 @@ def main() -> None:
         ]
         agent.config = config.agent
         agent.tools = build_tools(
-            allow_unrestricted_commands=config.agent.allow_unrestricted_commands,
             pack_loader=pack_loader,
             valid_check_ids=valid_check_ids,
         )
@@ -362,8 +356,7 @@ def main() -> None:
 
         sandbox.default_timeout = config.agent.command_timeout
         sandbox.max_output_chars = config.agent.max_output_chars
-        sandbox.allow_generated_commands = config.agent.allow_generated_commands
-        sandbox.allow_unrestricted_commands = config.agent.allow_unrestricted_commands
+        agent.tool_dispatcher.command_approval_mode = config.agent.command_approval_mode
         sandbox.persist_command_outputs = config.agent.persist_command_outputs
         sandbox.command_output_retention_days = max(
             1,

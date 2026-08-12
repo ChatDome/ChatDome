@@ -5,7 +5,6 @@ Provides a wrapper around asyncio subprocess execution with:
   - enforced timeouts
   - output truncation
   - unified result format
-  - validator integration
   - command audit events
 """
 
@@ -28,7 +27,6 @@ from uuid import uuid4
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.logger import current_log_origin
 from chatdome.sentinel.pack_loader import PackLoader
-from chatdome.executor.validator import validate_command
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +77,6 @@ class CommandSandbox:
         self,
         default_timeout: int = 10,
         max_output_chars: int = 4000,
-        allow_generated_commands: bool = False,
-        allow_unrestricted_commands: bool = False,
         persist_command_outputs: bool = False,
         command_output_retention_days: int = 7,
         command_output_max_chars: int = 8000,
@@ -89,8 +85,6 @@ class CommandSandbox:
     ):
         self.default_timeout = default_timeout
         self.max_output_chars = max_output_chars
-        self.allow_generated_commands = allow_generated_commands
-        self.allow_unrestricted_commands = allow_unrestricted_commands
         self.persist_command_outputs = persist_command_outputs
         self.command_output_retention_days = max(1, int(command_output_retention_days))
         self.command_output_max_chars = max(1, int(command_output_max_chars))
@@ -485,7 +479,7 @@ class CommandSandbox:
         tool_call_id: str = "",
     ) -> CommandResult:
         """
-        Execute an AI-generated shell command after safety validation.
+        Execute an AI-generated shell command after the Agent approval decision.
 
         Args:
             command: The shell command to execute.
@@ -496,68 +490,6 @@ class CommandSandbox:
         Returns:
             CommandResult with execution output.
         """
-        if self.allow_unrestricted_commands:
-            logger.warning(
-                "UNRESTRICTED execution (reason: %s, sha256=%s): %s",
-                reason,
-                self._command_log_hash(command),
-                self._command_log_excerpt(command),
-            )
-            started = time.monotonic()
-            executed = await self._execute(command, log_label="ai_command:unrestricted")
-            self._record_execution_audit(
-                event_type="command_executed",
-                chat_id=chat_id,
-                tool_call_id=tool_call_id,
-                command=command,
-                reason=reason,
-                result=executed,
-                execution_mode="unrestricted",
-                duration_ms=int((time.monotonic() - started) * 1000),
-            )
-            return executed
-
-        if not self.allow_generated_commands:
-            self._record_execution_audit(
-                event_type="command_blocked",
-                chat_id=chat_id,
-                tool_call_id=tool_call_id,
-                command=command,
-                reason=reason,
-                block_reason="generated_commands_disabled",
-            )
-            return CommandResult(
-                stdout="",
-                stderr="自定义命令执行已禁用。请使用 run_security_check。",
-                return_code=None,
-                command=command,
-            )
-
-        validation = validate_command(command, check_allowlist=True)
-        if not validation.is_safe:
-            logger.warning(
-                "AI-generated command blocked (sha256=%s): %s "
-                "(validator reason: %s, AI reason: %s)",
-                self._command_log_hash(command),
-                self._command_log_excerpt(command),
-                validation.reason,
-                reason,
-            )
-            self._record_execution_audit(
-                event_type="command_blocked",
-                chat_id=chat_id,
-                tool_call_id=tool_call_id,
-                command=command,
-                reason=reason,
-                block_reason=validation.reason,
-            )
-            return CommandResult(
-                stdout="",
-                stderr=f"命令被校验器拦截: {validation.reason}",
-                return_code=None,
-                command=command,
-            )
-
         logger.info(
             "Executing AI-generated command (reason: %s, sha256=%s): %s",
             reason,
@@ -565,7 +497,7 @@ class CommandSandbox:
             self._command_log_excerpt(command),
         )
         started = time.monotonic()
-        executed = await self._execute(command, log_label="ai_command:validated")
+        executed = await self._execute(command, log_label="ai_command")
         self._record_execution_audit(
             event_type="command_executed",
             chat_id=chat_id,
@@ -573,7 +505,7 @@ class CommandSandbox:
             command=command,
             reason=reason,
             result=executed,
-            execution_mode="validated",
+            execution_mode="agent",
             duration_ms=int((time.monotonic() - started) * 1000),
         )
         return executed

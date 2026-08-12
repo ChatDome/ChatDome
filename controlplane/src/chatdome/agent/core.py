@@ -63,18 +63,22 @@ class Agent:
         self.llm_manager = llm_manager
         self.config = config
         self.tools = build_tools(
-            allow_unrestricted_commands=config.allow_unrestricted_commands,
             pack_loader=pack_loader,
             valid_check_ids=valid_check_ids,
         )
-        self.tool_dispatcher = ToolDispatcher(sandbox, llm=llm, user_context_ledger=user_context_ledger, engram_store=engram_store)
+        self.tool_dispatcher = ToolDispatcher(
+            sandbox,
+            llm=llm,
+            user_context_ledger=user_context_ledger,
+            engram_store=engram_store,
+            command_approval_mode=config.command_approval_mode,
+        )
         self.session_manager = SessionManager(
             session_timeout=config.session_timeout,
             pending_approval_timeout=config.pending_approval_timeout,
             persisted_session_ttl=config.persisted_session_ttl,
             max_history_tokens=config.max_history_tokens,
             system_prompt=build_system_prompt(
-                allow_unrestricted_commands=config.allow_unrestricted_commands,
                 runtime_environment_context=runtime_environment_context,
                 pack_loader=pack_loader,
             ),

@@ -232,6 +232,8 @@ class FakeSandbox:
             stderr="",
             return_code=0,
             timed_out=False,
+            truncated=False,
+            command=command,
         )
 
 
@@ -438,6 +440,86 @@ def _pending_session() -> AgentSession:
 
 
 class PendingApprovalFollowupTests(unittest.TestCase):
+    def test_execute_without_approval_runs_risky_command(self):
+        sandbox = FakeSandbox()
+        dispatcher = ToolDispatcher(
+            sandbox,
+            command_approval_mode="execute_without_approval",
+        )
+
+        result = asyncio.run(
+            dispatcher.dispatch(
+                "run_shell_command",
+                '{"command":"rm /tmp/example","reason":"cleanup"}',
+                "call-direct",
+                7,
+            )
+        )
+
+        self.assertEqual(sandbox.commands[0]["command"], "rm /tmp/example")
+        self.assertIn("ok", result)
+
+    def test_risky_mode_runs_only_fully_recognized_read_commands(self):
+        sandbox = FakeSandbox()
+        dispatcher = ToolDispatcher(
+            sandbox,
+            command_approval_mode="require_approval_for_risky_commands",
+        )
+
+        asyncio.run(
+            dispatcher.dispatch(
+                "run_shell_command",
+                '{"command":"df -h; ss -tlnH","reason":"inspect"}',
+                "call-safe",
+                7,
+            )
+        )
+
+        self.assertEqual(sandbox.commands[0]["command"], "df -h; ss -tlnH")
+
+    def test_risky_mode_requires_approval_for_unknown_command(self):
+        sandbox = FakeSandbox()
+        dispatcher = ToolDispatcher(
+            sandbox,
+            command_approval_mode="require_approval_for_risky_commands",
+        )
+
+        with self.assertRaises(PendingApprovalError):
+            asyncio.run(
+                dispatcher.dispatch(
+                    "run_shell_command",
+                    '{"command":"custom-inspector --all","reason":"inspect"}',
+                    "call-unknown",
+                    7,
+                )
+            )
+
+        self.assertEqual(sandbox.commands, [])
+
+    def test_all_commands_mode_requires_approval_without_risk_analysis(self):
+        sandbox = FakeSandbox()
+        dispatcher = ToolDispatcher(
+            sandbox,
+            command_approval_mode="require_approval_for_all_commands",
+        )
+
+        with patch.object(
+            dispatcher,
+            "_analyze_command_static_gate",
+            side_effect=AssertionError("risk analysis must not run"),
+        ):
+            with self.assertRaises(PendingApprovalError):
+                asyncio.run(
+                    dispatcher.dispatch(
+                        "run_shell_command",
+                        '{"command":"df -h","reason":"inspect"}',
+                        "call-all",
+                        7,
+                    )
+                )
+
+        self.assertEqual(sandbox.commands, [])
+
     def test_initial_impact_summary_is_neutral_before_details(self):
         summary = ToolDispatcher._build_initial_impact_summary(
             {

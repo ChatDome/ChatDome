@@ -47,7 +47,6 @@ class SandboxLoggingTests(unittest.TestCase):
             output_dir = Path(tmp) / "outputs"
             audit_dir = Path(tmp) / "audit"
             sandbox = CommandSandbox(
-                allow_unrestricted_commands=True,
                 persist_command_outputs=True,
                 command_output_dir=output_dir,
             )
@@ -88,7 +87,6 @@ class SandboxLoggingTests(unittest.TestCase):
             output_dir = Path(tmp) / "outputs"
             audit_dir = Path(tmp) / "audit"
             sandbox = CommandSandbox(
-                allow_unrestricted_commands=True,
                 persist_command_outputs=True,
                 command_output_dir=output_dir,
             )
@@ -126,7 +124,7 @@ class SandboxLoggingTests(unittest.TestCase):
     def test_sentinel_command_audit_uses_dedicated_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             audit_dir = Path(tmp) / "audit"
-            sandbox = CommandSandbox(allow_unrestricted_commands=True)
+            sandbox = CommandSandbox()
 
             with patch("chatdome.agent.audit.AUDIT_DIR", audit_dir):
                 sandbox._record_execution_audit(
@@ -199,7 +197,7 @@ class SandboxLoggingTests(unittest.TestCase):
             async def fake_create_subprocess_shell(*_args, **_kwargs):
                 return fake_proc
 
-            sandbox = CommandSandbox(allow_unrestricted_commands=True)
+            sandbox = CommandSandbox()
             with patch(
                 "chatdome.executor.sandbox.asyncio.create_subprocess_shell",
                 fake_create_subprocess_shell,

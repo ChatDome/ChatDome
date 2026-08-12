@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shlex
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,10 @@ READONLY_COMMANDS = {
     "strings", "hexdump", "md5sum", "sha256sum", "date", "hostname",
 }
 
+_SHELL_COMMAND_SEPARATORS = {"|", "||", "&&", ";", "&"}
+_SHELL_STRUCTURE_TOKENS = {"(", ")", "{", "}"}
+_ASSIGNMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
 
 # ---------------------------------------------------------------------------
 # Write-intent detector (fail-safe guardrail)
@@ -142,6 +147,40 @@ class ValidationResult:
     """Result of command safety validation."""
     is_safe: bool
     reason: str = ""
+
+
+def _extract_command_names(command: str) -> tuple[list[str], str]:
+    """Return command names at shell pipeline/sequence boundaries."""
+    if "$(" in command or "`" in command:
+        return [], "命令包含无法静态确认的命令替换"
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;()<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return [], "命令语法无法解析"
+
+    names: list[str] = []
+    expects_command = True
+    for token in tokens:
+        if token in _SHELL_STRUCTURE_TOKENS:
+            return [], "命令包含无法静态确认的 Shell 结构"
+        if token in _SHELL_COMMAND_SEPARATORS:
+            expects_command = True
+            continue
+        if not expects_command:
+            continue
+        if token == "!" or _ASSIGNMENT_PATTERN.match(token):
+            continue
+        if token in {"<", ">", ">>", "<<", "<<<"}:
+            return [], "命令包含无法静态确认的重定向结构"
+        names.append(token.rsplit("/", 1)[-1])
+        expects_command = False
+
+    if expects_command or not names:
+        return [], "未识别到可执行命令"
+    return names, ""
 
 
 # ---------------------------------------------------------------------------
@@ -203,9 +242,12 @@ def validate_command(command: str, check_allowlist: bool = False) -> ValidationR
 
     # Optional: check that the base command is in the allowlist
     if check_allowlist:
-        # Extract the first word (base command), strip paths
-        base_cmd = command.strip().split()[0].split("/")[-1]
-        if base_cmd not in READONLY_COMMANDS:
+        command_names, parse_error = _extract_command_names(command)
+        if parse_error:
+            return ValidationResult(is_safe=False, reason=parse_error)
+        for base_cmd in command_names:
+            if base_cmd in READONLY_COMMANDS:
+                continue
             logger.warning(
                 "Command not in allowlist: %s (base: %s)", command, base_cmd
             )

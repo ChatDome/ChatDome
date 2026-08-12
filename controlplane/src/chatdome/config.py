@@ -56,9 +56,7 @@ class AIConfig:
 @dataclass
 class AgentConfig:
     """Agent behavior settings."""
-    command_approval_mode: str = ""
-    allow_generated_commands: bool = True
-    allow_unrestricted_commands: bool = True
+    command_approval_mode: str = "require_approval_for_risky_commands"
     session_timeout: int = 600
     pending_approval_timeout: int = 86400
     persisted_session_ttl: int = 604800

@@ -240,6 +240,7 @@ class ToolDispatcher:
         engram_store: Any = None,
         sentinel: Any = None,
         session_manager: Any = None,
+        command_approval_mode: str = "require_approval_for_risky_commands",
     ):
         self.sandbox = sandbox
         self.llm = llm
@@ -247,6 +248,7 @@ class ToolDispatcher:
         self.engram_store = engram_store
         self.sentinel = sentinel
         self.session_manager = session_manager
+        self.command_approval_mode = command_approval_mode
         self._http_client: httpx.AsyncClient | None = None
 
     def set_sentinel(self, sentinel: Any) -> None:
@@ -585,18 +587,35 @@ class ToolDispatcher:
         if not command:
             return "缺少 command 参数"
 
-        # New approval flow:
-        # - Do static-only precheck first (no LLM call here)
-        # - Show minimal approval prompt
-        # - Run full LLM analysis only when user asks for details
-        analysis = await self.analyze_command_for_approval(
-            command=command,
-            reason=reason,
-            chat_id=chat_id,
-            tool_call_id=tool_call_id,
-            include_llm=False,
-            llm=llm,
-        )
+        if self.command_approval_mode == "execute_without_approval":
+            result = await self.sandbox.execute_shell_command(
+                command,
+                reason,
+                chat_id=chat_id,
+                tool_call_id=tool_call_id,
+            )
+            return self._format_command_result(result)
+
+        if self.command_approval_mode == "require_approval_for_all_commands":
+            analysis = self._approval_required_analysis("approval_required_for_all_commands")
+            pending_mode = "approval_all"
+        else:
+            try:
+                analysis = await self.analyze_command_for_approval(
+                    command=command,
+                    reason=reason,
+                    chat_id=chat_id,
+                    tool_call_id=tool_call_id,
+                    include_llm=False,
+                    llm=llm,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Command risk analysis failed; approval required: %s",
+                    type(exc).__name__,
+                )
+                analysis = self._approval_required_analysis("risk_analysis_failed")
+            pending_mode = "approval_risky"
         static_is_safe = bool(analysis.get("static_is_safe", False))
         static_critical = bool(analysis.get("static_critical", False))
         mutation_detected = bool(analysis.get("mutation_detected", False))
@@ -620,27 +639,24 @@ class ToolDispatcher:
             static_reason=analysis.get("static_reason", ""),
             static_write_detected=bool(analysis.get("static_write_detected", False)),
             static_critical=static_critical,
-            unrestricted_mode=self.sandbox.allow_unrestricted_commands,
+            approval_mode=self.command_approval_mode,
         )
 
-        if self.sandbox.allow_unrestricted_commands:
-            can_auto_execute = (
-                static_is_safe
-                and not static_critical
-                and not mutation_detected
-                and not deletion_detected
+        can_auto_execute = (
+            self.command_approval_mode == "require_approval_for_risky_commands"
+            and static_is_safe
+            and not static_critical
+            and not mutation_detected
+            and not deletion_detected
+        )
+        if can_auto_execute:
+            result = await self.sandbox.execute_shell_command(
+                command,
+                reason,
+                chat_id=chat_id,
+                tool_call_id=tool_call_id,
             )
-            if can_auto_execute:
-                result = await self.sandbox.execute_shell_command(
-                    command,
-                    reason,
-                    chat_id=chat_id,
-                    tool_call_id=tool_call_id,
-                )
-                return self._format_command_result(result)
-            pending_mode = "unrestricted_guardrail"
-        else:
-            pending_mode = "restricted_default"
+            return self._format_command_result(result)
 
         CommandAuditTracker.record_event(
             "command_pending_approval",
@@ -722,7 +738,16 @@ class ToolDispatcher:
             validate_command,
         )
 
-        static_check = validate_command(command, check_allowlist=False)
+        segments = split_shell_commands(command)
+        segment_checks = [
+            validate_command(segment.command, check_allowlist=True)
+            for segment in segments
+        ]
+        static_is_safe = bool(segment_checks) and all(check.is_safe for check in segment_checks)
+        static_reason = next(
+            (check.reason for check in segment_checks if not check.is_safe),
+            "",
+        )
         static_critical = is_critical_command(command)
         static_write = has_write_intent(command)
         static_delete = self._has_delete_intent(command)
@@ -730,7 +755,7 @@ class ToolDispatcher:
         if static_critical:
             safety_status = "CRITICAL"
             risk_level = "CRITICAL"
-        elif static_write or not static_check.is_safe:
+        elif static_write or not static_is_safe:
             safety_status = "UNSAFE"
             risk_level = "HIGH"
         else:
@@ -746,10 +771,27 @@ class ToolDispatcher:
             "reviewer_mode": "static_gate",
             "reviewer_status": safety_status,
             "reviewer_risk_level": risk_level,
-            "static_is_safe": static_check.is_safe,
-            "static_reason": static_check.reason,
+            "static_is_safe": static_is_safe,
+            "static_reason": static_reason,
             "static_write_detected": static_write,
             "static_critical": static_critical,
+        }
+
+    @staticmethod
+    def _approval_required_analysis(reason: str) -> dict[str, Any]:
+        return {
+            "safety_status": "UNSAFE",
+            "risk_level": "HIGH",
+            "mutation_detected": False,
+            "deletion_detected": False,
+            "impact_analysis": ToolDispatcher._build_initial_impact_summary({}),
+            "reviewer_mode": "policy",
+            "reviewer_status": "UNSAFE",
+            "reviewer_risk_level": "HIGH",
+            "static_is_safe": False,
+            "static_reason": reason,
+            "static_write_detected": False,
+            "static_critical": False,
         }
 
     async def _analyze_command_details_with_llm(
