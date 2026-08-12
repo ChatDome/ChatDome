@@ -90,13 +90,11 @@ ChatDome 正在从"被动应答式助手"进化为 **7×24 全天候主动安全
 - **自然语言交互式白名单** — 直接告诉 ChatDome："*10.0.0.5 是我的跳板机，忽略它的 SSH 登录*"，AI 自动理解意图、生成白名单规则、请求确认后持久化生效。不用改配置文件，不用登录控制台。
 - **哨兵记忆库** — 独立于会话上下文的持久化记忆系统。Sentinel 首次启动时主动询问服务器用途、已知服务、可信 IP，此后 **永久记住** 这些信息以 **杜绝误报乌龙**。每次告警处置和白名单操作都会被自动学习。
 
-### 🔓 “无限可能性”模式 (Infinite Possibilities Mode)
+### 🔐 命令审批模式
 
-ChatDome 出厂内置了丰富且安全的内置审计命令库。在当前默认配置中，`allow_generated_commands` 为 `true`，这让 ChatDome 可以根据你的自然语言问题生成临场查询命令；如果你希望采用最保守模式，可以将它改为 `false`，让 AI 仅使用预定义审计命令。
+ChatDome 会根据用户明确请求生成 Shell 命令。必填配置 `chatdome.agent.command_approval_mode` 决定命令直接执行还是等待审批。
 
-只要开启大模型的自由生成模式，AI 就不再局限于死板的预设模版。如果你要求：*“列出 /var/log 下最大的三个文件”*，大模型会调动自身庞大的 Linux 操作系统知识，自动想出最完美的组合命令（比如 `find` 结合 `sort` 和 `head`）。
-
-正因为我们打造了**安全隔离与两级人工互交确认（Human-in-the-loop）**这条防线，你才可以放心地赋予 AI 这种“无限的权利”：哪怕是 AI 自己发明的查杀指令，也会在后台接受另外一个独立 AI 审查员的影响评估，然后以卡片的形式推送到你的 Telegram 取决你的最终态度。只有在你确认它是安全的查询指令并点击之后，服务器才会做相应的动作！
+默认的 `require_approval_for_risky_commands` 仅自动执行本地确定性规则明确识别为低风险的命令；存在风险或无法确定时等待审批。命令详情分析按需触发，不参与是否审批的最终决策。
 
 ## 快速开始
 
@@ -219,26 +217,24 @@ ChatDome 采用单文件运行配置。服务器安装使用 `/etc/chatdome/conf
 | `chatdome.ai_profiles` | 配置 LLM 后必填 | `{}`；未配置 profile | LLM profile 集合，可通过本地菜单写入 |
 | `chatdome.ai_profiles.<name>.api_key` | 取决于 profile | `""`；OpenAI-compatible profile 未认证 | OpenAI-compatible profile 的 API Key，直接写入本地 `config.yaml` |
 | `chatdome.sentinel.enabled` | 可选 | `true` | 开启 7×24 Sentinel 哨兵主动监控模式 |
-| `chatdome.agent.allow_generated_commands` | 可选 | `true` | 允许 AI 自主生成命令 |
-| `chatdome.agent.allow_unrestricted_commands` | 可选 | `true` | 开启 unrestricted 模式 |
+| `chatdome.agent.command_approval_mode` | 必填 | `require_approval_for_risky_commands` | AI 生成的 `run_shell_command` 审批策略 |
 
 > ⚠️ **安全提醒**：切勿将 `config.yaml` 提交到版本控制。远程 LLM 管理仅允许 `admin_chat_ids` 中的私聊管理员使用；`admin_chat_ids` 为空时使用 `allowed_chat_ids`。API Key 消息会在保存配置前删除。
 
-### 🎛️ 核心能力控制开关（进阶）
+### 🎛️ 核心能力控制
 
-除了基础的 Token 配置外，ChatDome 提供了三个改变核心运行逻辑的进阶能力开关。在使用进阶功能前，强烈建议你了解它们的作用。当前随仓库提供的默认配置（`config.example.yaml`）中，Sentinel 与动态命令执行默认开启；如需保守部署，请在 `config.yaml` 中显式设置对应选项为 `false`：
+Sentinel 调度和 AI 命令审批相互独立：
 
 #### 1. 哨兵主动监控模式 (`chatdome.sentinel.enabled`)
 - **功能说明**：将 ChatDome 从“被动的一问一答助手”升级为“7x24 小时主动巡更的哨兵”。它会在后台静默定期执行系统安全审计，并通过独创的双层态势感知架构对告警进行降噪聚合。
 - **推荐场景**：希望完全不需要主动询问，就能在异常发生的第一时间在 Telegram 被动收到精炼警报通知的所有运维人员。
 
-#### 2. 无限可能模式 (`chatdome.agent.allow_generated_commands`)
-- **功能说明**：解除“仅允许执行出厂预装官方命令”的严格限制。开启后，你用自然语言下达的复杂、模糊查阅要求，AI 会结合 Linux 知识生成新的 Shell 组合查询命令。
-- **内置安全机制**：动态命令会先经过静态审查和审批流程；当 unrestricted 模式关闭时，还会经过只读 allowlist/blocklist 校验。
+#### 2. 命令审批策略 (`chatdome.agent.command_approval_mode`)
+- `execute_without_approval`：所有非空 AI 命令直接执行。
+- `require_approval_for_risky_commands`：只有本地规则明确判定为低风险的命令自动执行，风险或无法确定时要求审批。
+- `require_approval_for_all_commands`：所有非空 AI 命令都要求审批。
 
-#### 3. 上帝越狱模式 (`chatdome.agent.allow_unrestricted_commands`)
-- **功能说明**：**【危险！上帝权限】**开启此项后，沙箱会绕过确定性的命令校验器，不再使用只读 allowlist/blocklist 作为硬边界。
-- **内置安全机制**：ToolDispatcher 仍会做执行前审查；静态安全、无写入/删除信号的命令可能自动执行，高风险、写入或删除命令会进入 Telegram 审批流，需要按钮确认或显式 `/confirm`。这仍是高风险模式，生产环境应谨慎开启。
+Sentinel 命令包仅用于内部定时巡检，不进入对话审批流程。
 
 ### 配置文件示例
 
@@ -274,8 +270,7 @@ chatdome:
       api_key: "sk-..."                    # 直接写入本地 config.yaml
 
   agent:
-    allow_generated_commands: true            # true = 允许 AI 生成临场命令
-    allow_unrestricted_commands: true         # true = 绕过确定性命令校验器（极高风险）
+    command_approval_mode: require_approval_for_risky_commands
     session_timeout: 600                      # 会话空闲超时（秒）
     max_rounds_per_turn: 10                   # 单次消息最多触发的工具调用轮数
     command_timeout: 10                       # 命令执行超时（秒）
@@ -314,11 +309,10 @@ AI 通过 **Function Calling**（工具调用）与主机交互，可用工具�
 
 | 工具 | 描述 |
 |------|------|
-| `run_security_check` | 按 ID 执行预定义的安全审计命令 |
-| `run_shell_command` | 执行 shell 命令（当前默认允许生成命令并开启 unrestricted 模式；高风险/写入/删除命令进入审批流） |
+| `run_shell_command` | 按 `command_approval_mode` 执行 Shell 命令 |
 | `whois_lookup` | 查询 IP 地理位置和归属信息 |
 
-### 内置安全检查项
+### Sentinel 内置检查项
 
 | 检查 ID | 描述 |
 |---------|------|
@@ -425,9 +419,9 @@ CLI 与 Telegram 加载同一命令目录并调用同一业务服务。每个已
 ChatDome 在你的服务器上执行命令——安全是第一优先级：
 
 1. **Telegram 鉴权** — 仅处理白名单 Chat ID 的消息，其他一律静默忽略。
-2. **预定义命令优先** — 预定义审计命令模板运行时不可篡改；如需最小权限模式，可关闭 `allow_generated_commands` 与 `allow_unrestricted_commands`。
-3. **生成命令审查** — 开启 `allow_generated_commands` 后，命令会经过审查与风险确认流程。
-4. **Unrestricted 模式强告警** — 开启 `allow_unrestricted_commands` 后会绕过确定性命令校验器，高危命令仍会进入人工确认/强制 `/confirm` 流程。
+2. **明确审批策略** — 必填的 `command_approval_mode` 只控制 AI 生成的 `run_shell_command`。
+3. **风险不确定时审批** — 默认模式仅自动执行明确低风险命令，无法确定时要求人工确认。
+4. **Sentinel 隔离** — 定时巡检使用内部命令包，不等待对话审批。
 5. **执行沙箱** — 所有命令强制超时、输出截断，降低误操作影响面。
 
 > ⚠️ **建议**：以专用低权限用户运行 ChatDome，该用户对日志文件有读取权限但没有 sudo 权限。
@@ -435,7 +429,7 @@ ChatDome 在你的服务器上执行命令——安全是第一优先级：
 ### 安全增强（2026-04）
 
 - 风险审查输出结构化字段：`safety_status`、`risk_level`、`mutation_detected`、`deletion_detected`。
-- 即使开启 unrestricted 模式，也仅低风险只读命令可自动执行；涉及修改/删除风险的命令仍需人工确认。
+- 默认审批模式仅自动执行明确低风险命令；修改、删除、解析失败和未知命令都需要人工确认。
 - 命令“审查 → 审批 → 执行”全链路事件写入可校验审计日志。
 - 审计日志按天分桶，默认自动保留 30 天。
 - 可通过 `/audit [N]` 在 Telegram 直接查看最近审计事件。

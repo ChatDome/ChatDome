@@ -187,8 +187,8 @@ class RepeatingSameToolLLM:
             tool_calls=[
                 ToolCall(
                     id=f"same-call-{self.calls}",
-                    name="run_security_check",
-                    arguments='{"check_id": "recent_cron_jobs", "args": {"limit": 5}}',
+                    name="get_command_audit_events",
+                    arguments='{"limit": 5}',
                 )
             ],
         )
@@ -1455,12 +1455,11 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch("chatdome.agent.audit.AUDIT_DIR", Path(tmp)):
                 CommandAuditTracker.record_event(
-                    "security_check_executed",
+                    "command_executed",
                     chat_id=123,
                     command="last -n 5",
-                    reason="security_check:recent_logins",
-                    check_id="recent_logins",
-                    execution_mode="pack",
+                    reason="show recent logins",
+                    execution_mode="agent",
                     return_code=0,
                     duration_ms=12,
                 )
@@ -1471,17 +1470,17 @@ class PendingApprovalFollowupTests(unittest.TestCase):
                     reason="not actually executed",
                 )
                 CommandAuditTracker.record_event(
-                    "security_check_executed",
+                    "command_executed",
                     chat_id=456,
                     command="whoami",
                     reason="other chat",
                 )
                 CommandAuditTracker.record_event(
-                    "security_check_executed",
+                    "sentinel_check_executed",
                     chat_id=123,
                     audit_source="sentinel",
                     command="uptime",
-                    reason="security_check:sentinel_uptime",
+                    reason="sentinel_check:uptime",
                 )
 
                 dispatcher = ToolDispatcher(SimpleNamespace())

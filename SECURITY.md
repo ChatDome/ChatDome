@@ -22,6 +22,17 @@ Include:
 
 ## Security Boundaries
 
+AI-generated `run_shell_command` calls are controlled by the required
+`chatdome.agent.command_approval_mode` setting:
+
+- `execute_without_approval` executes every non-empty generated command.
+- `require_approval_for_risky_commands` requires approval for risky or indeterminate commands.
+- `require_approval_for_all_commands` requires approval for every generated command.
+
+Sentinel checks execute internal command packs independently of the conversational
+approval flow. ChatDome validates the complete configuration before startup and
+reports all detected errors with YAML line numbers.
+
 Report issues involving:
 
 - Command approval bypass

@@ -530,9 +530,9 @@ sentinel_menu() {
 agent_menu() {
   while true; do
     show_header
-    echo "Agent Security Policy"
+    echo "Command Approval Policy"
     echo "1) Show current policy"
-    echo "2) Switch command mode"
+    echo "2) Set command approval mode"
     echo "3) Change timeouts"
     echo "0) Back"
     echo
@@ -540,9 +540,9 @@ agent_menu() {
     case "$choice" in
       1) run_cli agent-status; pause ;;
       2)
-        echo "Modes: restricted, generated, unrestricted"
+        echo "Modes: execute_without_approval, require_approval_for_risky_commands, require_approval_for_all_commands"
         read -r -p "Mode: " mode
-        run_cli set-agent-mode "$mode"
+        run_cli set-command-approval-mode "$mode"
         pause
         ;;
       3)

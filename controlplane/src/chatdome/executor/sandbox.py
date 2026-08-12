@@ -410,7 +410,7 @@ class CommandSandbox:
         tool_call_id: str = "",
     ) -> CommandResult:
         """
-        Execute a pre-defined security audit command.
+        Execute a pre-defined Sentinel command-pack check.
 
         Args:
             check_id: Registered command ID (e.g., 'ssh_bruteforce').
@@ -446,7 +446,7 @@ class CommandSandbox:
                 command=f"[check:{check_id}]",
             )
 
-        logger.info("Running security check: %s (%s)", rendered.name, rendered.check_id)
+        logger.info("Running Sentinel check: %s (%s)", rendered.name, rendered.check_id)
         started = time.monotonic()
         result = await self._execute(
             rendered.command,

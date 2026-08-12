@@ -42,6 +42,10 @@ class ChatDomeCLITests(unittest.TestCase):
             yaml.safe_dump(
                 {
                     "chatdome": {
+                        "telegram": {
+                            "bot_token": "telegram-token",
+                            "allowed_chat_ids": [123],
+                        },
                         "active_ai_profile": "base",
                         "ai_profiles": {
                             "base": {
@@ -51,6 +55,9 @@ class ChatDomeCLITests(unittest.TestCase):
                                 "model": "gpt-4o",
                                 "api_key": "sk-base",
                             }
+                        },
+                        "agent": {
+                            "command_approval_mode": "require_approval_for_risky_commands",
                         },
                     }
                 },
@@ -92,6 +99,49 @@ class ChatDomeCLITests(unittest.TestCase):
             "配置检查失败，共 4 项",
         ):
             self.cli.validate_config(SimpleNamespace())
+
+    def test_agent_status_reports_only_command_approval_mode(self):
+        with patch("builtins.print") as output:
+            self.cli.agent_status(SimpleNamespace())
+
+        rendered = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn(
+            "- command_approval_mode: require_approval_for_risky_commands",
+            rendered,
+        )
+        self.assertNotIn("allow_generated_commands", rendered)
+        self.assertNotIn("allow_unrestricted_commands", rendered)
+
+    def test_set_command_approval_mode_writes_single_policy_field(self):
+        args = SimpleNamespace(mode="require_approval_for_all_commands")
+
+        with patch.object(self.cli, "_request_reload") as request_reload:
+            with patch("builtins.print") as output:
+                self.cli.set_command_approval_mode(args)
+
+        data = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        agent = data["chatdome"]["agent"]
+        self.assertEqual(
+            agent,
+            {"command_approval_mode": "require_approval_for_all_commands"},
+        )
+        request_reload.assert_called_once_with(
+            ["agent"],
+            "menu:set-command-approval-mode",
+        )
+        output.assert_called_once_with(
+            "command approval mode set to: require_approval_for_all_commands"
+        )
+
+    def test_command_approval_mode_parser_accepts_only_supported_values(self):
+        parser = self.cli._build_parser()
+        args = parser.parse_args(
+            ["set-command-approval-mode", "execute_without_approval"]
+        )
+
+        self.assertIs(args.func, self.cli.set_command_approval_mode)
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["set-command-approval-mode", "unrestricted"])
 
     def test_llm_profile_state_reports_exact_name_match(self):
         with patch("builtins.print") as output:

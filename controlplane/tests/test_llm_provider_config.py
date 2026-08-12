@@ -98,7 +98,7 @@ chatdome:
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(ValueError, "deprecated api_key env"):
+            with self.assertRaisesRegex(ValueError, "api_key 不支持 env: 引用"):
                 load_config(config_path)
 
     def test_old_ai_environment_overrides_are_ignored(self):

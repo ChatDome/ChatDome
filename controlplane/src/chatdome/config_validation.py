@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,14 @@ _CHECK_FIELDS = {
 _RULE_FIELDS = {"type", "operator", "threshold", "pattern", "aggregation"}
 _DEFAULT_PACKS = ["ssh_auth", "network", "system_resources", "processes_services", "logs"]
 _SPECIAL_SENTINEL_CHECK_IDS = {"ssh_session_commands_patrol"}
+_PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_API_MODES = {
+    "openai", "openai_api", "chat", "chat_completions", "chat_completion",
+    "codex", "codex_responses", "codex_oauth",
+}
+_RULE_TYPES = {"line_count", "regex_extract", "regex_match", "added_count"}
+_RULE_OPERATORS = {">", ">=", "<", "<=", "==", "!="}
+_RULE_AGGREGATIONS = {"max", "min", "sum", "avg"}
 
 
 @dataclass(frozen=True)
@@ -132,6 +141,8 @@ class _Validator:
 
     def mapping(self, value: Any, path: str, *, required: bool = False) -> dict[str, Any] | None:
         if value is None:
+            if path == "配置文件" or self.index.line(path) is not None:
+                self.add(path, "必须是对象")
             return None
         if not isinstance(value, dict):
             self.add(path, "必须是对象")
@@ -219,12 +230,21 @@ class _Validator:
             self.add("chatdome.ai_profiles", "必须至少定义一个模型配置")
         for name, raw in profiles.items():
             path = f"chatdome.ai_profiles.{name}"
+            if not _PROFILE_NAME_PATTERN.fullmatch(str(name)):
+                self.add(path, "名称无效，只能使用 1 到 64 个字母、数字、点、下划线或连字符")
             profile = self.mapping(raw, path, required=True)
             if profile is None:
                 continue
             self.reject_unknown(profile, _AI_FIELDS, path)
             for key in ("provider", "api_mode", "base_url", "api_key", "model", "codex_client_id", "codex_token_file", "codex_base_url"):
                 self.optional_type(profile, key, str, path)
+            self.require_nonempty_string(profile, "model", path)
+            api_mode = profile.get("api_mode", "openai_api")
+            if isinstance(api_mode, str):
+                self.enum(profile, "api_mode", _API_MODES, path)
+            api_key = profile.get("api_key")
+            if isinstance(api_key, str) and api_key.strip().startswith("env:"):
+                self.add(f"{path}.api_key", "不支持 env: 引用，请直接填写 API Key")
             if "temperature" in profile and not _is_number(profile["temperature"]):
                 self.add(f"{path}.temperature", "必须是数字")
             self.positive_int(profile, "max_tokens", path)
@@ -304,10 +324,16 @@ class _Validator:
                 rule_data = self.mapping(rule, rule_path, required=True)
                 if rule_data is not None:
                     self.reject_unknown(rule_data, _RULE_FIELDS, rule_path)
-                    self.optional_type(rule_data, "type", str, rule_path)
+                    self.require_nonempty_string(rule_data, "type", rule_path)
                     self.optional_type(rule_data, "operator", str, rule_path)
                     self.optional_type(rule_data, "pattern", str, rule_path)
                     self.optional_type(rule_data, "aggregation", str, rule_path)
+                    if isinstance(rule_data.get("type"), str):
+                        self.enum(rule_data, "type", _RULE_TYPES, rule_path)
+                    if isinstance(rule_data.get("operator"), str):
+                        self.enum(rule_data, "operator", _RULE_OPERATORS, rule_path)
+                    if isinstance(rule_data.get("aggregation"), str):
+                        self.enum(rule_data, "aggregation", _RULE_AGGREGATIONS, rule_path)
                     if "threshold" in rule_data and not _is_number(rule_data["threshold"]):
                         self.add(f"{rule_path}.threshold", "必须是数字")
 

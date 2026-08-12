@@ -518,16 +518,9 @@ def _sync_terminal_runtime_paths() -> None:
 
 
 def _load_terminal_chat_config() -> Any:
-    from chatdome.config import parse_config_document, validate_llm_config
+    from chatdome.config import load_config
 
-    if not CONFIG_PATH.exists():
-        raise FileNotFoundError(f"missing config: {CONFIG_PATH}")
-    raw_document = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    if not isinstance(raw_document, dict):
-        raise ValueError("configuration document must be a mapping")
-    config = parse_config_document(raw_document)
-    validate_llm_config(config)
-    return config
+    return load_config(CONFIG_PATH)
 
 
 def _create_terminal_chat_runtime(args: argparse.Namespace) -> _TerminalChatRuntime:
@@ -549,8 +542,6 @@ def _create_terminal_chat_runtime(args: argparse.Namespace) -> _TerminalChatRunt
     sandbox = CommandSandbox(
         default_timeout=config.agent.command_timeout,
         max_output_chars=config.agent.max_output_chars,
-        allow_generated_commands=config.agent.allow_generated_commands,
-        allow_unrestricted_commands=config.agent.allow_unrestricted_commands,
         persist_command_outputs=config.agent.persist_command_outputs,
         command_output_retention_days=config.agent.command_output_retention_days,
         command_output_max_chars=config.agent.command_output_max_chars,
@@ -568,9 +559,7 @@ def _create_terminal_chat_runtime(args: argparse.Namespace) -> _TerminalChatRunt
         sandbox=sandbox,
         config=config.agent,
         runtime_environment_context=runtime_environment_context,
-        pack_loader=pack_loader,
         user_context_ledger=user_context_ledger,
-        valid_check_ids=[str(c.get("check_id")) for c in config.sentinel.checks if c.get("check_id")],
         engram_store=EngramStore(),
     )
 
@@ -1969,10 +1958,9 @@ def agent_status(args: argparse.Namespace) -> None:
     del args
     data = _load_yaml()
     agent = _section(_chatdome_root(data), "agent")
-    print("Agent security policy")
+    print("Command approval policy")
     for key in (
-        "allow_generated_commands",
-        "allow_unrestricted_commands",
+        "command_approval_mode",
         "session_timeout",
         "pending_approval_timeout",
         "max_rounds_per_turn",
@@ -1982,23 +1970,13 @@ def agent_status(args: argparse.Namespace) -> None:
         print(f"- {key}: {agent.get(key)}")
 
 
-def set_agent_mode(args: argparse.Namespace) -> None:
+def set_command_approval_mode(args: argparse.Namespace) -> None:
     data = _load_yaml()
     agent = _section(_chatdome_root(data), "agent")
-    if args.mode == "restricted":
-        agent["allow_generated_commands"] = False
-        agent["allow_unrestricted_commands"] = False
-    elif args.mode == "generated":
-        agent["allow_generated_commands"] = True
-        agent["allow_unrestricted_commands"] = False
-    elif args.mode == "unrestricted":
-        agent["allow_generated_commands"] = True
-        agent["allow_unrestricted_commands"] = True
-    else:
-        raise SystemExit(f"unknown mode: {args.mode}")
+    agent["command_approval_mode"] = args.mode
     _write_yaml(data)
-    _request_reload(["agent"], "menu:set-agent-mode")
-    print(f"agent mode set to: {args.mode}")
+    _request_reload(["agent"], "menu:set-command-approval-mode")
+    print(f"command approval mode set to: {args.mode}")
 
 
 def set_agent_params(args: argparse.Namespace) -> None:
@@ -2163,9 +2141,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=set_sentinel_policy)
 
     sub.add_parser("agent-status").set_defaults(func=agent_status)
-    p = sub.add_parser("set-agent-mode")
-    p.add_argument("mode", choices=["restricted", "generated", "unrestricted"])
-    p.set_defaults(func=set_agent_mode)
+    p = sub.add_parser("set-command-approval-mode")
+    p.add_argument(
+        "mode",
+        choices=[
+            "execute_without_approval",
+            "require_approval_for_risky_commands",
+            "require_approval_for_all_commands",
+        ],
+    )
+    p.set_defaults(func=set_command_approval_mode)
     p = sub.add_parser("set-agent-params")
     p.add_argument("--session-timeout", type=int)
     p.add_argument("--max-rounds-per-turn", type=int)

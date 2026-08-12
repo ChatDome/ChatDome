@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 from chatdome.config import load_config
 from chatdome.config_validation import ConfigValidationError
 
@@ -118,6 +120,100 @@ chatdome:
 
     def test_valid_document_loads(self):
         config = self._load_text(VALID_CONFIG)
+
+        self.assertEqual(
+            config.agent.command_approval_mode,
+            "require_approval_for_risky_commands",
+        )
+
+    def test_null_required_sections_are_all_reported_with_lines(self):
+        text = """\
+chatdome:
+  telegram:
+  active_ai_profile: primary
+  ai_profiles:
+  agent:
+  sentinel:
+"""
+
+        with self.assertRaises(ConfigValidationError) as raised:
+            self._load_text(text)
+
+        message = str(raised.exception)
+        self.assertIn("配置检查失败，共 4 项", message)
+        self.assertIn("第 2 行：chatdome.telegram 必须是对象", message)
+        self.assertIn("第 4 行：chatdome.ai_profiles 必须是对象", message)
+        self.assertIn("第 5 行：chatdome.agent 必须是对象", message)
+        self.assertIn("第 6 行：chatdome.sentinel 必须是对象", message)
+
+    def test_profile_errors_are_aggregated_before_dataclass_parsing(self):
+        text = VALID_CONFIG.replace(
+            "    primary:\n"
+            "      provider: openai\n"
+            "      api_mode: openai_api\n"
+            "      api_key: sk-test\n"
+            "      model: gpt-4o\n",
+            "    invalid profile:\n"
+            "      provider: openai\n"
+            "      api_mode: unsupported\n"
+            "      api_key: env:CHATDOME_KEY\n"
+            "      model: ''\n",
+        ).replace("active_ai_profile: primary", "active_ai_profile: invalid profile")
+
+        with self.assertRaises(ConfigValidationError) as raised:
+            self._load_text(text)
+
+        message = str(raised.exception)
+        self.assertIn("第 6 行：chatdome.ai_profiles.invalid profile 名称无效", message)
+        self.assertIn("第 8 行：chatdome.ai_profiles.invalid profile.api_mode 取值无效", message)
+        self.assertIn("第 9 行：chatdome.ai_profiles.invalid profile.api_key 不支持 env: 引用", message)
+        self.assertIn("第 10 行：chatdome.ai_profiles.invalid profile.model 必须填写非空字符串", message)
+
+    def test_invalid_sentinel_rule_values_are_aggregated(self):
+        text = VALID_CONFIG.replace(
+            "  sentinel:\n    enabled: false\n",
+            "  sentinel:\n"
+            "    enabled: true\n"
+            "    builtin_packs: [network]\n"
+            "    checks:\n"
+            "      - name: invalid rule\n"
+            "        check_id: open_ports\n"
+            "        rule:\n"
+            "          type: unsupported\n"
+            "          operator: approximate\n"
+            "          aggregation: median\n",
+        )
+
+        with self.assertRaises(ConfigValidationError) as raised:
+            self._load_text(text)
+
+        message = str(raised.exception)
+        self.assertIn("第 20 行：chatdome.sentinel.checks[0].rule.type 取值无效", message)
+        self.assertIn("第 21 行：chatdome.sentinel.checks[0].rule.operator 取值无效", message)
+        self.assertIn("第 22 行：chatdome.sentinel.checks[0].rule.aggregation 取值无效", message)
+
+    def test_example_config_becomes_valid_after_required_credentials_are_filled(self):
+        example_path = Path(__file__).parents[2] / "config.example.yaml"
+        document = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+        root = document["chatdome"]
+        root["telegram"]["bot_token"] = "telegram-token"
+        root["active_ai_profile"] = "primary"
+        root["ai_profiles"] = {
+            "primary": {
+                "provider": "openai",
+                "api_mode": "openai_api",
+                "api_key": "sk-test",
+                "model": "gpt-4o",
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(document, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
 
         self.assertEqual(
             config.agent.command_approval_mode,

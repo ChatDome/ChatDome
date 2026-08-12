@@ -86,13 +86,11 @@ ChatDome is evolving beyond a reactive assistant into an **always-on security gu
 - **Interactive Whitelist via Natural Language** — Tell ChatDome *"10.0.0.5 is my jump server, ignore its SSH logins"* in plain language. The AI parses your intent, generates a whitelist rule, asks for confirmation, and persists it. No config files to edit, no consoles to log into.
 - **Sentinel Memory Vault** — A persistent, session-independent memory system. Sentinel proactively asks about your server's role, known services, and trusted IPs on first launch—then remembers everything to **prevent false alarms**. Every alert dismissal and whitelist action is learned automatically.
 
-### 🔓 The "Infinite Possibilities" Mode
+### 🔐 Command Approval Modes
 
-ChatDome ships with a robust set of predefined safety checks. In the current default configuration, `allow_generated_commands` is `true`, allowing ChatDome to generate command-line inspections from natural language. For the most conservative posture, set it to `false` so the AI only uses predefined audit commands.
+ChatDome generates shell commands for explicit user requests. The required `chatdome.agent.command_approval_mode` setting controls whether those commands run immediately or wait for approval.
 
-When enabled, the AI is no longer bound by predefined rules. If you ask *"Show me the 3 largest files in `/var/log`"*, the LLM will dynamically generate the correct Linux shell commands (`du`, `sort`, `head`, etc.) from its vast knowledge base. 
-
-Because we use the **Dual-Confirmation Mechanism**, granting the AI this "Infinite Power" remains safe and predictable: every dynamically generated command is individually vetted by a secondary AI Reviewer, providing you with a specific impact analysis and forcing an interactive human approval step in Telegram before anything touches your server's bash shell.
+The default `require_approval_for_risky_commands` mode auto-runs only commands that the local deterministic rules clearly identify as low-risk. Risky or indeterminate commands wait for approval. Command-detail analysis is available on demand and does not decide whether approval is required.
 
 ## Quick Start
 
@@ -215,26 +213,24 @@ Defaults below come from `config.example.yaml`; if copied unchanged, those value
 | `chatdome.ai_profiles` | Required after LLM setup | `{}`; no profiles configured | LLM profile map, usually written by the local menu |
 | `chatdome.ai_profiles.<name>.api_key` | Profile-dependent | `""`; OpenAI-compatible profile is not authenticated | OpenAI-compatible profile API key, stored directly in local `config.yaml` |
 | `chatdome.sentinel.enabled` | Optional | `true` | Enable 7x24 Sentinel proactive monitoring |
-| `chatdome.agent.allow_generated_commands` | Optional | `true` | Allow AI-generated commands |
-| `chatdome.agent.allow_unrestricted_commands` | Optional | `true` | Enable unrestricted command mode |
+| `chatdome.agent.command_approval_mode` | Required | `require_approval_for_risky_commands` | Approval policy for AI-generated `run_shell_command` calls |
 
 > ⚠️ **Security**: Never commit `config.yaml` to version control. It contains secrets. Remote LLM management is available only in private chats listed in `admin_chat_ids`, or in `allowed_chat_ids` when `admin_chat_ids` is empty. API key messages are deleted before the profile is saved.
 
-### 🎛️ Core Capability Switches (Advanced)
+### 🎛️ Core Capability Controls
 
-Beyond basic token configuration, ChatDome offers three advanced privilege switches that alter its core operating logic. It is highly recommended to understand their implications before using them. In the shipped default configuration (`config.example.yaml`), Sentinel and dynamic command execution are enabled by default; set the corresponding options to `false` in `config.yaml` for a conservative deployment:
+Sentinel scheduling and command approval are configured independently:
 
 #### 1. Sentinel Proactive Monitoring Mode (`chatdome.sentinel.enabled`)
 - **What it does**: Upgrades ChatDome from a "passive Q&A assistant" to a "7x24 proactive patrolling sentinel". It quietly performs periodic system security audits in the background and employs an innovative dual-layer situational awareness architecture to aggregate and denoise alerts.
 - **Recommended for**: Administrators who want to receive refined, proactive alert notifications on Telegram the moment an anomaly occurs, without needing to ask manually.
 
-#### 2. Infinite Possibilities Mode (`chatdome.agent.allow_generated_commands`)
-- **What it does**: Removes the strict limitation of "only executing pre-installed official commands". When enabled, the AI can generate new shell queries for complex or vague inspection requests.
-- **Security Guarantee**: Dynamic commands are reviewed before execution. With unrestricted mode disabled, they also pass through the read-only allowlist/blocklist validator.
+#### 2. Command Approval Policy (`chatdome.agent.command_approval_mode`)
+- `execute_without_approval`: execute every non-empty AI-generated command immediately.
+- `require_approval_for_risky_commands`: auto-run only commands that local rules clearly identify as low-risk; require approval for risky or indeterminate commands.
+- `require_approval_for_all_commands`: require approval for every non-empty AI-generated command.
 
-#### 3. God Mode (`chatdome.agent.allow_unrestricted_commands`)
-- **What it does**: **[DANGER! GOD PRIVILEGES]** Enabling this bypasses the deterministic command validator, removing the read-only allowlist/blocklist as a hard boundary.
-- **Security Guarantee**: ToolDispatcher still performs a pre-execution review. Static-safe commands with no write/delete signal may run automatically; risky, mutating, or deleting commands enter the Telegram approval flow and may require `/confirm`. This remains a high-risk mode and should be used cautiously in production.
+Sentinel command packs are internal scheduled checks and do not use the conversational approval policy.
 
 ### Config File Example
 
@@ -270,8 +266,7 @@ chatdome:
       api_key: "sk-..."                    # stored directly in local config.yaml
 
   agent:
-    allow_generated_commands: true            # true = AI can generate ad-hoc commands
-    allow_unrestricted_commands: true         # true = bypass deterministic command validation (high risk)
+    command_approval_mode: require_approval_for_risky_commands
     session_timeout: 600                      # seconds of inactivity before session expires
     max_rounds_per_turn: 10                   # max tool calls per user message
     command_timeout: 10                       # seconds before a command is killed
@@ -310,11 +305,10 @@ The AI uses **function calling** (tool use) to interact with the host. It can:
 
 | Tool | Description |
 |------|-------------|
-| `run_security_check` | Execute a pre-defined security audit command by ID |
-| `run_shell_command` | Execute shell commands (current defaults allow generated commands and unrestricted mode; risky/mutating/deleting commands enter approval flow) |
+| `run_shell_command` | Execute shell commands according to `command_approval_mode` |
 | `whois_lookup` | Look up IP geolocation and ownership |
 
-### Built-in Security Checks
+### Sentinel Built-in Checks
 
 | Check ID | Description |
 |----------|-------------|
@@ -422,17 +416,17 @@ Approval buttons bind the current internal approval record; users do not need to
 ChatDome executes commands on your server — security is taken seriously:
 
 1. **Telegram Auth** — Only messages from whitelisted Chat IDs are processed. All others are silently dropped.
-2. **Curated Commands First** — Predefined audit command templates are immutable at runtime; disable `allow_generated_commands` and `allow_unrestricted_commands` for a minimum-privilege posture.
-3. **Generated Command Review** — With `allow_generated_commands`, generated commands go through review and confirmation flow.
-4. **Unrestricted Mode Warning** — `allow_unrestricted_commands` bypasses command validation; high-risk commands still go through explicit human confirmation and `/confirm` for critical actions.
-5. **Execution Sandbox** — Command execution still has timeout and output-bound controls to reduce blast radius.
+2. **Explicit Approval Policy** — `command_approval_mode` is required and controls only AI-generated `run_shell_command` calls.
+3. **Fail-Closed Risk Review** — The default mode requires approval when deterministic rules cannot establish low risk.
+4. **Sentinel Isolation** — Scheduled Sentinel checks use internal command packs and never wait on conversational approval.
+5. **Execution Sandbox** — Command execution has timeout and output-bound controls to reduce blast radius.
 
 > ⚠️ **Recommendation**: Run ChatDome under a dedicated low-privilege user account that has read access to log files but no sudo privileges.
 
 ### Security Enhancements (2026-04)
 
 - Risk review now outputs structured fields: `safety_status`, `risk_level`, `mutation_detected`, `deletion_detected`.
-- Even in unrestricted mode, only clearly low-risk read-only commands auto-execute; mutation/deletion risk still requires human confirmation.
+- The default approval mode auto-executes only clearly low-risk commands; mutation, deletion, parser failure, and unknown commands require human confirmation.
 - Command review, approval, rejection, and execution are recorded in tamper-evident hash-chained audit logs.
 - Audit logs are automatically rotated by day and retained for 30 days.
 - Use `/audit [N]` in Telegram to inspect recent audit events for the current chat.

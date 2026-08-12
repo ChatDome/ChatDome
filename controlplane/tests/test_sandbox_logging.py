@@ -64,7 +64,7 @@ class SandboxLoggingTests(unittest.TestCase):
                         return_code=0,
                         command="echo archive-test",
                     ),
-                    execution_mode="unrestricted",
+                    execution_mode="agent",
                     duration_ms=12,
                 )
 
@@ -104,7 +104,7 @@ class SandboxLoggingTests(unittest.TestCase):
                         return_code=0,
                         command="echo token-value",
                     ),
-                    execution_mode="unrestricted",
+                    execution_mode="agent",
                     duration_ms=12,
                 )
 
@@ -139,7 +139,7 @@ class SandboxLoggingTests(unittest.TestCase):
                         return_code=0,
                         command="whoami",
                     ),
-                    execution_mode="unrestricted",
+                    execution_mode="agent",
                     duration_ms=10,
                 )
                 with log_origin("sentinel"):

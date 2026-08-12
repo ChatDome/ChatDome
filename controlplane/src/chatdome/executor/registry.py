@@ -1,5 +1,5 @@
 """
-Pre-defined security audit command registry.
+Pre-defined Sentinel command registry.
 
 Sentinel command packs are Linux-first for now:
 templates are selected from Linux command packs and non-Linux
