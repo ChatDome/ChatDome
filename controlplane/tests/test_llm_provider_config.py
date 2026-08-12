@@ -20,6 +20,8 @@ chatdome:
       provider: codex
       api_mode: codex_responses
       model: gpt-5.5
+  agent:
+    command_approval_mode: require_approval_for_risky_commands
 """,
                 encoding="utf-8",
             )
@@ -47,7 +49,7 @@ chatdome:
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(ValueError, "Legacy chatdome.ai"):
+            with self.assertRaisesRegex(ValueError, "chatdome.ai .*未知字段"):
                 load_config(config_path)
 
     def test_openai_profile_allows_direct_api_key(self):
@@ -65,6 +67,8 @@ chatdome:
       api_mode: openai_api
       model: gpt-4o
       api_key: sk-test
+  agent:
+    command_approval_mode: require_approval_for_risky_commands
 """,
                 encoding="utf-8",
             )
@@ -88,6 +92,8 @@ chatdome:
       api_mode: openai_api
       model: gpt-4o
       api_key: env:CHATDOME_OPENAI_API_KEY
+  agent:
+    command_approval_mode: require_approval_for_risky_commands
 """,
                 encoding="utf-8",
             )
@@ -111,6 +117,8 @@ chatdome:
       model: gpt-5.5
       codex_client_id: yaml-client
       codex_token_file: /yaml/auth.json
+  agent:
+    command_approval_mode: require_approval_for_risky_commands
 """,
                 encoding="utf-8",
             )
@@ -137,11 +145,13 @@ chatdome:
       provider: codex
       api_mode: codex_responses
       model: gpt-5.5
+  agent:
+    command_approval_mode: require_approval_for_risky_commands
 """,
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(ValueError, "does not exist"):
+            with self.assertRaisesRegex(ValueError, "未在 chatdome.ai_profiles 中定义"):
                 load_config(config_path)
 
     def test_command_output_archive_config_is_opt_in(self):
@@ -159,6 +169,7 @@ chatdome:
       api_mode: codex_responses
       model: gpt-5.5
   agent:
+    command_approval_mode: require_approval_for_risky_commands
     persist_command_outputs: true
     command_output_retention_days: 3
     command_output_max_chars: 1234
@@ -186,6 +197,8 @@ chatdome:
       provider: codex
       api_mode: codex_responses
       model: gpt-5.5
+  agent:
+    command_approval_mode: require_approval_for_risky_commands
 """,
                 encoding="utf-8",
             )

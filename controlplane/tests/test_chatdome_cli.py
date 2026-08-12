@@ -89,7 +89,7 @@ class ChatDomeCLITests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             SystemExit,
-            "Configuration error: chatdome.active_ai_profile is required",
+            "配置检查失败，共 4 项",
         ):
             self.cli.validate_config(SimpleNamespace())
 

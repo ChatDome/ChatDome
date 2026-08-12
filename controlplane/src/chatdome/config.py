@@ -56,6 +56,7 @@ class AIConfig:
 @dataclass
 class AgentConfig:
     """Agent behavior settings."""
+    command_approval_mode: str = ""
     allow_generated_commands: bool = True
     allow_unrestricted_commands: bool = True
     session_timeout: int = 600
@@ -299,17 +300,10 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
         config_path = os.environ.get("CHATDOME_CONFIG", "config.yaml")
 
     path = Path(config_path)
-    raw_document: dict[str, Any] = {}
+    logger.info("Loading configuration from %s", path.resolve())
+    from chatdome.config_validation import load_and_validate_config_document
 
-    if path.is_file():
-        logger.info("Loading configuration from %s", path.resolve())
-        with open(path, "r", encoding="utf-8") as fh:
-            raw_document = yaml.safe_load(fh) or {}
-    else:
-        logger.info(
-            "No config file found at %s, using defaults",
-            path.resolve(),
-        )
+    raw_document = load_and_validate_config_document(path)
 
     config = parse_config_document(raw_document)
     for warning in validate_runtime_config(config):
