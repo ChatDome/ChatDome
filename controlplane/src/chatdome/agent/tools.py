@@ -45,6 +45,16 @@ logger = logging.getLogger(__name__)
 class _InvalidCommandDetailResponse(ValueError):
     """The reviewer returned JSON that cannot provide command details."""
 
+    def __init__(self, reason_code: str, **metadata: Any):
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+        self.metadata = metadata
+
+    def with_metadata(self, **metadata: Any) -> "_InvalidCommandDetailResponse":
+        combined = dict(metadata)
+        combined.update(self.metadata)
+        return _InvalidCommandDetailResponse(self.reason_code, **combined)
+
 
 _COMMAND_DETAIL_CANCELLED_TASKS: set[asyncio.Task[Any]] = set()
 
@@ -794,12 +804,12 @@ class ToolDispatcher:
                         False,
                         "",
                     )
-                except _InvalidCommandDetailResponse:
-                    logger.warning(
-                        "Command detail response invalid; retrying compact format: "
-                        "start=%d count=%d",
-                        offset + 1,
-                        len(batch_segments),
+                except _InvalidCommandDetailResponse as exc:
+                    self._log_invalid_command_detail_response(
+                        exc,
+                        offset=offset,
+                        command_count=len(batch_segments),
+                        retrying=True,
                     )
                 except asyncio.CancelledError:
                     raise
@@ -828,11 +838,12 @@ class ToolDispatcher:
                         True,
                         "compact_retry",
                     )
-                except _InvalidCommandDetailResponse:
-                    logger.warning(
-                        "Compact command detail response invalid: start=%d count=%d",
-                        offset + 1,
-                        len(batch_segments),
+                except _InvalidCommandDetailResponse as exc:
+                    self._log_invalid_command_detail_response(
+                        exc,
+                        offset=offset,
+                        command_count=len(batch_segments),
+                        retrying=False,
                     )
                     return offset, None, False, "invalid_response"
                 except asyncio.CancelledError:
@@ -962,6 +973,7 @@ class ToolDispatcher:
             "messages": messages,
             "response_format": {"type": "json_object"},
         }
+        requested_max_tokens = 0
         try:
             params = inspect.signature(reviewer_llm.chat_completion).parameters
         except (TypeError, ValueError):
@@ -978,7 +990,8 @@ class ToolDispatcher:
                 getattr(reviewer_llm, "max_tokens", requested_tokens)
                 or requested_tokens
             )
-            kwargs["max_tokens"] = min(requested_tokens, max(1, configured_tokens))
+            requested_max_tokens = min(requested_tokens, max(1, configured_tokens))
+            kwargs["max_tokens"] = requested_max_tokens
 
         response = await reviewer_llm.chat_completion(**kwargs)
         if chat_id > 0:
@@ -1003,16 +1016,107 @@ class ToolDispatcher:
                     exc_info=True,
                 )
 
+        response_content = response.content or ""
+        request_metadata = {
+            "mode": "compact" if compact else "standard",
+            "model": self._command_detail_log_value(
+                getattr(reviewer_llm, "model", "unknown")
+            ),
+            "requested_max_tokens": requested_max_tokens,
+            "response_chars": len(response_content),
+            "completion_tokens": self._command_detail_metric(
+                getattr(response, "completion_tokens", 0)
+            ),
+            "finish_reason": self._command_detail_log_value(
+                getattr(response, "finish_reason", "")
+            ),
+        }
         try:
-            parsed = LLMClient.parse_json_object(response.content or "")
-            self._validate_command_detail_payload(parsed, len(segments))
+            parsed = LLMClient.parse_json_object(response_content)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            parse_metadata: dict[str, Any] = {}
+            if isinstance(exc, json.JSONDecodeError):
+                parse_metadata.update(
+                    {
+                        "json_line": exc.lineno,
+                        "json_column": exc.colno,
+                        "json_position": exc.pos,
+                    }
+                )
             raise _InvalidCommandDetailResponse(
-                "invalid command detail response"
+                "json_parse_error",
+                **request_metadata,
+                **parse_metadata,
             ) from exc
+
+        try:
+            self._validate_command_detail_payload(parsed, len(segments))
+        except asyncio.CancelledError:
+            raise
+        except _InvalidCommandDetailResponse as exc:
+            raise exc.with_metadata(**request_metadata) from exc
         return parsed
+
+    @staticmethod
+    def _command_detail_metric(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _command_detail_log_value(value: Any) -> str:
+        text = " ".join(str(value or "").split())
+        return text[:80] or "-"
+
+    @classmethod
+    def _log_invalid_command_detail_response(
+        cls,
+        exc: _InvalidCommandDetailResponse,
+        *,
+        offset: int,
+        command_count: int,
+        retrying: bool,
+    ) -> None:
+        metadata = exc.metadata
+        fields: list[tuple[str, Any]] = [
+            ("mode", metadata.get("mode", "-")),
+            ("start", offset + 1),
+            ("count", command_count),
+            ("reason", exc.reason_code),
+            ("model", metadata.get("model", "-")),
+            ("requested_max_tokens", metadata.get("requested_max_tokens", 0)),
+            ("response_chars", metadata.get("response_chars", 0)),
+            ("completion_tokens", metadata.get("completion_tokens", 0)),
+            ("finish_reason", metadata.get("finish_reason", "-")),
+        ]
+        for key in (
+            "missing_count",
+            "expected",
+            "actual",
+            "index",
+            "json_line",
+            "json_column",
+            "json_position",
+        ):
+            if key in metadata:
+                fields.append((key, metadata[key]))
+        diagnostics = " ".join(
+            f"{key}={cls._command_detail_log_value(value)}"
+            for key, value in fields
+        )
+        if retrying:
+            logger.warning(
+                "Command detail response invalid; retrying compact format: %s",
+                diagnostics,
+            )
+        else:
+            logger.warning(
+                "Compact command detail response invalid: %s",
+                diagnostics,
+            )
 
     @staticmethod
     def _validate_command_detail_payload(
@@ -1028,63 +1132,78 @@ class ToolDispatcher:
             "command_breakdown",
         }
         if command_count < 1 or not isinstance(payload, dict):
-            raise _InvalidCommandDetailResponse("invalid detail payload")
-        if required_fields - payload.keys():
-            raise _InvalidCommandDetailResponse("missing detail fields")
+            raise _InvalidCommandDetailResponse("invalid_detail_payload")
+        missing_fields = required_fields - payload.keys()
+        if missing_fields:
+            raise _InvalidCommandDetailResponse(
+                "missing_detail_fields",
+                missing_count=len(missing_fields),
+            )
 
         safety_status = str(payload.get("safety_status", "")).strip().upper()
         if safety_status not in {"SAFE", "UNSAFE", "CRITICAL"}:
-            raise _InvalidCommandDetailResponse("invalid safety status")
+            raise _InvalidCommandDetailResponse("invalid_safety_status")
         risk_level = str(payload.get("risk_level", "")).strip().upper()
         if risk_level not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
-            raise _InvalidCommandDetailResponse("invalid risk level")
+            raise _InvalidCommandDetailResponse("invalid_risk_level")
 
         mutation_detected = payload.get("mutation_detected")
         deletion_detected = payload.get("deletion_detected")
         if not isinstance(mutation_detected, bool):
-            raise _InvalidCommandDetailResponse("invalid mutation flag")
+            raise _InvalidCommandDetailResponse("invalid_mutation_flag")
         if not isinstance(deletion_detected, bool):
-            raise _InvalidCommandDetailResponse("invalid deletion flag")
+            raise _InvalidCommandDetailResponse("invalid_deletion_flag")
         if mutation_detected and safety_status == "SAFE":
-            raise _InvalidCommandDetailResponse("inconsistent mutation status")
+            raise _InvalidCommandDetailResponse("inconsistent_mutation_status")
         if deletion_detected and not mutation_detected:
-            raise _InvalidCommandDetailResponse("inconsistent deletion status")
+            raise _InvalidCommandDetailResponse("inconsistent_deletion_status")
         if deletion_detected and risk_level in {"LOW", "MEDIUM"}:
-            raise _InvalidCommandDetailResponse("inconsistent deletion risk")
+            raise _InvalidCommandDetailResponse("inconsistent_deletion_risk")
         if not str(payload.get("impact_analysis") or "").strip():
-            raise _InvalidCommandDetailResponse("missing impact analysis")
+            raise _InvalidCommandDetailResponse("missing_impact_analysis")
 
         breakdown = payload.get("command_breakdown")
         if not isinstance(breakdown, dict):
-            raise _InvalidCommandDetailResponse("missing command breakdown")
+            raise _InvalidCommandDetailResponse("missing_command_breakdown")
 
         raw_commands = breakdown.get("commands")
         if command_count == 1 and not isinstance(raw_commands, list):
             if not str(breakdown.get("base_cmd") or "").strip():
-                raise _InvalidCommandDetailResponse("missing base command")
+                raise _InvalidCommandDetailResponse("missing_base_command", index=1)
             if not str(breakdown.get("summary") or "").strip():
-                raise _InvalidCommandDetailResponse("missing command summary")
+                raise _InvalidCommandDetailResponse("missing_command_summary", index=1)
             return
         if not isinstance(raw_commands, list):
-            raise _InvalidCommandDetailResponse("missing command groups")
+            raise _InvalidCommandDetailResponse("missing_command_groups")
         if len(raw_commands) != command_count:
-            raise _InvalidCommandDetailResponse("incomplete command groups")
+            raise _InvalidCommandDetailResponse(
+                "incomplete_command_groups",
+                expected=command_count,
+                actual=len(raw_commands),
+            )
         if not str(breakdown.get("summary") or "").strip():
-            raise _InvalidCommandDetailResponse("missing breakdown summary")
+            raise _InvalidCommandDetailResponse("missing_breakdown_summary")
 
         for position, item in enumerate(raw_commands, start=1):
             if not isinstance(item, dict):
-                raise _InvalidCommandDetailResponse("invalid command group")
+                raise _InvalidCommandDetailResponse("invalid_command_group", index=position)
             try:
                 index = int(item["index"])
             except (KeyError, TypeError, ValueError) as exc:
-                raise _InvalidCommandDetailResponse("invalid command index") from exc
+                raise _InvalidCommandDetailResponse(
+                    "invalid_command_index",
+                    index=position,
+                ) from exc
             if index != position:
-                raise _InvalidCommandDetailResponse("out-of-order command groups")
+                raise _InvalidCommandDetailResponse(
+                    "out_of_order_command_groups",
+                    expected=position,
+                    actual=index,
+                )
             if not str(item.get("base_cmd") or "").strip():
-                raise _InvalidCommandDetailResponse("missing base command")
+                raise _InvalidCommandDetailResponse("missing_base_command", index=position)
             if not str(item.get("summary") or "").strip():
-                raise _InvalidCommandDetailResponse("missing command summary")
+                raise _InvalidCommandDetailResponse("missing_command_summary", index=position)
 
     @classmethod
     def _merge_command_detail_batches(

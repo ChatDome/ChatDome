@@ -47,6 +47,7 @@ class LLMResponse:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    finish_reason: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -434,4 +435,5 @@ class LLMClient:
             prompt_tokens=usage.prompt_tokens if usage else 0,
             completion_tokens=usage.completion_tokens if usage else 0,
             total_tokens=usage.total_tokens if usage else 0,
+            finish_reason=str(getattr(choice, "finish_reason", "") or ""),
         )

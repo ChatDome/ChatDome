@@ -51,6 +51,25 @@ class SequenceLLM:
         return LLMResponse(content="done")
 
 
+class DiagnosticSequenceLLM:
+    model = "diagnostic-model"
+    max_tokens = 2000
+
+    def __init__(self, *responses: LLMResponse):
+        self.responses = list(responses)
+
+    async def chat_completion(
+        self,
+        messages,
+        tools=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+    ):
+        del messages, tools, response_format, temperature, max_tokens
+        return self.responses.pop(0)
+
+
 class SlowCommandDetailLLM:
     model = "fake-model"
 
@@ -688,6 +707,87 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         self.assertEqual(analysis["detail_errors"], ["invalid_response"])
         self.assertEqual(analysis["analyzed_command_count"], 0)
         self.assertEqual(analysis["command_count"], 1)
+
+    def test_invalid_json_logs_safe_command_detail_diagnostics(self):
+        command = "echo PRIVATE_COMMAND_MARKER"
+        raw_response = '{"private":"PRIVATE_RESPONSE_MARKER"'
+        llm = DiagnosticSequenceLLM(
+            LLMResponse(
+                content=raw_response,
+                completion_tokens=640,
+                finish_reason="length",
+            ),
+            LLMResponse(
+                content=raw_response,
+                completion_tokens=370,
+                finish_reason="length",
+            ),
+        )
+
+        with self.assertLogs("chatdome.agent.tools", level="WARNING") as captured:
+            asyncio.run(
+                ToolDispatcher(FakeSandbox()).analyze_command_for_approval(
+                    command,
+                    "测试诊断日志",
+                    include_llm=True,
+                    llm=llm,
+                )
+            )
+
+        output = "\n".join(captured.output)
+        self.assertEqual(len(captured.records), 2)
+        self.assertIn("mode=standard", output)
+        self.assertIn("mode=compact", output)
+        self.assertIn("reason=json_parse_error", output)
+        self.assertIn("model=diagnostic-model", output)
+        self.assertIn("requested_max_tokens=640", output)
+        self.assertIn("requested_max_tokens=370", output)
+        self.assertIn(f"response_chars={len(raw_response)}", output)
+        self.assertIn("completion_tokens=640", output)
+        self.assertIn("finish_reason=length", output)
+        self.assertIn("json_line=1", output)
+        self.assertNotIn("PRIVATE_RESPONSE_MARKER", output)
+        self.assertNotIn("PRIVATE_COMMAND_MARKER", output)
+
+    def test_missing_fields_log_stable_validation_reason(self):
+        raw_response = '{"safety_status":"SAFE"}'
+        llm = DiagnosticSequenceLLM(
+            LLMResponse(content=raw_response),
+            LLMResponse(content=raw_response),
+        )
+
+        with self.assertLogs("chatdome.agent.tools", level="WARNING") as captured:
+            asyncio.run(
+                ToolDispatcher(FakeSandbox()).analyze_command_for_approval(
+                    "echo ok",
+                    "测试字段诊断",
+                    include_llm=True,
+                    llm=llm,
+                )
+            )
+
+        output = "\n".join(captured.output)
+        self.assertIn("reason=missing_detail_fields", output)
+        self.assertIn("missing_count=5", output)
+
+    def test_incomplete_groups_log_expected_and_actual_counts(self):
+        response = _command_detail_response(["echo a"])
+        llm = DiagnosticSequenceLLM(response, response)
+
+        with self.assertLogs("chatdome.agent.tools", level="WARNING") as captured:
+            asyncio.run(
+                ToolDispatcher(FakeSandbox()).analyze_command_for_approval(
+                    "echo a && echo b",
+                    "测试分组诊断",
+                    include_llm=True,
+                    llm=llm,
+                )
+            )
+
+        output = "\n".join(captured.output)
+        self.assertIn("reason=incomplete_command_groups", output)
+        self.assertIn("expected=2", output)
+        self.assertIn("actual=1", output)
 
     def test_empty_command_groups_retry_then_fail_instead_of_showing_details(self):
         invalid_response = LLMResponse(
