@@ -751,7 +751,7 @@ def get_user_command_audit_events(chat_id: int, limit: int) -> list[dict[str, An
         limit=max(100, limit * 10),
         audit_source="user",
     )
-    direct_command_events = {"security_check_executed", "security_check_invalid"}
+    direct_command_events = {"sentinel_check_executed", "sentinel_check_invalid"}
     events = []
     for event in raw_events:
         event_type = str(event.get("event_type", ""))

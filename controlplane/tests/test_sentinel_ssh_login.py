@@ -23,7 +23,7 @@ class FakeSandbox:
     def __init__(self, outputs: list[str]):
         self.outputs = list(outputs)
 
-    async def execute_security_check(self, check_id: str, args=None):
+    async def execute_sentinel_check(self, check_id: str, args=None):
         del check_id, args
         return FakeCommandResult(stdout=self.outputs.pop(0))
 
@@ -44,7 +44,7 @@ class RoutingFakeSandbox:
         }
         self.calls: list[tuple[str, Optional[dict]]] = []
 
-    async def execute_security_check(self, check_id: str, args=None):
+    async def execute_sentinel_check(self, check_id: str, args=None):
         self.calls.append((check_id, args))
         values = self.outputs.get(check_id, [""])
         if len(values) > 1:

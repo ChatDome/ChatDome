@@ -245,9 +245,9 @@ class SentinelScheduler:
                 results.append(f"❌ {check.name}: {exc}")
         return "\n".join(results) if results else "No checks configured"
 
-    async def _run_sentinel_security_check(self, check_id: str, args: dict[str, Any] | None = None):
+    async def _run_sentinel_check(self, check_id: str, args: dict[str, Any] | None = None):
         with log_origin("sentinel"):
-            return await self._sandbox.execute_security_check(check_id, args=args)
+            return await self._sandbox.execute_sentinel_check(check_id, args=args)
 
     # -- Alert push state --------------------------------------------------
 
@@ -417,7 +417,7 @@ class SentinelScheduler:
             logger.info("auditd_status command not available; SSH session command tracking disabled")
             return
 
-        result = await self._run_sentinel_security_check("auditd_status", args={})
+        result = await self._run_sentinel_check("auditd_status", args={})
         if result.timed_out or result.return_code not in (0, None):
             self._auditd_status_output = (result.stderr or result.stdout or "").strip()
             self._auditd_available = False
@@ -555,7 +555,7 @@ class SentinelScheduler:
         if not self._pack_command_available("ssh_audit_session_for_pid"):
             return ""
 
-        result = await self._run_sentinel_security_check(
+        result = await self._run_sentinel_check(
             "ssh_audit_session_for_pid",
             args={"sshd_pid": sshd_pid},
         )
@@ -594,7 +594,7 @@ class SentinelScheduler:
         if not self._pack_command_available("ssh_session_commands"):
             return [], "command_unavailable"
 
-        result = await self._run_sentinel_security_check(
+        result = await self._run_sentinel_check(
             "ssh_session_commands",
             args={"session_id": session_id, "limit": limit},
         )
@@ -685,7 +685,7 @@ class SentinelScheduler:
         records: dict[str, SSHSessionRecord] = dict(self._ssh_session_tracker)
 
         if self._pack_command_available("ssh_active_sessions"):
-            result = await self._run_sentinel_security_check("ssh_active_sessions", args={"limit": 50})
+            result = await self._run_sentinel_check("ssh_active_sessions", args={"limit": 50})
             if not result.timed_out and result.return_code in (0, None):
                 output_lines = (result.stdout or "").splitlines()
                 tty_sources: dict[str, str] = {}
@@ -1202,7 +1202,7 @@ class SentinelScheduler:
         if check.check_id is None:
             return f"⏭️ {check.name}: AI mode (Phase 2)"
 
-        result = await self._run_sentinel_security_check(
+        result = await self._run_sentinel_check(
             check_id=check.check_id,
             args=check.args or None,
         )

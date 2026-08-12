@@ -505,7 +505,7 @@ class ToolDispatcher:
             chat_id=chat_id if chat_id else None,
             limit=max(100, limit * 20),
         )
-        executed_event_types = {"command_executed", "security_check_executed"}
+        executed_event_types = {"command_executed"}
 
         events: list[dict[str, Any]] = []
         for event in raw_events:

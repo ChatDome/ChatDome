@@ -1,7 +1,7 @@
 """
 Pre-defined security audit command registry.
 
-run_security_check is Linux-first for now:
+Sentinel command packs are Linux-first for now:
 templates are selected from Linux command packs and non-Linux
 hosts will receive a clear "unsupported" error.
 """
@@ -53,7 +53,7 @@ def _runtime_platform_candidates() -> list[str]:
 
     Linux-first policy:
       - Linux: return distro-specific keys first, then "linux"
-      - Non-Linux: return empty list (run_security_check currently Linux-only)
+      - Non-Linux: return empty list (Sentinel command packs are currently Linux-only)
     """
     os_family = platform.system().lower()
 
@@ -488,7 +488,7 @@ def _select_template(entry: dict[str, Any], check_id: str) -> str:
     if not platform_candidates:
         family = platform.system().lower()
         raise ValueError(
-            "run_security_check currently only supports Linux command packs. "
+            "Sentinel currently only supports Linux command packs. "
             f"Current platform: '{family}'."
         )
 

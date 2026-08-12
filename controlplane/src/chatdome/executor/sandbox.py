@@ -402,7 +402,7 @@ class CommandSandbox:
             except OSError as e:
                 logger.warning("Failed to remove old command output archive %s: %s", child, e)
 
-    async def execute_security_check(
+    async def execute_sentinel_check(
         self,
         check_id: str,
         args: dict[str, Any] | None = None,
@@ -432,11 +432,11 @@ class CommandSandbox:
             rendered = self._pack_loader.render_command(check_id, args)
         except ValueError as e:
             self._record_execution_audit(
-                event_type="security_check_invalid",
+                event_type="sentinel_check_invalid",
                 chat_id=chat_id,
                 tool_call_id=tool_call_id,
                 command=f"[check:{check_id}]",
-                reason="security_check_render_failed",
+                reason="sentinel_check_render_failed",
                 block_reason=str(e),
             )
             return CommandResult(
@@ -451,17 +451,17 @@ class CommandSandbox:
         result = await self._execute(
             rendered.command,
             timeout=rendered.timeout,
-            log_label=f"security_check:{rendered.check_id}",
+            log_label=f"sentinel_check:{rendered.check_id}",
         )
         duration_ms = int((time.monotonic() - started) * 1000)
         self._record_execution_audit(
-            event_type="security_check_executed",
+            event_type="sentinel_check_executed",
             chat_id=chat_id,
             tool_call_id=tool_call_id,
             command=rendered.command,
-            reason=f"security_check:{rendered.check_id}",
+            reason=f"sentinel_check:{rendered.check_id}",
             result=result,
-            execution_mode="pack",
+            execution_mode="sentinel_pack",
             duration_ms=duration_ms,
             extra_fields={
                 "check_id": rendered.check_id,

@@ -1,9 +1,8 @@
 """
 Pack Loader — YAML-based command library with platform auto-detection.
 
-Replaces the hardcoded ``executor/registry.py``.  Provides the same
-``render_command()`` / ``list_checks()`` public API so that the agent
-and sandbox layers continue to work without changes.
+Replaces the hardcoded ``executor/registry.py`` and renders commands for
+Sentinel checks.
 """
 
 from __future__ import annotations
@@ -92,7 +91,7 @@ class ResolvedCommand:
 
 @dataclass
 class RenderedCommand:
-    """A command ready for execution — signature-compatible with old registry."""
+    """A rendered Sentinel command ready for execution."""
 
     check_id: str
     name: str
@@ -108,7 +107,7 @@ class PackLoader:
     """
     Load YAML command packs, resolve platform templates, and render commands.
 
-    Compatible public API:
+    Public API:
         - ``render_command(check_id, args)`` → ``RenderedCommand``
         - ``list_checks()`` → ``list[dict]``
     """
@@ -268,7 +267,7 @@ class PackLoader:
             return True
         return all(shutil.which(cmd) is not None for cmd in requires)
 
-    # -- Public API (registry-compatible) ----------------------------------
+    # -- Public API ---------------------------------------------------------
 
     def render_command(
         self,
@@ -279,7 +278,6 @@ class PackLoader:
         Render a command template with validated parameters.
 
         Raises ``ValueError`` if *check_id* is unknown or parameters invalid.
-        Signature is compatible with the old ``registry.render_command()``.
         """
         resolved = self._commands.get(check_id)
         if resolved is None:

@@ -21,7 +21,7 @@ class FakeCommandResult:
 
 
 class FakeSandbox:
-    async def execute_security_check(self, check_id: str, args=None):
+    async def execute_sentinel_check(self, check_id: str, args=None):
         del check_id, args
         return FakeCommandResult()
 

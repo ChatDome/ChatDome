@@ -144,18 +144,18 @@ class SandboxLoggingTests(unittest.TestCase):
                 )
                 with log_origin("sentinel"):
                     sandbox._record_execution_audit(
-                        event_type="security_check_executed",
+                        event_type="sentinel_check_executed",
                         chat_id=0,
                         tool_call_id="",
                         command="uptime",
-                        reason="security_check:uptime",
+                        reason="sentinel_check:uptime",
                         result=CommandResult(
                             stdout="up\n",
                             stderr="",
                             return_code=0,
                             command="uptime",
                         ),
-                        execution_mode="pack",
+                        execution_mode="sentinel_pack",
                         duration_ms=12,
                     )
 
