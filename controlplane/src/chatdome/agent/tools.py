@@ -3,7 +3,6 @@ Tool dispatch — routes LLM tool_calls to the appropriate executor.
 
 Handles:
   - read_chatdome_manual → curated internal operating manual
-  - run_security_check → CommandSandbox.execute_security_check
   - run_shell_command  → CommandSandbox.execute_shell_command
   - whois_lookup       → HTTP call to ip-api.com
 """
@@ -308,8 +307,6 @@ class ToolDispatcher:
                 return self._handle_read_chatdome_manual(args)
             elif tool_name == "search_session_history":
                 return self._handle_search_session_history(args, chat_id)
-            elif tool_name == "run_security_check":
-                return await self._handle_security_check(args, tool_call_id, chat_id)
             elif tool_name == "run_shell_command":
                 return await self._handle_shell_command(args, tool_call_id, chat_id, llm=llm)
             elif tool_name == "get_command_audit_events":
@@ -491,24 +488,6 @@ class ToolDispatcher:
         for e in engrams:
             lines.append(f"[{e.id}] [{e.category}] {e.fact}")
         return "\n".join(lines)
-
-    async def _handle_security_check(
-        self,
-        args: dict[str, Any],
-        tool_call_id: str = "",
-        chat_id: int = 0,
-    ) -> str:
-        """Execute a pre-defined security check."""
-        check_id = args.get("check_id", "")
-        check_args = args.get("args")
-
-        result = await self.sandbox.execute_security_check(
-            check_id,
-            check_args,
-            chat_id=chat_id,
-            tool_call_id=tool_call_id,
-        )
-        return self._format_command_result(result)
 
     def _handle_command_audit_events(self, args: dict[str, Any], chat_id: int = 0) -> str:
         """Return recent ChatDome command audit events without running host commands."""

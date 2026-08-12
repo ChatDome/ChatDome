@@ -8,7 +8,7 @@
 
 ### 步骤 1：确认 auditd 就绪
 
-调用 `run_security_check`，check_id 为 `auditd_status`。
+调用 `run_shell_command` 检查 `auditctl` 是否可用、auditd 服务是否运行，以及 `auditctl -l` 是否包含 execve 规则。
 
 确认以下两点：
 - auditd 服务正在运行
@@ -20,18 +20,17 @@
 
 根据场景选择：
 
-- **查看当前活跃会话**：调用 `run_security_check`，check_id 为 `ssh_active_sessions`
+- **查看当前活跃会话**：使用 `run_shell_command` 查询 `w -hi`、sshd 会话进程以及当天的 `USER_LOGIN` 审计事件
   - 返回三段信息：Active SSH Sessions（w 命令输出）、sshd Session PIDs（`ps` 输出，包含 `sshd_pid`）、Audit Session Mapping
   - 关键字段：`sshd_pid`（后续步骤需要）
 
-- **查看历史登录记录**：调用 `run_security_check`，check_id 为 `ssh_success_login`
+- **查看历史登录记录**：使用 `run_shell_command` 查询 SSH 服务日志或 `last -i -F`
   - 返回格式：`月 日 时间 用户 IP 端口 认证方式 sshd_pid=N`
   - 关键字段：`sshd_pid=N`（从输出末尾提取）
 
 ### 步骤 3：映射 Audit Session ID
 
-调用 `run_security_check`，check_id 为 `ssh_audit_session_for_pid`，参数：
-- `args.sshd_pid`（字符串）：步骤 2 获取到的 sshd 进程 PID
+使用 `run_shell_command` 查询步骤 2 获得的 sshd 进程及其子进程对应的 `/proc/<pid>/sessionid`，必要时使用 `ausearch -p <pid> -i` 查找 `ses=N`。
 
 返回值解读：
 - `ses=N`：成功映射到 audit session ID，N 即为后续查询需要的 session_id
@@ -40,9 +39,7 @@
 
 ### 步骤 4：查询会话内的命令
 
-调用 `run_security_check`，check_id 为 `ssh_session_commands`，参数：
-- `args.session_id`（字符串）：步骤 3 获取到的 session ID 数字
-- `args.limit`（整数，可选）：返回条数，默认 50，最大 200
+使用 `run_shell_command` 执行 `ausearch -sc execve --session <session_id> -i`，并按用户要求限制返回条数。
 
 返回值：每行一条命令文本（已从 auditd execve 记录中提取）。
 

@@ -4,77 +4,18 @@ System prompt and tool definitions for the AI Agent.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from chatdome.agent.manual import build_manual_index_prompt, get_manual_section_ids
-
-if TYPE_CHECKING:
-    from chatdome.sentinel.pack_loader import PackLoader
 
 # ---------------------------------------------------------------------------
 # System Prompt
 # ---------------------------------------------------------------------------
 
-# Fallback for when PackLoader is not available
-_FALLBACK_CHECKS_TEXT = """\
-可用的预定义命令 (check_id)：
-- ssh_bruteforce: SSH 暴力破解检测
-- ssh_success_login: SSH 成功登录记录
-- failed_sudo: sudo 失败记录
-- active_connections: 当前活跃连接
-- open_ports: 监听端口
-- firewall_rules: 防火墙规则
-- disk_usage: 磁盘使用
-- memory_usage: 内存使用
-- system_load: 系统负载
-- last_reboot: 重启历史
-- suspicious_processes: 可疑进程检测
-- recent_cron_jobs: 最近 cron 执行
-- large_files: 大文件检测
-- recent_syslog: 最近系统日志
-- kernel_errors: 内核错误
-"""
-
-
-def _build_available_checks_text(pack_loader: PackLoader | None = None) -> str:
-    """Build the available checks text, dynamically if PackLoader is provided."""
-    if pack_loader is None:
-        return _FALLBACK_CHECKS_TEXT
-    checks = pack_loader.list_checks()
-    if not checks:
-        return _FALLBACK_CHECKS_TEXT
-    lines = ["可用的预定义命令 (check_id)："]
-    for c in checks:
-        lines.append(f"- {c['check_id']}: {c['name']}")
-    return "\n".join(lines) + "\n"
-
-STRICT_COMMAND_POLICY = """\
+COMMAND_POLICY = """\
 你的能力：
-1. 执行预定义的安全审计命令（run_security_check）
-2. 在必要时执行只读的 shell 命令（run_shell_command）
-3. 查询 IP 归属信息（whois_lookup）
+1. 执行 shell 命令（run_shell_command），包括诊断、运维、修复、安装、重启、删除、封禁和配置修改
+2. 查询 IP 归属信息（whois_lookup）
 
 工作原则：
-- 先使用预定义命令，只在预定义命令无法满足时才使用 run_shell_command
-- 绝对不执行写入、删除、修改系统的命令
-- 分析时给出具体的数据和建议，不要空泛
-- 如果发现安全威胁，明确告知严重程度和建议措施
-- 回复使用中文，简洁扼要，适合在手机上阅读
-- 如果缺少环境证据，可执行必要的只读命令获取上下文；如果缺少用户意图、对象或授权，先追问确认
-- 【重要】必须使用平台提供的原生 tool calls 发起命令调用，绝对禁止在对话正文中输出包含命令名或参数的 JSON 代码块来假装执行！
-- 【重要】意图验证与质疑：当用户提出的需求过于模糊、存在明显逻辑错误或潜在风险时，绝对禁止盲目服从！你必须“据理力争”，通过多轮提问、指出错误等方式，强制确认用户的真实意图。只有在完全明确真实目的后，才可执行相应操作。
-"""
-
-UNRESTRICTED_COMMAND_POLICY = """\
-你的能力：
-1. 执行预定义的安全审计命令（run_security_check）
-2. 执行 shell 命令（run_shell_command），包括用户明确要求的运维、修复、安装、重启、删除、封禁、配置修改等操作
-3. 查询 IP 归属信息（whois_lookup）
-
-当前实例已启用 unrestricted command 模式。你不再受“只能执行只读命令”的提示词限制；当用户的真实意图明确、任务确实需要时，可以生成会修改系统状态的命令。
-
-工作原则：
-- 优先用预定义命令和只读命令收集证据；当用户明确要求执行运维动作时，不要因为“只读限制”而拒绝生成相应命令
 - 对写入、删除、重启、提权、安装、卸载、封禁、修改配置等命令，必须在 reason 中清楚说明目标、影响范围和主要风险
 - 对不可逆、高风险或意图模糊的操作，先追问确认；用户意图明确后再生成命令
 - 不要谎称已经执行命令；动态命令会由 ChatDome 运行层按风险级别执行或要求人工确认
@@ -112,8 +53,6 @@ SYSTEM_PROMPT_TEMPLATE = """\
 {context_management_policy}
 
 {runtime_environment_block}
-
-{available_checks}
 """
 
 
@@ -134,26 +73,17 @@ def _build_runtime_environment_block(runtime_environment_context: str = "") -> s
 
 
 def build_system_prompt(
-    allow_unrestricted_commands: bool = False,
     runtime_environment_context: str = "",
-    pack_loader: PackLoader | None = None,
 ) -> str:
-    """Build the system prompt for the configured command mode."""
-    command_policy = (
-        UNRESTRICTED_COMMAND_POLICY
-        if allow_unrestricted_commands
-        else STRICT_COMMAND_POLICY
-    )
+    """Build the system prompt for the runtime environment."""
     runtime_environment_block = _build_runtime_environment_block(
         runtime_environment_context,
     )
-    available_checks = _build_available_checks_text(pack_loader)
     return SYSTEM_PROMPT_TEMPLATE.format(
-        command_policy=command_policy.strip(),
+        command_policy=COMMAND_POLICY.strip(),
         manual_index=build_manual_index_prompt().strip(),
         context_management_policy=CONTEXT_MANAGEMENT_POLICY.strip(),
         runtime_environment_block=runtime_environment_block.strip(),
-        available_checks=available_checks.strip(),
     )
 
 
@@ -293,40 +223,16 @@ MEMORY_MERGE_PROMPT = """\
 # Tool Definitions (OpenAI Function Calling format)
 # ---------------------------------------------------------------------------
 
-def _shell_command_description(allow_unrestricted_commands: bool = False) -> str:
-    """Return a mode-aware tool description for shell command execution."""
-    if allow_unrestricted_commands:
-        return (
-            "在主机上执行 shell 命令。当前实例已启用 unrestricted command 模式，"
-            "可以根据用户明确意图生成读写、修复、安装、重启、删除、封禁、"
-            "配置修改等运维命令。命令会由 ChatDome 运行层按风险级别执行或要求人工确认；"
-            "reason 必须说明目的、影响范围和主要风险。"
-        )
-
+def _shell_command_description() -> str:
+    """Return the shell command tool description."""
     return (
-        "在主机上执行只读 shell 命令。仅当预定义命令无法满足需求时使用。"
-        "禁止执行写入、删除、修改类操作。"
+        "在主机上执行 shell 命令，包括诊断、运维和系统修改。"
+        "命令可能按运行时审批策略要求人工确认；reason 必须说明目的、影响范围和主要风险。"
     )
 
 
-def build_tools(
-    allow_unrestricted_commands: bool = False,
-    pack_loader: PackLoader | None = None,
-    valid_check_ids: list[str] | None = None,
-) -> list[dict]:
-    """Build OpenAI tool definitions for the configured command mode."""
-    # Build dynamic check_id list
-    if pack_loader is not None:
-        checks = pack_loader.list_checks()
-        check_ids = ", ".join(c["check_id"] for c in checks)
-    else:
-        check_ids = (
-            "ssh_bruteforce, ssh_success_login, failed_sudo, "
-            "active_connections, open_ports, firewall_rules, "
-            "disk_usage, memory_usage, system_load, last_reboot, "
-            "suspicious_processes, recent_cron_jobs, large_files, "
-            "recent_syslog, kernel_errors"
-        )
+def build_tools() -> list[dict]:
+    """Build OpenAI tool definitions."""
     manual_section_ids = get_manual_section_ids()
 
     return [
@@ -380,34 +286,8 @@ def build_tools(
         {
             "type": "function",
             "function": {
-                "name": "run_security_check",
-                "description": (
-                    "执行预定义的主机安全审计命令。"
-                    "当前仅实现 Linux 命令包（macOS/Windows 后续支持）。"
-                    f"可用的 check_id 包括：{check_ids}"
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "check_id": {
-                            "type": "string",
-                            "description": "预定义命令的 ID",
-                        },
-                        "args": {
-                            "type": "object",
-                            "description": "命令参数，如 limit, time_range 等",
-                            "additionalProperties": True,
-                        },
-                    },
-                    "required": ["check_id"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
                 "name": "run_shell_command",
-                "description": _shell_command_description(allow_unrestricted_commands),
+                "description": _shell_command_description(),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -485,7 +365,6 @@ def build_tools(
                     "properties": {
                         "check_id": {
                             "type": "string",
-                            "enum": valid_check_ids if valid_check_ids else ["none"],
                             "description": "被覆盖的检查项 ID，必须从最近告警上下文中提取",
                         },
                         "pattern": {

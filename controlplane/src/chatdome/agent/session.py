@@ -1029,8 +1029,6 @@ class AgentSession:
                         # Remove markdown backticks if AI added them
                         cmd_str = cmd_str.strip("`")
                         cmds.append(f"👨‍💻 `run_shell_command`: `{cmd_str}`")
-                    elif name == "run_security_check":
-                        cmds.append(f"🛡️ `run_security_check`: `{args.get('check_id', '')}`")
         cmds.reverse()
         return cmds
 

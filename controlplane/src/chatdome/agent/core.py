@@ -53,19 +53,14 @@ class Agent:
         sandbox: CommandSandbox,
         config: AgentConfig,
         runtime_environment_context: str = "",
-        pack_loader: Any = None,
         user_context_ledger: Any = None,
-        valid_check_ids: 'list[str] | None' = None,
         engram_store: 'Any' = None,
         llm_manager: LLMManager | None = None,
     ):
         self.llm = llm
         self.llm_manager = llm_manager
         self.config = config
-        self.tools = build_tools(
-            pack_loader=pack_loader,
-            valid_check_ids=valid_check_ids,
-        )
+        self.tools = build_tools()
         self.tool_dispatcher = ToolDispatcher(
             sandbox,
             llm=llm,
@@ -80,7 +75,6 @@ class Agent:
             max_history_tokens=config.max_history_tokens,
             system_prompt=build_system_prompt(
                 runtime_environment_context=runtime_environment_context,
-                pack_loader=pack_loader,
             ),
             engram_store=engram_store,
         )

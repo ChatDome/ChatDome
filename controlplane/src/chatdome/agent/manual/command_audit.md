@@ -12,7 +12,7 @@
 
 - `limit`（可选，整数）：返回条数，默认 5，最大 30。
 - `scope`（可选，字符串）：
-  - `executed`（默认）：只返回实际执行过的命令（`command_executed`、`security_check_executed`）。
+  - `executed`（默认）：只返回实际执行过的对话命令（`command_executed`）。
   - `all`：同时包含审批、拦截、安全审查等生命周期事件。
 
 ### 返回值格式
@@ -26,7 +26,6 @@
 
 事件类型说明：
 - `command_executed`：通过 `run_shell_command` 执行的动态命令
-- `security_check_executed`：通过 `run_security_check` 执行的预定义检查
 - `command_reviewed`：命令经过安全审查但尚未执行
 - `command_pending_approval`：命令进入等待用户审批状态
 - `command_blocked`：命令被安全策略拦截

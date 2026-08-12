@@ -22,12 +22,12 @@
 
 ### "检查一下安全状况"
 
-这是一个常见的宽泛请求，按以下组合执行快速安全总览：
+这是一个常见的宽泛请求，使用 `run_shell_command` 收集以下只读信息：
 
-1. `run_security_check` → `ssh_bruteforce`（SSH 暴力破解）
-2. `run_security_check` → `open_ports`（异常端口监听）
-3. `run_security_check` → `active_connections`（可疑连接）
-4. `run_security_check` → `disk_usage`（磁盘异常）
+1. SSH 认证失败与成功登录记录
+2. 当前监听端口
+3. 当前活跃网络连接
+4. 磁盘使用率
 
 执行后汇总各项结果，按风险程度排序报告。
 

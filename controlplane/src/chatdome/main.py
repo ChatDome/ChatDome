@@ -229,8 +229,6 @@ def main() -> None:
 
     # User Context Ledger
     user_context_ledger = UserContextLedger()
-    valid_check_ids = [str(c.get("check_id")) for c in config.sentinel.checks if c.get("check_id")]
-    
     # Engram Store
     engram_store = EngramStore()
 
@@ -241,9 +239,7 @@ def main() -> None:
         sandbox=sandbox,
         config=config.agent,
         runtime_environment_context=runtime_environment_context,
-        pack_loader=pack_loader,
         user_context_ledger=user_context_ledger,
-        valid_check_ids=valid_check_ids,
         engram_store=engram_store,
     )
 
@@ -325,19 +321,11 @@ def main() -> None:
     def _agent_system_prompt() -> str:
         return build_system_prompt(
             runtime_environment_context=runtime_environment_context,
-            pack_loader=pack_loader,
         )
 
     def _refresh_agent_runtime() -> None:
-        nonlocal valid_check_ids
-        valid_check_ids = [
-            str(c.get("check_id")) for c in config.sentinel.checks if c.get("check_id")
-        ]
         agent.config = config.agent
-        agent.tools = build_tools(
-            pack_loader=pack_loader,
-            valid_check_ids=valid_check_ids,
-        )
+        agent.tools = build_tools()
         agent.session_manager.session_timeout = config.agent.session_timeout
         agent.session_manager.pending_approval_timeout = config.agent.pending_approval_timeout
         agent.session_manager.persisted_session_ttl = config.agent.persisted_session_ttl
@@ -407,9 +395,6 @@ def main() -> None:
             config.agent = new_config.agent
             _refresh_agent_runtime()
             applied.append("agent")
-        elif sentinel_changed:
-            # Sentinel changes can alter available packs/check ids exposed to the agent.
-            _refresh_agent_runtime()
 
         return applied
 

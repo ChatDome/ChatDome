@@ -20,7 +20,7 @@ AI 生成命令 (run_shell_command)
       │
       ▼
   风险分级判定
-  ├── SAFE + 只读 → god_mode 下自动执行；普通模式仍需审批
+  ├── SAFE + 只读 → 风险审批模式下自动执行
   ├── UNSAFE → 进入待审批状态
   └── CRITICAL → 进入待审批状态，高危标记
       │
@@ -60,20 +60,20 @@ AI 生成命令 (run_shell_command)
 
 | 级别 | risk_level | 行为 |
 |------|------|------|
-| `LOW` | 只读操作 | god_mode 下可自动执行 |
+| `LOW` | 只读操作 | 风险审批模式下可自动执行 |
 | `MEDIUM` | 存在轻微副作用 | 需要审批确认 |
 | `HIGH` | 写入/修改/安装 | 需要审批确认 |
 | `CRITICAL` | 不可逆破坏 | 强制审批，高危警告 |
 
-## god_mode（unrestricted command）差异说明
+## command_approval_mode
 
-| 行为 | 普通模式 | god_mode |
-|------|------|------|
-| SAFE + 只读命令 | 进入待审批 | **自动执行** |
-| UNSAFE 命令 | 进入待审批 | 进入待审批（仍需确认） |
-| CRITICAL 命令 | 进入待审批 | 进入待审批（仍需确认） |
+| 配置值 | 行为 |
+|------|------|
+| `execute_without_approval` | 所有非空命令直接执行 |
+| `require_approval_for_risky_commands` | 只有明确判定为低风险的命令自动执行，无法确定时要求审批 |
+| `require_approval_for_all_commands` | 所有非空命令都要求审批 |
 
-即使在 god_mode 下，任何被检测到变更或删除意图的命令仍然需要用户确认。
+默认使用 `require_approval_for_risky_commands`。
 
 ## 用户追问安全性时的标准回答结构
 

@@ -16,8 +16,6 @@ sections:
       - 用户明确询问整台服务器或主机最近执行过哪些命令
       - 用户询问 auditd、execve、主机级命令历史
     tools:
-      - auditd_status
-      - run_security_check
       - run_shell_command
     file: host_exec_audit.md
 
@@ -37,7 +35,7 @@ sections:
 
   - id: approvals
     title: 命令审批与风险解释
-    summary: 解释审批流程全貌、三级风险判定标准、god_mode 差异和标准回答模板。
+    summary: 解释审批流程、三种审批模式、风险判定标准和标准回答模板。
     when_to_read:
       - 用户询问为什么需要确认
       - 用户询问命令是否安全、审批后会发生什么
@@ -53,7 +51,6 @@ sections:
       - 用户询问哨兵告警、巡检命令、为什么一直提醒
       - 用户要求解释或处理疑似误报
     tools:
-      - run_security_check
       - add_user_context
       - set_sentinel_alert_push_policy
     file: sentinel.md
@@ -70,13 +67,11 @@ sections:
 
   - id: shell_commands
     title: 动态 Shell 命令使用规范
-    summary: run_shell_command 的通用使用规范，包含工具优先级、参数格式约束、常用命令模式和普通/god_mode 差异。
+    summary: run_shell_command 的通用使用规范，包含参数格式、风险说明和常用命令模式。
     when_to_read:
       - 需要通过 run_shell_command 执行自定义命令时
-      - 不确定应该用 run_security_check 还是 run_shell_command 时
     tools:
       - run_shell_command
-      - run_security_check
     file: shell_commands.md
 
   - id: engram

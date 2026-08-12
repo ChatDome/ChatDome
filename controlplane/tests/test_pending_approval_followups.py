@@ -440,6 +440,30 @@ def _pending_session() -> AgentSession:
 
 
 class PendingApprovalFollowupTests(unittest.TestCase):
+    def test_agent_does_not_expose_sentinel_command_pack_tool(self):
+        tool_names = {tool["function"]["name"] for tool in build_tools()}
+        prompt = build_system_prompt()
+
+        self.assertNotIn("run_security_check", tool_names)
+        self.assertNotIn("run_security_check", prompt)
+        self.assertNotIn("预定义命令", prompt)
+        self.assertNotIn("unrestricted", prompt)
+
+    def test_removed_sentinel_command_pack_tool_is_unknown_to_dispatcher(self):
+        sandbox = FakeSandbox()
+
+        result = asyncio.run(
+            ToolDispatcher(sandbox).dispatch(
+                "run_security_check",
+                '{"check_id":"open_ports"}',
+                "removed-tool",
+                7,
+            )
+        )
+
+        self.assertEqual(result, "未知工具: run_security_check")
+        self.assertEqual(sandbox.commands, [])
+
     def test_execute_without_approval_runs_risky_command(self):
         sandbox = FakeSandbox()
         dispatcher = ToolDispatcher(

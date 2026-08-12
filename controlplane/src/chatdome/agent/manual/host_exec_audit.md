@@ -8,7 +8,7 @@
 
 ## 优先流程
 
-1. 使用 `run_security_check` 调用 `auditd_status`，确认 auditd 是否可用，以及是否存在 execve 审计规则。
+1. 使用 `run_shell_command` 检查 `auditctl` 是否可用、auditd 服务状态以及是否存在 execve 审计规则。
 2. 如果 auditd 不可用或缺少 execve 规则，明确说明不能可靠追溯历史命令，尤其不能追溯规则启用前的命令。
 3. 如果用户明确需要整机范围，可在安全边界内使用受控只读查询读取 auditd execve 事件。
 
