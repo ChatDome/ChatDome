@@ -27,7 +27,7 @@ from chatdome.executor.sandbox import CommandSandbox, CommandResult
 from chatdome.llm.client import LLMClient
 from chatdome.sentinel.alert_controls import format_alert_push_status, parse_alert_mute_until
 
-_COMMAND_DETAIL_SEGMENT_TIMEOUT_SECONDS = 20.0
+_COMMAND_DETAIL_SEGMENT_TIMEOUT_SECONDS = 180.0
 _COMMAND_DETAIL_MAX_TOKENS_PER_SEGMENT = 12
 _COMMAND_DETAIL_MAX_TARGETS_PER_SEGMENT = 6
 _COMMAND_DETAIL_MAX_WARNINGS_PER_SEGMENT = 3

@@ -12,7 +12,7 @@
 
 - Do not use `response_format`, JSON Schema, or tool calls for command details.
 - Analyze segments strictly in order with no concurrent LLM detail requests.
-- Limit each segment, including compact retry, to 20 seconds and the full run to `20 × n` seconds.
+- Limit each segment, including compact retry, to 180 seconds and the full run to `180 × n` seconds.
 - Preserve completed segment results when another segment fails.
 - Never lower the local static risk result.
 - Redact secrets and escape control characters before logging commands.
@@ -29,7 +29,7 @@
 
 **Interfaces:**
 - Produces: serial one-segment detail requests through `ToolDispatcher.analyze_command_for_approval(...)`.
-- Produces: `_COMMAND_DETAIL_SEGMENT_TIMEOUT_SECONDS = 20.0`.
+- Produces: `_COMMAND_DETAIL_SEGMENT_TIMEOUT_SECONDS = 180.0`.
 
 - [x] Add a failing test proving three shell segments produce three ordered LLM requests and no request contains `response_format`.
 - [x] Add a failing test proving one timed-out segment does not prevent the next segment from completing.

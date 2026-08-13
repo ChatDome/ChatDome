@@ -9,6 +9,7 @@ from unittest.mock import patch
 from chatdome.agent.core import Agent
 from chatdome.agent.prompts import build_system_prompt, build_tools
 from chatdome.agent.session import AgentSession
+from chatdome.agent import tools as agent_tools
 from chatdome.agent.tools import PendingApprovalError, ToolDispatcher
 from chatdome.llm.client import LLMResponse, ToolCall
 
@@ -461,6 +462,12 @@ def _pending_session() -> AgentSession:
 
 
 class PendingApprovalFollowupTests(unittest.TestCase):
+    def test_command_detail_segment_timeout_defaults_to_180_seconds(self):
+        self.assertEqual(
+            agent_tools._COMMAND_DETAIL_SEGMENT_TIMEOUT_SECONDS,
+            180.0,
+        )
+
     def test_agent_does_not_expose_sentinel_command_pack_tool(self):
         tool_names = {tool["function"]["name"] for tool in build_tools()}
         prompt = build_system_prompt()
