@@ -59,8 +59,10 @@ chatdome:
   sentinel:
     enabled: true                         # 哨兵模式开关
 
-    # 省略 telegram 告警目标时，默认推送到 telegram.allowed_ids 与 telegram.admin_ids。
-    # 显式填写 user_ids: [] 可关闭 Telegram 告警推送。
+    # 未配置 telegram 告警目标时，默认推送到 telegram.allowed_ids 与 telegram.admin_ids。
+    # 显式填写 telegram.user_ids: [] 可关闭 Telegram 告警推送。
+    alert_targets: {}
+    # 示例：
     # alert_targets:
     #   telegram:
     #     user_ids: []
@@ -74,5 +76,9 @@ chatdome:
     global_rate_limit: 10                  # 全局速率限制：每窗口最多推送 N 条
     global_rate_window: 300                # 速率窗口大小（秒）
     learning_rounds: 1                     # 冷启动静默轮数（首次启动建基线）
+    aggregation_window: 10                 # 同类告警聚合窗口（秒）
+    daily_report: true                     # 是否生成每日摘要
+    daily_report_time: "09:00"             # 每日摘要时间（HH:MM）
+    ai_analysis_min_severity: 7            # 触发 AI 分析的最低严重级别
 
     # 检查策略由 ChatDome 内置并随版本统一更新。

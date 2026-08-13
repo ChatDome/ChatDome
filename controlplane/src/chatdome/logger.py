@@ -6,6 +6,7 @@ such as chatdome.log stay plain and readable in less, grep, and log collectors.
 """
 
 import contextvars
+import errno
 import logging
 from logging.handlers import RotatingFileHandler
 import os
@@ -131,6 +132,10 @@ class SentinelOnlyFilter(logging.Filter):
 class ChatDomeFileHandler(RotatingFileHandler):
     """Rotating file handler that reopens files replaced by external rotation."""
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._disabled_for_full_disk = False
+
     @staticmethod
     def _same_file(path_stat: os.stat_result, stream_stat: os.stat_result) -> bool:
         return (
@@ -164,12 +169,37 @@ class ChatDomeFileHandler(RotatingFileHandler):
             self.stream = self._open()
 
     def emit(self, record: logging.LogRecord) -> None:
+        if self._disabled_for_full_disk:
+            return
         try:
             if self._should_reopen():
                 self._reopen_stream()
             super().emit(record)
+        except OSError as exc:
+            if exc.errno == errno.ENOSPC:
+                self._disabled_for_full_disk = True
+                return
+            self.handleError(record)
         except Exception:
             self.handleError(record)
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+            self._disabled_for_full_disk = True
+            return
+        super().handleError(record)
+
+    def flush(self) -> None:
+        if self._disabled_for_full_disk:
+            return
+        try:
+            super().flush()
+        except OSError as exc:
+            if exc.errno == errno.ENOSPC:
+                self._disabled_for_full_disk = True
+                return
+            raise
 
 
 class ChatDomeFormatter(logging.Formatter):

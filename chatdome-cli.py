@@ -73,6 +73,7 @@ from chatdome.slash_commands import (
     parse_details_options,
 )
 from chatdome.config import AIConfig, validate_profile_name
+from chatdome.config_writer import TemplateConfigWriter
 from chatdome.errors import ChatDomeError, user_facing_error_message
 from chatdome.logger import ChatDomeFormatter, ExcludeSentinelFilter, OriginFilter, _build_file_handler
 from chatdome.llm.codex_oauth_service import CodexOAuthService
@@ -206,12 +207,7 @@ def _load_yaml(path: Path | None = None) -> dict[str, Any]:
 
 def _write_yaml(data: dict[str, Any], path: Path | None = None) -> None:
     path = path or CONFIG_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
-    )
-    _chmod_owner_only(path)
+    TemplateConfigWriter(path, EXAMPLE_CONFIG_PATH).write(data)
 
 
 def ensure_config(args: argparse.Namespace | None = None) -> None:
@@ -378,16 +374,8 @@ def migrate_config(args: argparse.Namespace) -> None:
         root = document.get("chatdome")
         if not isinstance(root, dict):
             raise ValueError("chatdome must be a mapping")
-        changed = _migrate_config_document(root)
-
-        if changed:
-            temporary = config_path.with_name(f".{config_path.name}.migrate.tmp")
-            temporary.write_text(
-                yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
-                encoding="utf-8",
-            )
-            os.chmod(temporary, stat.S_IMODE(config_path.stat().st_mode))
-            temporary.replace(config_path)
+        _migrate_config_document(root)
+        TemplateConfigWriter(config_path, EXAMPLE_CONFIG_PATH).write(document)
 
         from chatdome.config import load_config
 
@@ -1739,7 +1727,11 @@ def _profile_admin_service(source: str) -> LLMProfileAdminService:
         _request_reload(["llm"], f"{source}:{action}")
 
     return LLMProfileAdminService(
-        ProfileConfigStore(CONFIG_PATH, LLM_PROFILE_LOCK_PATH),
+        ProfileConfigStore(
+            CONFIG_PATH,
+            LLM_PROFILE_LOCK_PATH,
+            template_path=EXAMPLE_CONFIG_PATH,
+        ),
         runtime_apply=apply_runtime,
         audit_recorder=_record_profile_audit,
     )

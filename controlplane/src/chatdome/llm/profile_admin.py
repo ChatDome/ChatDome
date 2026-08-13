@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import os
-import tempfile
 from contextlib import AbstractContextManager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -21,6 +20,7 @@ from chatdome.config import (
     validate_llm_config,
     validate_profile_name,
 )
+from chatdome.config_writer import TemplateConfigWriter, default_config_template_path
 from chatdome.errors import (
     LLMProfileChanged,
     LLMProfileConflict,
@@ -90,7 +90,7 @@ class ProfileMutationResult:
 class _StoredMutation:
     result: ProfileMutationResult
     config: ChatDomeConfig
-    previous_document: dict[str, Any]
+    previous_text: str
     previous_config: ChatDomeConfig | None
     written_fingerprint: str
 
@@ -135,9 +135,18 @@ class _ConfigFileLock(AbstractContextManager):
 class ProfileConfigStore:
     """Serialize all LLM profile mutations through one atomic YAML writer."""
 
-    def __init__(self, config_path: str | Path, lock_path: str | Path) -> None:
+    def __init__(
+        self,
+        config_path: str | Path,
+        lock_path: str | Path,
+        *,
+        template_path: str | Path | None = None,
+    ) -> None:
         self.config_path = Path(config_path).expanduser()
         self.lock_path = Path(lock_path).expanduser()
+        self.template_path = Path(
+            template_path or default_config_template_path()
+        ).expanduser()
 
     @staticmethod
     def value_fingerprint(value: Any) -> str:
@@ -161,18 +170,20 @@ class ProfileConfigStore:
     ) -> _StoredMutation:
         with _ConfigFileLock(self.lock_path):
             previous_document = self._read_document()
+            previous_text = self.config_path.read_text(encoding="utf-8")
             document = deepcopy(previous_document)
             previous_config = self._parse_optional(previous_document)
             result = operation(document)
             config = parse_config_document(document)
             validate_llm_config(config)
             self._write_document(document)
+            written_document = self._read_document()
             return _StoredMutation(
                 result=result,
                 config=config,
-                previous_document=previous_document,
+                previous_text=previous_text,
                 previous_config=previous_config,
-                written_fingerprint=self.value_fingerprint(document),
+                written_fingerprint=self.value_fingerprint(written_document),
             )
 
     def restore(self, mutation: _StoredMutation) -> bool:
@@ -180,7 +191,7 @@ class ProfileConfigStore:
             current = self._read_document()
             if self.value_fingerprint(current) != mutation.written_fingerprint:
                 return False
-            self._write_document(mutation.previous_document)
+            self._write_raw_text(mutation.previous_text)
             return True
 
     def _read_document(self) -> dict[str, Any]:
@@ -198,39 +209,10 @@ class ProfileConfigStore:
         return raw
 
     def _write_document(self, document: dict[str, Any]) -> None:
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{self.config_path.name}.",
-            suffix=".tmp",
-            dir=str(self.config_path.parent),
-        )
-        temp_path = Path(temp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                yaml.safe_dump(
-                    document,
-                    handle,
-                    allow_unicode=True,
-                    sort_keys=False,
-                )
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.chmod(temp_path, 0o600)
-            os.replace(temp_path, self.config_path)
-            try:
-                directory_fd = os.open(str(self.config_path.parent), os.O_RDONLY)
-            except OSError:
-                directory_fd = -1
-            if directory_fd >= 0:
-                try:
-                    os.fsync(directory_fd)
-                except OSError:
-                    pass
-                finally:
-                    os.close(directory_fd)
-        finally:
-            if temp_path.exists():
-                temp_path.unlink()
+        TemplateConfigWriter(self.config_path, self.template_path).write(document)
+
+    def _write_raw_text(self, text: str) -> None:
+        TemplateConfigWriter(self.config_path, self.template_path).restore_text(text)
 
     @staticmethod
     def _chatdome_root(document: dict[str, Any]) -> dict[str, Any]:

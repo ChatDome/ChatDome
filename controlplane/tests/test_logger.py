@@ -1,4 +1,6 @@
 import logging
+import errno
+import io
 import os
 import tempfile
 import unittest
@@ -6,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from chatdome.logger import (
+    ChatDomeFileHandler,
     ChatDomeFormatter,
     _stream_supports_color,
     current_log_context,
@@ -30,6 +33,22 @@ class _CaptureHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         self.records.append(record)
+
+
+class _DiskFullStream:
+    def __init__(self) -> None:
+        self.write_attempts = 0
+
+    def write(self, value: str) -> None:
+        del value
+        self.write_attempts += 1
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def flush(self) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def close(self) -> None:
+        return None
 
 
 class LoggerTests(unittest.TestCase):
@@ -214,6 +233,27 @@ class LoggerTests(unittest.TestCase):
             main_text = main_log.read_text(encoding="utf-8")
             self.assertIn("before-close", main_text)
             self.assertIn("after-close", main_text)
+
+    def test_file_handler_disables_itself_when_disk_is_full(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            handler = ChatDomeFileHandler(Path(tmp) / "chatdome.log")
+            handler.stream.close()
+            disk_full_stream = _DiskFullStream()
+            handler.stream = disk_full_stream
+            record = self._record()
+            with patch.object(
+                handler,
+                "_should_reopen",
+                return_value=False,
+            ), patch("sys.stderr", new=io.StringIO()) as stderr:
+                handler.emit(record)
+                handler.emit(record)
+                handler.flush()
+            handler.close()
+
+        self.assertEqual(disk_full_stream.write_attempts, 1)
+        self.assertTrue(handler._disabled_for_full_disk)
+        self.assertEqual(stderr.getvalue(), "")
 
     @unittest.skipIf(os.name == "nt", reason="requires POSIX rename of an open log file")
     def test_file_handler_reopens_after_external_log_replacement(self):

@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 
 from chatdome.config import ChatDomeConfig
+from chatdome.main import build_telegram_application
 from chatdome.telegram.auth import Authenticator
 from chatdome.telegram.bot import TelegramBot
 
@@ -20,6 +21,28 @@ class FakeSentinel:
 
 
 class TelegramLifecycleTests(unittest.TestCase):
+    def test_application_asyncio_primitives_belong_to_service_loop(self):
+        async def scenario():
+            config = ChatDomeConfig()
+            config.telegram.bot_token = (
+                "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+            )
+            bot = TelegramBot(config, FakeAgent())
+
+            app = await build_telegram_application(bot)
+            stop_event = getattr(
+                app.updater,
+                "_Updater__polling_task_stop_event",
+            )
+            waiter = asyncio.create_task(stop_event.wait())
+            await asyncio.sleep(0)
+            stop_event.set()
+            await waiter
+
+            self.assertIs(stop_event._loop, asyncio.get_running_loop())
+
+        asyncio.run(scenario())
+
     def test_empty_user_lists_deny_every_user(self):
         auth = Authenticator([], [])
 

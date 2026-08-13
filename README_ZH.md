@@ -207,7 +207,7 @@ ChatDome 采用单文件运行配置。服务器安装使用 `/etc/chatdome/conf
 
 默认初始安装时不包含任何 API Key 或预设档案。最简单的起步方式是运行 `./chatdome` → `AI model management` → `Add Codex OAuth LLM`；ChatDome 会触发 OAuth Device Code 登录，并在 token 保存成功后写入 profile。
 
-默认值按 `config.example.yaml` 列出；复制模板后不修改时，对应值会直接作为运行配置生效。
+默认值按 `config.example.yaml` 列出；复制模板后不修改时，对应值会直接作为运行配置生效。通过本地菜单保存配置或执行更新迁移时，ChatDome 会按当前模板重建配置文件，保留用户值和凭据，并补充新版本新增的默认字段、注释与顺序。
 
 | 配置路径 | 配置要求 | 默认值（模板） | 说明 |
 |----------|----------|----------------|------|

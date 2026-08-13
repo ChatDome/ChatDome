@@ -27,6 +27,7 @@ class LLMProfileAdminTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.config_path = self.root / "config.yaml"
         self.lock_path = self.root / "llm-profile.lock"
+        self.template_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
         self.config_path.write_text(
             yaml.safe_dump(
                 {
@@ -56,7 +57,11 @@ class LLMProfileAdminTests(unittest.TestCase):
         def audit(event_type, actor, fields):
             self.events.append((event_type, actor, fields))
 
-        self.store = ProfileConfigStore(self.config_path, self.lock_path)
+        self.store = ProfileConfigStore(
+            self.config_path,
+            self.lock_path,
+            template_path=self.template_path,
+        )
         self.service = LLMProfileAdminService(
             self.store,
             runtime_apply=runtime_apply,
@@ -90,6 +95,10 @@ class LLMProfileAdminTests(unittest.TestCase):
         self.assertEqual(self.load_root()["ai_profiles"]["new"]["api_key"], "sk-new")
         self.assertEqual(self.applied[-1][1], "created")
         self.assertEqual(self.events[-1][0], "llm_profile_created")
+        self.assertIn(
+            "# ChatDome Configuration",
+            self.config_path.read_text(encoding="utf-8"),
+        )
         if os.name != "nt":
             self.assertEqual(stat.S_IMODE(self.config_path.stat().st_mode), 0o600)
 
@@ -213,10 +222,7 @@ class LLMProfileAdminTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(
-            yaml.safe_load(self.config_path.read_text(encoding="utf-8")),
-            yaml.safe_load(before),
-        )
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
 
 
     def test_concurrent_creates_are_serialized(self):

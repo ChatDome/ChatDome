@@ -203,7 +203,7 @@ ChatDome uses one runtime configuration file. Server installations use `/etc/cha
 
 The default installation comes with no API keys or pre-configured profiles. The easiest way to get started is `./chatdome` → `AI model management` → `Add Codex OAuth LLM`. ChatDome starts the OAuth Device Code login and writes the profile only after the token is saved.
 
-Defaults below come from `config.example.yaml`; if copied unchanged, those values become the runtime configuration.
+Defaults below come from `config.example.yaml`; if copied unchanged, those values become the runtime configuration. Saving through the local menu or running update migration rebuilds the file from the current template, retains user values and credentials, and adds newly introduced defaults, comments, and ordering.
 
 | Path | Requirement | Default (template) | Description |
 |------|-------------|--------------------|-------------|

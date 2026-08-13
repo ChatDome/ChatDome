@@ -18,6 +18,7 @@ from pathlib import Path
 
 from chatdome import __version__
 from chatdome.config import load_config
+from chatdome.config_writer import default_config_template_path
 from chatdome.agent.core import Agent
 from chatdome.agent.audit import CommandAuditTracker
 from chatdome.agent.prompts import build_system_prompt, build_tools
@@ -46,6 +47,11 @@ from chatdome.runtime import (
 PID_PATH = run_path("chatdome.pid")
 LOCK_PATH = run_path("chatdome.lock")
 READY_PATH = run_path("ready.json")
+
+
+async def build_telegram_application(bot: TelegramBot):
+    """Build python-telegram-bot objects on the active service event loop."""
+    return bot.build()
 
 
 class _InstanceLock:
@@ -308,7 +314,11 @@ def main() -> None:
         )
 
     profile_admin = LLMProfileAdminService(
-        ProfileConfigStore(runtime_config_path, llm_profile_lock_path()),
+        ProfileConfigStore(
+            runtime_config_path,
+            llm_profile_lock_path(),
+            template_path=default_config_template_path(),
+        ),
         runtime_apply=_apply_llm_profile_config,
         audit_recorder=_record_profile_audit,
     )
@@ -367,14 +377,6 @@ def main() -> None:
             "llm", "degraded", "模型组件初始化失败，请检查服务日志。"
         )
     app = None
-    if bot is not None:
-        try:
-            app = bot.build()
-        except Exception as exc:
-            capabilities = capabilities.with_state(
-                "telegram", "degraded", str(exc)
-            )
-            logger.error("Telegram component unavailable: %s", exc)
     reload_control = ReloadControl()
     reload_task: asyncio.Task | None = None
 
@@ -510,7 +512,7 @@ def main() -> None:
                 reload_control.clear_request(request.request_id)
 
     async def _run_service() -> None:
-        nonlocal reload_task, capabilities
+        nonlocal reload_task, capabilities, app
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         for stop_signal in (signal.SIGINT, signal.SIGTERM):
@@ -526,9 +528,10 @@ def main() -> None:
             sentinel_scheduler.start()
         reload_task = asyncio.create_task(_reload_watch_loop())
 
-        if app is not None and bot is not None:
+        if bot is not None:
             logger.info("Starting Telegram bot polling...")
             try:
+                app = await build_telegram_application(bot)
                 await app.initialize()
                 telegram_initialized = True
                 if app.updater is None:
@@ -585,7 +588,6 @@ def main() -> None:
         READY_PATH.unlink(missing_ok=True)
         _remove_pid_file()
         instance_lock.release()
-        # Cleanup is handled by python-telegram-bot's run_polling
         logger.info("ChatDome stopped.")
 
 

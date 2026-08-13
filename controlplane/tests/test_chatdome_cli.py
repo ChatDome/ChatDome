@@ -47,6 +47,10 @@ class ChatDomeCLITests(unittest.TestCase):
         self.root = Path(self.tmp_dir.name)
         self.config_path = self.root / "config.yaml"
         self.example_path = self.root / "config.example.yaml"
+        self.example_path.write_text(
+            (REPO_ROOT / "config.example.yaml").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
         self.run_dir = self.root / "chat_data" / "run"
         self.reload_request_path = self.run_dir / "reload_request.json"
         self.reload_status_path = self.run_dir / "reload_status.json"
@@ -151,6 +155,8 @@ class ChatDomeCLITests(unittest.TestCase):
         )
 
         migrated = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))["chatdome"]
+        migrated_text = self.config_path.read_text(encoding="utf-8")
+        self.assertIn("# ChatDome Configuration", migrated_text)
         self.assertEqual(migrated["telegram"]["allowed_ids"], [1])
         self.assertEqual(migrated["telegram"]["admin_ids"], [2])
         self.assertNotIn("allowed_chat_ids", migrated["telegram"])
@@ -169,6 +175,7 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertNotIn("custom_packs_dir", migrated["sentinel"])
         self.assertEqual(migrated["telegram"]["bot_token"], "secret-token")
         self.assertEqual(migrated["ai_profiles"]["base"]["api_key"], "secret-key")
+        self.assertEqual(migrated["agent"]["session_timeout"], 600)
         self.assertTrue(backup.is_file())
 
     def test_migrate_config_is_idempotent(self):
@@ -219,9 +226,10 @@ class ChatDomeCLITests(unittest.TestCase):
         data = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
         agent = data["chatdome"]["agent"]
         self.assertEqual(
-            agent,
-            {"command_approval_mode": "require_approval_for_all_commands"},
+            agent["command_approval_mode"],
+            "require_approval_for_all_commands",
         )
+        self.assertEqual(agent["session_timeout"], 600)
         request_reload.assert_called_once_with(
             ["agent"],
             "menu:set-command-approval-mode",
@@ -1441,6 +1449,10 @@ class ChatDomeCLITests(unittest.TestCase):
 
         data = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
         self.assertEqual(data["chatdome"]["telegram"]["admin_ids"], [1, 2])
+        self.assertIn(
+            "# ChatDome Configuration",
+            self.config_path.read_text(encoding="utf-8"),
+        )
 
     def test_telegram_status_shows_allowed_and_admin_ids(self):
         with patch("builtins.print"):
