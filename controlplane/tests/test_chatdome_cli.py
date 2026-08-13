@@ -607,14 +607,20 @@ class ChatDomeCLITests(unittest.TestCase):
             }
         )
         self.assertIn("Approval required", compact)
-        self.assertIn("Purpose: Restart the SSH service to apply its configuration.", compact)
+        self.assertIn(
+            "ChatDome 请求执行一项操作：Restart the SSH service to apply its configuration.",
+            compact,
+        )
+        self.assertNotIn("configuration.。", compact)
+        self.assertIn("当前还不能确认具体影响，请先查看命令分析。", compact)
         self.assertIn("Allow operation? [y/n]  d=details", compact)
         self.assertNotIn("Approval ID", compact)
         self.assertNotIn("systemctl restart sshd", compact)
+        self.assertNotIn("Purpose:", compact)
 
         fallback = self.cli._format_terminal_pending_approval({})
         self.assertIn(
-            "Purpose: Unavailable; review details before approval.",
+            "ChatDome 请求执行一项命令。当前还不能确认具体影响，请先查看命令分析。",
             fallback,
         )
         with patch("builtins.print"):

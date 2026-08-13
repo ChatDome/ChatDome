@@ -50,7 +50,12 @@ class DecisionPromptComposer:
         if facts.uncertainty != DecisionUncertainty.NONE:
             sentences.append(cls._UNCERTAINTIES[facts.uncertainty])
         if include_question:
-            sentences.append(cls._QUESTIONS.get(facts.question, cls._QUESTIONS[DecisionQuestion.CONFIRM]))
+            sentences.append(
+                cls._QUESTIONS.get(
+                    facts.question,
+                    cls._QUESTIONS[DecisionQuestion.CONFIRM],
+                )
+            )
         return "".join(dict.fromkeys(sentence for sentence in sentences if sentence))
 
     @staticmethod
@@ -58,15 +63,16 @@ class DecisionPromptComposer:
         intent = normalize_text(facts.intent)
         if not intent:
             return "ChatDome 请求执行一项操作。"
+        suffix = "" if intent.endswith(("。", "！", "？", ".", "!", "?")) else "。"
         if facts.intent_style == DecisionIntentStyle.CONTINUE:
-            return f"ChatDome 还需要{intent}。"
+            return f"ChatDome 还需要{intent}{suffix}"
         if facts.intent_style == DecisionIntentStyle.WILL:
-            return f"ChatDome 将{intent}。"
+            return f"ChatDome 将{intent}{suffix}"
         if facts.intent_style == DecisionIntentStyle.DESCRIBE:
-            return f"ChatDome 请求执行一项操作：{intent}。"
+            return f"ChatDome 请求执行一项操作：{intent}{suffix}"
         if facts.intent_style == DecisionIntentStyle.REQUEST:
-            return f"ChatDome 请求{intent}。"
-        return f"ChatDome 想{intent}。"
+            return f"ChatDome 请求{intent}{suffix}"
+        return f"ChatDome 想{intent}{suffix}"
 
     @staticmethod
     def _effect_sentence(effect: DecisionEffect) -> str:
