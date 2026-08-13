@@ -49,10 +49,16 @@ class FakeMessage:
 class FakeUpdate:
     def __init__(self, message, chat_id=123, user_id=None):
         self.message = message
-        self.effective_chat = SimpleNamespace(id=chat_id)
+        self.effective_chat = SimpleNamespace(id=chat_id, type="private")
         self.effective_user = (
-            SimpleNamespace(id=user_id) if user_id is not None else None
+            SimpleNamespace(id=user_id if user_id is not None else chat_id)
         )
+
+
+def _config(*user_ids: int) -> ChatDomeConfig:
+    config = ChatDomeConfig()
+    config.telegram.allowed_ids = list(user_ids or (123, 456))
+    return config
 
 
 class RecordingSessionManager:
@@ -181,7 +187,7 @@ class TelegramStopTests(unittest.TestCase):
         )
 
     async def _run_command_runtime_routes_deferred_message_to_same_chat_and_user(self):
-        bot = TelegramBot(ChatDomeConfig(), UserAwareAgent())
+        bot = TelegramBot(_config(), UserAwareAgent())
         target = FakeMessage()
         request_id = "REQ-1"
         bot._command_targets[request_id] = target
@@ -213,7 +219,7 @@ class TelegramStopTests(unittest.TestCase):
         )
 
     async def _run_deferred_message_rejects_a_different_active_task_owner(self):
-        bot = TelegramBot(ChatDomeConfig(), UserAwareAgent())
+        bot = TelegramBot(_config(), UserAwareAgent())
         owner = asyncio.create_task(asyncio.Event().wait())
         bot._message_tasks[123] = owner
         bot._run_agent_message = AsyncMock()
@@ -236,7 +242,7 @@ class TelegramStopTests(unittest.TestCase):
 
     async def _run_message_passes_effective_user_id_to_agent(self):
         agent = UserAwareAgent()
-        bot = TelegramBot(ChatDomeConfig(), agent)
+        bot = TelegramBot(_config(), agent)
         message = FakeMessage("hello")
 
         await bot._handle_message(
@@ -252,7 +258,7 @@ class TelegramStopTests(unittest.TestCase):
 
     async def _run_stop_cancels_running_message_task(self):
         agent = BlockingAgent()
-        bot = TelegramBot(ChatDomeConfig(), agent)
+        bot = TelegramBot(_config(), agent)
         first_message = FakeMessage("run task")
 
         await bot._handle_message(FakeUpdate(first_message), SimpleNamespace())
@@ -289,7 +295,7 @@ class TelegramStopTests(unittest.TestCase):
         asyncio.run(self._run_completed_message_retires_single_line_progress())
 
     async def _run_completed_message_retires_single_line_progress(self):
-        bot = TelegramBot(ChatDomeConfig(), ImmediateAgent())
+        bot = TelegramBot(_config(), ImmediateAgent())
         message = FakeMessage("hello")
 
         await bot._handle_message(FakeUpdate(message), SimpleNamespace())
@@ -308,7 +314,7 @@ class TelegramStopTests(unittest.TestCase):
         asyncio.run(self._run_slow_progress_edit_does_not_block_agent_result())
 
     async def _run_slow_progress_edit_does_not_block_agent_result(self):
-        bot = TelegramBot(ChatDomeConfig(), StageReportingAgent())
+        bot = TelegramBot(_config(), StageReportingAgent())
         bot._progress_edit_timeout = 0.01
         message = FakeMessage("hello", status_type=HangingStatusMessage)
 
@@ -324,7 +330,7 @@ class TelegramStopTests(unittest.TestCase):
         asyncio.run(self._run_message_error_replaces_progress_without_leaving_ticker())
 
     async def _run_message_error_replaces_progress_without_leaving_ticker(self):
-        bot = TelegramBot(ChatDomeConfig(), ErrorAgent())
+        bot = TelegramBot(_config(), ErrorAgent())
         bot._progress_update_interval = 0.05
         message = FakeMessage("fail")
 
@@ -350,7 +356,7 @@ class TelegramStopTests(unittest.TestCase):
 
     async def _run_concurrent_messages_reserve_one_owner_before_status_send(self):
         agent = BlockingAgent()
-        bot = TelegramBot(ChatDomeConfig(), agent)
+        bot = TelegramBot(_config(), agent)
         first_message = FakeMessage("first")
         second_message = FakeMessage("second")
 
@@ -375,7 +381,7 @@ class TelegramStopTests(unittest.TestCase):
         asyncio.run(self._run_stop_reports_no_running_task())
 
     async def _run_stop_reports_no_running_task(self):
-        bot = TelegramBot(ChatDomeConfig(), BlockingAgent())
+        bot = TelegramBot(_config(), BlockingAgent())
         stop_message = FakeMessage("/stop")
 
         update = FakeUpdate(stop_message)
@@ -412,7 +418,7 @@ class TelegramStopTests(unittest.TestCase):
             deferred_user_message="新的问题",
         )
         agent = PendingApprovalAgent(session)
-        bot = TelegramBot(ChatDomeConfig(), agent)
+        bot = TelegramBot(_config(), agent)
         card = FakeApprovalCard()
         target = SimpleNamespace(
             chat_id=123,
@@ -467,7 +473,7 @@ class TelegramStopTests(unittest.TestCase):
             pending_reason="检查系统日志",
         )
         agent = PendingApprovalAgent(session)
-        bot = TelegramBot(ChatDomeConfig(), agent)
+        bot = TelegramBot(_config(), agent)
         started = asyncio.Event()
 
         async def block_detail(*_args, **_kwargs):
@@ -506,7 +512,7 @@ class TelegramStopTests(unittest.TestCase):
         asyncio.run(self._run_stop_cancels_all_live_tasks_for_chat())
 
     async def _run_stop_cancels_all_live_tasks_for_chat(self):
-        bot = TelegramBot(ChatDomeConfig(), BlockingAgent())
+        bot = TelegramBot(_config(), BlockingAgent())
         started = [asyncio.Event() for _ in range(3)]
 
         async def block(event):
@@ -544,7 +550,7 @@ class TelegramStopTests(unittest.TestCase):
             pending_command="echo first",
             pending_reason="执行第一条命令",
         )
-        bot = TelegramBot(ChatDomeConfig(), PendingApprovalAgent(session))
+        bot = TelegramBot(_config(), PendingApprovalAgent(session))
         followup_started = asyncio.Event()
 
         async def block_followup():

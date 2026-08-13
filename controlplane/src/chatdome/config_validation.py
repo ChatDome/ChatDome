@@ -33,25 +33,16 @@ _AGENT_FIELDS = {
     "command_output_retention_days", "command_output_max_chars",
 }
 _SENTINEL_FIELDS = {
-    "enabled", "alert_chat_ids", "alert_retention_days", "push_min_severity",
-    "builtin_packs", "custom_packs_dir", "global_rate_limit", "global_rate_window",
+    "enabled", "alert_targets", "alert_retention_days", "push_min_severity",
+    "global_rate_limit", "global_rate_window",
     "learning_rounds", "aggregation_window", "daily_report", "daily_report_time",
-    "ai_analysis_min_severity", "checks",
+    "ai_analysis_min_severity",
 }
-_CHECK_FIELDS = {
-    "name", "check_id", "goal", "ai_budget", "interval", "args", "mode", "severity", "rule",
-}
-_RULE_FIELDS = {"type", "operator", "threshold", "pattern", "aggregation"}
-_DEFAULT_PACKS = ["ssh_auth", "network", "system_resources", "processes_services", "logs"]
-_SPECIAL_SENTINEL_CHECK_IDS = {"ssh_session_commands_patrol"}
 _PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _API_MODES = {
     "openai", "openai_api", "chat", "chat_completions", "chat_completion",
     "codex", "codex_responses", "codex_oauth",
 }
-_RULE_TYPES = {"line_count", "regex_extract", "regex_match", "added_count"}
-_RULE_OPERATORS = {">", ">=", "<", "<=", "==", "!="}
-_RULE_AGGREGATIONS = {"max", "min", "sum", "avg"}
 
 
 @dataclass(frozen=True)
@@ -295,9 +286,7 @@ class _Validator:
         self.reject_unknown(data, _SENTINEL_FIELDS, "chatdome.sentinel")
         for key in ("enabled", "daily_report"):
             self.optional_type(data, key, bool, "chatdome.sentinel")
-        for key in ("alert_chat_ids", "builtin_packs", "checks"):
-            self.optional_type(data, key, list, "chatdome.sentinel")
-        self.optional_type(data, "custom_packs_dir", str, "chatdome.sentinel")
+        self._alert_targets(root, data)
         self.optional_type(data, "daily_report_time", str, "chatdome.sentinel")
         for key in (
             "alert_retention_days", "global_rate_limit", "global_rate_window",
@@ -309,86 +298,64 @@ class _Validator:
             if key in data and _is_int(data[key]) and not 1 <= data[key] <= 10:
                 self.add(f"chatdome.sentinel.{key}", "必须是 1 到 10 之间的整数")
 
-        available_ids = self._available_check_ids(data)
-        checks = data.get("checks")
-        if not isinstance(checks, list):
+
+    def _alert_targets(self, root: dict[str, Any], sentinel: dict[str, Any]) -> None:
+        raw_targets = sentinel.get("alert_targets")
+        if raw_targets is None:
             return
-        for index, raw in enumerate(checks):
-            path = f"chatdome.sentinel.checks[{index}]"
-            check = self.mapping(raw, path, required=True)
-            if check is None:
-                continue
-            self.reject_unknown(check, _CHECK_FIELDS, path)
-            self.require_nonempty_string(check, "name", path)
-            self.require_nonempty_string(check, "check_id", path)
-            self.optional_type(check, "goal", str, path)
-            self.optional_type(check, "args", dict, path)
-            for key in ("ai_budget", "interval"):
-                self.positive_int(check, key, path)
-            if "severity" in check:
-                if not _is_int(check["severity"]) or not 1 <= check["severity"] <= 10:
-                    self.add(f"{path}.severity", "必须是 1 到 10 之间的整数")
-            self.enum(check, "mode", {"snapshot", "differential"}, path)
-            check_id = check.get("check_id")
-            if isinstance(check_id, str) and check_id and check_id not in available_ids:
-                self.add(f"{path}.check_id", "未在已启用的命令包中定义")
-            rule = check.get("rule")
-            if rule is not None:
-                rule_path = f"{path}.rule"
-                rule_data = self.mapping(rule, rule_path, required=True)
-                if rule_data is not None:
-                    self.reject_unknown(rule_data, _RULE_FIELDS, rule_path)
-                    self.require_nonempty_string(rule_data, "type", rule_path)
-                    self.optional_type(rule_data, "operator", str, rule_path)
-                    self.optional_type(rule_data, "pattern", str, rule_path)
-                    self.optional_type(rule_data, "aggregation", str, rule_path)
-                    if isinstance(rule_data.get("type"), str):
-                        self.enum(rule_data, "type", _RULE_TYPES, rule_path)
-                    if isinstance(rule_data.get("operator"), str):
-                        self.enum(rule_data, "operator", _RULE_OPERATORS, rule_path)
-                    if isinstance(rule_data.get("aggregation"), str):
-                        self.enum(rule_data, "aggregation", _RULE_AGGREGATIONS, rule_path)
-                    if "threshold" in rule_data and not _is_number(rule_data["threshold"]):
-                        self.add(f"{rule_path}.threshold", "必须是数字")
+        targets = self.mapping(raw_targets, "chatdome.sentinel.alert_targets", required=True)
+        if targets is None:
+            return
+        self.reject_unknown(targets, {"telegram"}, "chatdome.sentinel.alert_targets")
+        telegram = targets.get("telegram")
+        if telegram is None:
+            return
+        target = self.mapping(telegram, "chatdome.sentinel.alert_targets.telegram", required=True)
+        if target is None:
+            return
+        self.reject_unknown(target, {"user_ids"}, "chatdome.sentinel.alert_targets.telegram")
+        user_ids = target.get("user_ids")
+        if not isinstance(user_ids, list):
+            self.add("chatdome.sentinel.alert_targets.telegram.user_ids", "必须是列表")
+            return
+        telegram_config = root.get("telegram") if isinstance(root.get("telegram"), dict) else {}
+        authorized: set[int] = set()
+        for key in ("allowed_ids", "admin_ids"):
+            authorized.update(_normalized_ids(telegram_config.get(key)))
+        malformed = [value for value in user_ids if isinstance(value, bool) or not isinstance(value, int)]
+        if malformed:
+            self.add(
+                "chatdome.sentinel.alert_targets.telegram.user_ids",
+                "只能包含整数用户 ID",
+            )
+        invalid = [
+            value for value in user_ids
+            if isinstance(value, int) and not isinstance(value, bool) and value not in authorized
+        ]
+        if invalid:
+            self.add(
+                "chatdome.sentinel.alert_targets.telegram.user_ids",
+                "包含未授权用户 ID：" + ", ".join(str(value) for value in invalid),
+            )
 
-    def _available_check_ids(self, sentinel: dict[str, Any]) -> set[str]:
-        builtin_dir = Path(__file__).parent / "packs"
-        requested = sentinel.get("builtin_packs", _DEFAULT_PACKS)
-        pack_names = requested if isinstance(requested, list) else []
-        available: set[str] = set(_SPECIAL_SENTINEL_CHECK_IDS)
-        existing_packs = {path.stem for path in builtin_dir.glob("*.yaml")}
-        for index, name in enumerate(pack_names):
-            path = f"chatdome.sentinel.builtin_packs[{index}]"
-            if not isinstance(name, str):
-                self.add(path, "必须是字符串")
-                continue
-            if name not in existing_packs:
-                self.add(path, "未找到对应的内置命令包")
-                continue
-            available.update(_read_pack_ids(builtin_dir / f"{name}.yaml"))
-
-        custom = sentinel.get("custom_packs_dir")
-        if isinstance(custom, str) and custom.strip():
-            custom_dir = Path(custom).expanduser()
-            if not custom_dir.is_absolute():
-                custom_dir = self.config_path.parent / custom_dir
-            if not custom_dir.is_dir():
-                self.add("chatdome.sentinel.custom_packs_dir", "目录不存在")
-            else:
-                for path in custom_dir.glob("*.yaml"):
-                    available.update(_read_pack_ids(path))
-        return available
-
-
-def _read_pack_ids(path: Path) -> set[str]:
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
-        return set()
-    commands = raw.get("commands") if isinstance(raw, dict) else None
-    if not isinstance(commands, dict):
-        return set()
-    return {str(key) for key in commands}
+def _normalized_ids(raw: Any) -> set[int]:
+    if isinstance(raw, str):
+        values: Any = raw.split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        values = raw
+    elif raw is None:
+        values = []
+    else:
+        values = [raw]
+    normalized: set[int] = set()
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        try:
+            normalized.add(int(str(value).strip()))
+        except (TypeError, ValueError):
+            continue
+    return normalized
 
 
 def load_and_validate_config_document(path: Path) -> dict[str, Any]:

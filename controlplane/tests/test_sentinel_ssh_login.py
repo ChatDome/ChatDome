@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Union
 
+from chatdome.sentinel.checks import load_checks
 from chatdome.sentinel.scheduler import SentinelScheduler
 
 
@@ -131,6 +132,7 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
     def test_ssh_success_fingerprint_includes_sshd_pid(self):
         scheduler = SentinelScheduler(
             config=FakeConfig(),
+            checks=load_checks(FakeConfig.checks),
             pack_loader=None,
             sandbox=FakeSandbox([]),
             send_alert_fn=lambda *args, **kwargs: None,
@@ -154,6 +156,7 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
 
         scheduler = SentinelScheduler(
             config=FakeConfig(),
+            checks=load_checks(FakeConfig.checks),
             pack_loader=None,
             sandbox=FakeSandbox([]),
             send_alert_fn=lambda *args, **kwargs: None,
@@ -200,6 +203,7 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
             try:
                 scheduler = SentinelScheduler(
                     config=DuplicateCheckIdLearningConfig(),
+                    checks=load_checks(DuplicateCheckIdLearningConfig.checks),
                     pack_loader=None,
                     sandbox=FakeSandbox([]),
                     send_alert_fn=send_alert,
@@ -241,6 +245,7 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
             try:
                 scheduler = SentinelScheduler(
                     config=FakeConfig(),
+                    checks=load_checks(FakeConfig.checks),
                     pack_loader=None,
                     sandbox=FakeSandbox([baseline, first_delta, second_delta]),
                     send_alert_fn=send_alert,
@@ -292,6 +297,7 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
             try:
                 scheduler = SentinelScheduler(
                     config=FakeConfig(),
+                    checks=load_checks(FakeConfig.checks),
                     pack_loader=pack_loader,
                     sandbox=sandbox,
                     send_alert_fn=send_alert,
@@ -348,6 +354,7 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
             try:
                 scheduler = SentinelScheduler(
                     config=PatrolConfig(),
+                    checks=load_checks(PatrolConfig.checks),
                     pack_loader=pack_loader,
                     sandbox=sandbox,
                     send_alert_fn=send_alert,
@@ -388,6 +395,7 @@ class SentinelSSHLoginRegressionTests(unittest.TestCase):
             try:
                 scheduler = SentinelScheduler(
                     config=FakeConfig(),
+                    checks=load_checks(FakeConfig.checks),
                     pack_loader=None,
                     sandbox=FakeSandbox([baseline, burst]),
                     send_alert_fn=send_alert,

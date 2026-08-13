@@ -45,5 +45,5 @@ chatdome-server = "chatdome.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"chatdome" = ["packs/*.yaml"]
+"chatdome" = ["packs/*.yaml", "sentinel/*.yaml"]
 "chatdome.agent" = ["manual/*.yaml", "manual/*.md"]

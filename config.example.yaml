@@ -59,132 +59,20 @@ chatdome:
   sentinel:
     enabled: true                         # 哨兵模式开关
 
-    # 告警推送目标（空 = 使用 telegram.allowed_chat_ids；如果两者都为空，则 Sentinel 只巡检/记录，不会主动推送到手机）
-    # 运行时可在 Telegram 中用自然语言或 /sentinel_mute、/sentinel_resume 暂停/恢复推送；
-    # 静默状态保存在 $CHATDOME_DATA_DIR/sentinel/push_state.json，不影响巡检和历史记录。
-    alert_chat_ids: []
+    # 省略 telegram 告警目标时，默认推送到 telegram.allowed_ids 与 telegram.admin_ids。
+    # 显式填写 user_ids: [] 可关闭 Telegram 告警推送。
+    # alert_targets:
+    #   telegram:
+    #     user_ids: []
     alert_retention_days: 30             # sentinel/alerts.jsonl 按天保留窗口
 
     # 推/拉分离 — 推送策略
     push_min_severity: 7                   # 数值 ≥ 7 (high) 才主动推送 Telegram
                                            # 低于此级别的告警静默记录，用户通过 /sentinel_status 查看
 
-    # 命令库
-    builtin_packs:                         # 启用的内置 pack（省略 = 全部加载）
-      - ssh_auth
-      - network
-      - system_resources
-      - processes_services
-      - logs
-      # - users_permissions                # 按需启用
-      # - file_integrity
-      # - containers
-    # custom_packs_dir: "./packs"          # 用户自定义 pack 目录
-
     # 告警防护
     global_rate_limit: 10                  # 全局速率限制：每窗口最多推送 N 条
     global_rate_window: 300                # 速率窗口大小（秒）
     learning_rounds: 1                     # 冷启动静默轮数（首次启动建基线）
 
-    # 检查策略列表
-    checks:
-      - name: "SSH 新访问来源检测"
-        check_id: ssh_bruteforce
-        interval: 300
-        mode: differential
-        severity: 6                        # medium（保留检查，不主动推送）
-        rule:
-          type: added_count
-          operator: ">"
-          threshold: 0
-
-      - name: "SSH 短时多次失败登录告警（3分钟）"
-        check_id: ssh_failed_burst
-        interval: 60
-        mode: snapshot
-        args:
-          minutes: 3
-          fallback_limit: 1000
-          max_lines: 500
-        severity: 8                        # high
-        rule:
-          type: line_count
-          operator: ">="
-          threshold: 10                    # 3 分钟内失败 >= 10 次触发
-
-      - name: "SSH 持续失败登录告警（1小时）"
-        check_id: ssh_failed_burst
-        interval: 300
-        mode: snapshot
-        args:
-          minutes: 60
-          fallback_limit: 5000
-          max_lines: 1000
-        severity: 7                        # high
-        rule:
-          type: line_count
-          operator: ">="
-          threshold: 15                    # 1 小时内失败 >= 15 次触发
-
-      - name: "SSH 成功登录告警"
-        check_id: ssh_success_login
-        interval: 60
-        mode: differential
-        args:
-          limit: 200
-        severity: 9                        # critical
-        rule:
-          type: added_count
-          operator: ">"
-          threshold: 0
-
-      - name: "SSH 异常时段成功登录告警"
-        check_id: ssh_success_login_offhours
-        interval: 60
-        mode: differential
-        args:
-          since_hours: 24
-          fallback_limit: 3000
-          work_start_hour: 8               # 正常时段起始（含）
-          work_end_hour: 23                # 正常时段结束（不含）
-          limit: 200
-        severity: 8                        # high
-        rule:
-          type: added_count
-          operator: ">"
-          threshold: 0
-
-      - name: "SSH 会话命令巡检"
-        check_id: ssh_session_commands_patrol
-        interval: 900                    # 每 15 分钟追踪活跃 SSH 会话命令增量
-        mode: differential
-        args:
-          tracking_window_hours: 1        # 仅主动追踪登录后 1 小时内的会话
-          limit: 50
-        severity: 7                       # high
-        rule:
-          type: added_count
-          operator: ">"
-          threshold: 0
-
-      - name: "磁盘使用率"
-        check_id: disk_usage
-        interval: 600
-        mode: snapshot
-        severity: 4                        # low
-        rule:
-          type: regex_extract
-          pattern: '(\d+)%'
-          aggregation: max
-          operator: ">"
-          threshold: 85
-
-      - name: "新增监听端口"
-        check_id: open_ports
-        interval: 120
-        mode: differential
-        severity: 9                        # critical
-        rule:
-          type: line_count
-          operator: ">"
-          threshold: 0
+    # 检查策略由 ChatDome 内置并随版本统一更新。

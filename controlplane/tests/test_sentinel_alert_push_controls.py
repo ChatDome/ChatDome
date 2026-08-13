@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from chatdome.agent.tools import ToolDispatcher
 from chatdome.sentinel.alert_controls import parse_alert_mute_until
 from chatdome.sentinel.alerter import AlertEvent
+from chatdome.sentinel.checks import load_checks
 from chatdome.sentinel.scheduler import SentinelScheduler
 
 
@@ -293,6 +294,7 @@ class SentinelAlertPushControlTests(unittest.TestCase):
     def _scheduler(send_alert_fn, alert_chat_ids):
         return SentinelScheduler(
             config=FakeConfig(),
+            checks=load_checks(FakeConfig.checks),
             pack_loader=None,
             sandbox=FakeSandbox(),
             send_alert_fn=send_alert_fn,

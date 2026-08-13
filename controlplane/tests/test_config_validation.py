@@ -96,12 +96,13 @@ chatdome:
             str(raised.exception),
         )
 
-    def test_unknown_sentinel_check_reports_check_id_line(self):
+    def test_user_config_rejects_sentinel_checks(self):
         text = VALID_CONFIG.replace(
             "  sentinel:\n    enabled: false\n",
             "  sentinel:\n"
             "    enabled: true\n"
             "    builtin_packs: [network]\n"
+            "    custom_packs_dir: ./packs\n"
             "    checks:\n"
             "      - name: invalid\n"
             "        check_id: missing_check\n"
@@ -113,10 +114,9 @@ chatdome:
         with self.assertRaises(ConfigValidationError) as raised:
             self._load_text(text)
 
-        self.assertIn(
-            "第 18 行：chatdome.sentinel.checks[0].check_id 未在已启用的命令包中定义",
-            str(raised.exception),
-        )
+        self.assertIn("chatdome.sentinel.checks 是未知字段", str(raised.exception))
+        self.assertIn("chatdome.sentinel.builtin_packs 是未知字段", str(raised.exception))
+        self.assertIn("chatdome.sentinel.custom_packs_dir 是未知字段", str(raised.exception))
 
     def test_valid_document_loads(self):
         config = self._load_text(VALID_CONFIG)
@@ -226,28 +226,52 @@ chatdome:
         self.assertIn("第 9 行：chatdome.ai_profiles.invalid profile.api_key 不支持 env: 引用", message)
         self.assertIn("第 10 行：chatdome.ai_profiles.invalid profile.model 必须填写非空字符串", message)
 
-    def test_invalid_sentinel_rule_values_are_aggregated(self):
+    def test_sentinel_alert_targets_fall_back_to_effective_telegram_users(self):
+        config = self._load_text(
+            VALID_CONFIG.replace(
+                "    bot_token: telegram-token\n",
+                "    bot_token: telegram-token\n"
+                "    allowed_ids: [1]\n"
+                "    admin_ids: [2]\n",
+            )
+        )
+
+        self.assertEqual(config.telegram_alert_user_ids, [1, 2])
+
+    def test_explicit_empty_telegram_alert_target_disables_push(self):
         text = VALID_CONFIG.replace(
             "  sentinel:\n    enabled: false\n",
             "  sentinel:\n"
             "    enabled: true\n"
-            "    builtin_packs: [network]\n"
-            "    checks:\n"
-            "      - name: invalid rule\n"
-            "        check_id: open_ports\n"
-            "        rule:\n"
-            "          type: unsupported\n"
-            "          operator: approximate\n"
-            "          aggregation: median\n",
+            "    alert_targets:\n"
+            "      telegram:\n"
+            "        user_ids: []\n",
+        )
+
+        config = self._load_text(text)
+
+        self.assertEqual(config.telegram_alert_user_ids, [])
+
+    def test_telegram_alert_targets_must_be_authorized(self):
+        text = VALID_CONFIG.replace(
+            "    bot_token: telegram-token\n",
+            "    bot_token: telegram-token\n    allowed_ids: [1]\n",
+        ).replace(
+            "  sentinel:\n    enabled: false\n",
+            "  sentinel:\n"
+            "    enabled: true\n"
+            "    alert_targets:\n"
+            "      telegram:\n"
+            "        user_ids: [2]\n",
         )
 
         with self.assertRaises(ConfigValidationError) as raised:
             self._load_text(text)
 
-        message = str(raised.exception)
-        self.assertIn("第 20 行：chatdome.sentinel.checks[0].rule.type 取值无效", message)
-        self.assertIn("第 21 行：chatdome.sentinel.checks[0].rule.operator 取值无效", message)
-        self.assertIn("第 22 行：chatdome.sentinel.checks[0].rule.aggregation 取值无效", message)
+        self.assertIn(
+            "chatdome.sentinel.alert_targets.telegram.user_ids 包含未授权用户 ID：2",
+            str(raised.exception),
+        )
 
     def test_example_config_is_valid_without_optional_credentials(self):
         example_path = Path(__file__).parents[2] / "config.example.yaml"

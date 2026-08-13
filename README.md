@@ -98,8 +98,10 @@ The default `require_approval_for_risky_commands` mode auto-runs only commands t
 
 - Python 3.9+
 - A Linux server to monitor
-- A [Telegram Bot Token](https://core.telegram.org/bots/tutorial)
-- A Codex OAuth account for the default profile, or an OpenAI-compatible API key when switching to an API-key profile
+- Optional: a [Telegram Bot Token](https://core.telegram.org/bots/tutorial) for remote access and alerts
+- Optional: a Codex OAuth account or OpenAI-compatible API key for AI chat
+
+The core service and Sentinel can run without Telegram or an LLM. Telegram without an LLM still delivers Sentinel alerts and deterministic management commands. An LLM without Telegram remains available through the local CLI.
 
 ### Install
 
@@ -156,7 +158,7 @@ Server installations store runtime settings in `/etc/chatdome/config.yaml`; sour
 ```bash
 cp config.example.yaml config.yaml
 chmod 600 config.yaml
-# Edit config.yaml: set chatdome.telegram.bot_token, allowed_chat_ids, and any API keys you need
+# Edit config.yaml: set optional Telegram user IDs and model profiles as needed
 ```
 
 You can also use the interactive local menu from the repository root:
@@ -165,7 +167,7 @@ You can also use the interactive local menu from the repository root:
 ./chatdome
 ```
 
-By default, no LLM profile is configured (`active_ai_profile` is empty). Use the local menu to configure a profile. `System Maintenance` → `Update ChatDome` validates the official origin, fetches `main` with an explicit refspec, skips the update when commits match, replaces the checkout, builds and validates a fixed-path versioned Python environment, switches the service without moving the venv, retains the current and previous environments, restarts through the Python module entrypoint, checks application readiness, and restores the previous commit on failure.
+By default, no LLM profile is configured (`active_ai_profile` is empty). Use the local menu to configure a profile. `System Maintenance` → `Update ChatDome` backs up and migrates the production configuration, validates the candidate runtime, and restores the previous code, environment, service unit, and configuration if any update step fails.
 
 ### Run
 
@@ -185,19 +187,19 @@ When installed with `install.sh`, the `chatdome` command opens the local managem
 
 Open Telegram, send your bot a message. Done.
 
-### Find Your Telegram Chat ID
+### Find Your Telegram User ID
 
 Send any message to your bot, then visit:
 ```
 https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 ```
-Look for `"chat":{"id": 123456789}` in the response.
+Look for `"from":{"id": 123456789}` in the private-message update. Store that value in `allowed_ids` or `admin_ids`.
 
 ## Configuration
 
 ### Single-File `config.yaml`
 
-ChatDome uses one runtime configuration file. Server installations use `/etc/chatdome/config.yaml`; source development defaults to repository-local `config.yaml`. Telegram Bot token, allowed Chat IDs, OpenAI-compatible API keys, Sentinel settings, and Agent policy all live there.
+ChatDome uses one runtime configuration file. Server installations use `/etc/chatdome/config.yaml`; source development defaults to repository-local `config.yaml`. Sentinel check definitions are packaged with ChatDome and are not user configuration.
 
 The default installation comes with no API keys or pre-configured profiles. The easiest way to get started is `./chatdome` → `AI model management` → `Add Codex OAuth LLM`. ChatDome starts the OAuth Device Code login and writes the profile only after the token is saved.
 
@@ -205,17 +207,18 @@ Defaults below come from `config.example.yaml`; if copied unchanged, those value
 
 | Path | Requirement | Default (template) | Description |
 |------|-------------|--------------------|-------------|
-| `chatdome.telegram.bot_token` | Required | `""`; set before startup | Telegram Bot token |
-| `chatdome.telegram.allowed_chat_ids` | Optional | `[]`; no general chat restriction | Allowed Chat IDs |
-| `chatdome.telegram.admin_chat_ids` | Optional | `[]`; uses `allowed_chat_ids` | Private-chat LLM administrators; remote LLM management is disabled when both lists are empty |
+| `chatdome.telegram.bot_token` | Optional | `""`; Telegram disabled | Telegram Bot token |
+| `chatdome.telegram.allowed_ids` | Optional | `[]`; denies all non-admin users | Allowed private Telegram User IDs |
+| `chatdome.telegram.admin_ids` | Optional | `[]`; no administrators | Administrator User IDs; administrators inherit ordinary access |
 | `chatdome.telegram.proxy_url` | Optional | `""`; no proxy | Telegram Bot API proxy URL |
 | `chatdome.active_ai_profile` | Required after LLM setup | `""`; no profile selected | Active LLM profile name |
 | `chatdome.ai_profiles` | Required after LLM setup | `{}`; no profiles configured | LLM profile map, usually written by the local menu |
 | `chatdome.ai_profiles.<name>.api_key` | Profile-dependent | `""`; OpenAI-compatible profile is not authenticated | OpenAI-compatible profile API key, stored directly in local `config.yaml` |
 | `chatdome.sentinel.enabled` | Optional | `true` | Enable 7x24 Sentinel proactive monitoring |
+| `chatdome.sentinel.alert_targets.telegram.user_ids` | Optional | omitted; uses `allowed_ids ∪ admin_ids` | Telegram Sentinel recipients; explicit `[]` disables Telegram alert delivery |
 | `chatdome.agent.command_approval_mode` | Required | `require_approval_for_risky_commands` | Approval policy for AI-generated `run_shell_command` calls |
 
-> ⚠️ **Security**: Never commit `config.yaml` to version control. It contains secrets. Remote LLM management is available only in private chats listed in `admin_chat_ids`, or in `allowed_chat_ids` when `admin_chat_ids` is empty. API key messages are deleted before the profile is saved.
+> ⚠️ **Security**: Never commit `config.yaml` to version control. Telegram accepts private chats only. Empty `allowed_ids` and `admin_ids` deny every inbound Telegram request.
 
 ### 🎛️ Core Capability Controls
 
@@ -238,8 +241,8 @@ Sentinel command packs are internal scheduled checks and do not use the conversa
 chatdome:
   telegram:
     bot_token: "123456:ABC..."
-    allowed_chat_ids: [123456789]
-    admin_chat_ids: []
+    allowed_ids: [123456789]
+    admin_ids: []
     proxy_url: ""
     max_message_length: 4000
 
@@ -280,7 +283,7 @@ User sends message via Telegram
          │
          ▼
 ┌─────────────────────┐
-│   Auth (Chat ID)    │──── Unauthorized → ignore
+│   Auth (User ID)    │──── Unauthorized → ignore
 └────────┬────────────┘
          │
          ▼
@@ -359,11 +362,11 @@ chatdome hello
 | `/model_cancel` | Cancel the current model operation |
 | `/codex_login [profile]` | Start Codex OAuth device-code authentication |
 | `/sentinel_status` | Show Sentinel status |
-| `/sentinel_trigger` | Run all Sentinel checks |
+| `/sentinel_trigger` | Run all Sentinel checks as an administrator |
 | `/sentinel_history` | Show recent Sentinel alerts |
 | `/sentinel_packs` | Show loaded Sentinel command packs |
-| `/sentinel_mute [duration]` | Pause Sentinel alert pushes |
-| `/sentinel_resume` | Resume Sentinel alert pushes |
+| `/sentinel_mute [duration]` | Pause Sentinel alert pushes as an administrator |
+| `/sentinel_resume` | Resume Sentinel alert pushes as an administrator |
 | `/exit` | Exit terminal chat; `/quit` is an alias |
 
 CLI and Telegram load the same command catalog and call the same business services. Every registered command is normalized to `CommandResult`, converted to a unified `OutboundMessage`, and then rendered by the platform-specific renderer. `/model*` uses one model command service, `/codex_login` uses one OAuth workflow, and `/env` uses one environment Facts Builder. `/exit` and `/quit` are CLI-only because they close the local terminal process.
@@ -400,7 +403,7 @@ CLI and Telegram load the same command catalog and call the same business servic
 
 No rigid command syntax — just talk to it.
 
-Approval buttons bind the current internal approval record; users do not need to view or enter an approval ID. Each conversation has at most one active turn, and rejecting a pending command cancels that entire turn.
+Approval buttons bind the current internal approval record; users do not need to view or enter an approval ID. Telegram, CLI, and future interactive platforms share one global active turn. The lease remains occupied while a command waits for approval and is released only after completion, rejection, cancellation, or terminal failure.
 
 ### Example Questions
 
@@ -415,7 +418,7 @@ Approval buttons bind the current internal approval record; users do not need to
 
 ChatDome executes commands on your server — security is taken seriously:
 
-1. **Telegram Auth** — Only messages from whitelisted Chat IDs are processed. All others are silently dropped.
+1. **Telegram Auth** — Only private messages from whitelisted User IDs are processed. Empty lists deny all inbound requests.
 2. **Explicit Approval Policy** — `command_approval_mode` is required and controls only AI-generated `run_shell_command` calls.
 3. **Fail-Closed Risk Review** — The default mode requires approval when deterministic rules cannot establish low risk.
 4. **Sentinel Isolation** — Scheduled Sentinel checks use internal command packs and never wait on conversational approval.
@@ -445,7 +448,7 @@ ChatDome/
             ├── config.py            # Configuration loader
             ├── telegram/
             │   ├── bot.py           # Telegram bot setup & message routing
-            │   └── auth.py          # Chat ID authentication
+            │   └── auth.py          # private User ID authentication
             ├── agent/
             │   ├── core.py          # AI agent ReAct loop
             │   ├── tools.py         # Tool definitions & dispatch

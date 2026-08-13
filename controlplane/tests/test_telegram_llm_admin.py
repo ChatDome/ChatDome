@@ -208,7 +208,7 @@ def test_admin_user_inherits_ordinary_access():
     update = FakeUpdate(FakeMessage(), chat_id=1, user_id=2)
 
     assert bot._check_auth(update)
-    assert bot._is_model_admin(update)
+    assert bot._is_admin(update)
 
 
 def test_group_chat_cannot_manage_models():

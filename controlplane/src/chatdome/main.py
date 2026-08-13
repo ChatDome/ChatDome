@@ -10,11 +10,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import json
 import logging
 import os
+import signal
 import sys
-import time
 from pathlib import Path
 
 from chatdome import __version__
@@ -37,6 +36,11 @@ from chatdome.agent.engram import EngramStore
 from chatdome.telegram.bot import TelegramBot
 from chatdome.logger import setup_logging
 from chatdome.runtime_paths import environment_profile_path, llm_profile_lock_path, run_path
+from chatdome.runtime import (
+    RuntimeCapabilities,
+    discard_platform_delivery,
+    write_runtime_status,
+)
 
 
 PID_PATH = run_path("chatdome.pid")
@@ -45,7 +49,7 @@ READY_PATH = run_path("ready.json")
 
 
 class _InstanceLock:
-    """Best-effort process lock to prevent local duplicate polling instances."""
+    """Best-effort process lock to prevent duplicate core service instances."""
 
     def __init__(self, path: Path = LOCK_PATH) -> None:
         self.path = path
@@ -151,9 +155,8 @@ def main() -> None:
 
     if not instance_lock.acquire():
         logger.error(
-            "Another ChatDome process is already running in this working directory. "
-            "Only one Telegram polling instance can use a Bot Token at a time. "
-            "Check systemctl status chatdome and any manually started chatdome-server processes."
+            "Another ChatDome service is running. "
+            "Run systemctl status chatdome and stop duplicate chatdome-server processes."
         )
         sys.exit(1)
 
@@ -163,16 +166,27 @@ def main() -> None:
     except (FileNotFoundError, ValueError) as e:
         logger.error("Configuration error: %s", e)
         sys.exit(1)
+    runtime_config_path = args.config or os.environ.get("CHATDOME_CONFIG", "config.yaml")
 
     logger.info("=" * 60)
     logger.info("  ChatDome v%s — AI Host Security Assistant", __version__)
     logger.info("=" * 60)
-    active_profile = config.ai_profiles[config.active_ai_profile]
-    logger.info("  AI profile: %s", config.active_ai_profile)
-    logger.info("  AI:       %s / %s", active_profile.provider, active_profile.api_mode)
-    logger.info("  Model:    %s", active_profile.model)
-    logger.info("  Profiles: %d configured", len(config.ai_profiles))
-    logger.info("  Allowed chats: %s", config.telegram.allowed_chat_ids or "(all)")
+    if config.llm_configured:
+        active_profile = config.ai_profiles[config.active_ai_profile]
+        logger.info("  AI profile: %s", config.active_ai_profile)
+        logger.info("  AI:       %s / %s", active_profile.provider, active_profile.api_mode)
+        logger.info("  Model:    %s", active_profile.model)
+        logger.info("  Profiles: %d configured", len(config.ai_profiles))
+    else:
+        logger.info("  LLM:      not_configured")
+    logger.info(
+        "  Telegram: %s",
+        "configured" if config.telegram_configured else "not_configured",
+    )
+    logger.info(
+        "  Allowed users: %s",
+        sorted(set(config.telegram.allowed_ids) | set(config.telegram.admin_ids)) or "(none)",
+    )
     logger.info("  Command approval mode: %s", config.agent.command_approval_mode)
     logger.info(
         "  Command output archive: %s",
@@ -192,17 +206,16 @@ def main() -> None:
     pack_loader = PackLoader(
         builtin_dir=Path(__file__).parent / "packs",
     )
-    sentinel_cfg = getattr(config, "sentinel", None)
-    enabled_packs = getattr(sentinel_cfg, "builtin_packs", None) if sentinel_cfg else None
-    pack_loader.load(enabled_packs=enabled_packs)
+    pack_loader.load()
     logger.info("  Pack Loader: %d commands loaded", pack_loader.command_count)
 
     # LLM Manager
-    try:
-        llm_manager = LLMManager(config.ai_profiles, config.active_ai_profile)
-    except (RuntimeError, ValueError) as e:
-        logger.error("LLM manager error: %s", e)
-        sys.exit(1)
+    llm_manager = None
+    if config.llm_configured:
+        try:
+            llm_manager = LLMManager(config.ai_profiles, config.active_ai_profile)
+        except (RuntimeError, ValueError) as e:
+            logger.error("LLM component unavailable: %s", e)
 
     # Command Sandbox
     sandbox = CommandSandbox(
@@ -232,30 +245,58 @@ def main() -> None:
     # Engram Store
     engram_store = EngramStore()
 
-    # AI Agent
-    agent = Agent(
-        llm=None,
-        llm_manager=llm_manager,
-        sandbox=sandbox,
-        config=config.agent,
-        runtime_environment_context=runtime_environment_context,
-        user_context_ledger=user_context_ledger,
-        engram_store=engram_store,
-    )
+    def _create_agent(manager: LLMManager) -> Agent:
+        return Agent(
+            llm=None,
+            llm_manager=manager,
+            sandbox=sandbox,
+            config=config.agent,
+            runtime_environment_context=runtime_environment_context,
+            user_context_ledger=user_context_ledger,
+            engram_store=engram_store,
+        )
+
+    agent = _create_agent(llm_manager) if llm_manager is not None else None
+    bot = None
+    sentinel_scheduler = None
 
     async def _apply_llm_profile_config(new_config, action: str) -> None:
+        nonlocal llm_manager, agent, capabilities
         if action in {"switched", "updated"}:
             candidate_manager = LLMManager(
                 new_config.ai_profiles,
                 new_config.active_ai_profile,
             )
             await candidate_manager.validate_profile_ready(new_config.active_ai_profile)
-        await llm_manager.reload_profiles(
-            new_config.ai_profiles,
-            new_config.active_ai_profile,
-        )
+        if new_config.llm_configured:
+            if llm_manager is None:
+                llm_manager = LLMManager(
+                    new_config.ai_profiles,
+                    new_config.active_ai_profile,
+                )
+                agent = _create_agent(llm_manager)
+                if sentinel_scheduler is not None:
+                    agent.set_sentinel(sentinel_scheduler)
+                agent.start()
+            else:
+                await llm_manager.reload_profiles(
+                    new_config.ai_profiles,
+                    new_config.active_ai_profile,
+                )
+        elif agent is not None:
+            await agent.stop()
+            agent = None
+            llm_manager = None
         config.active_ai_profile = new_config.active_ai_profile
         config.ai_profiles = new_config.ai_profiles
+        if bot is not None:
+            bot.agent = agent
+            bot.llm_manager = llm_manager
+        capabilities = capabilities.with_state(
+            "llm",
+            "ready" if new_config.llm_configured else "not_configured",
+        )
+        write_runtime_status(READY_PATH, capabilities)
 
     def _record_profile_audit(event_type: str, actor: ProfileActor, fields: dict) -> None:
         CommandAuditTracker.record_event(
@@ -267,35 +308,37 @@ def main() -> None:
         )
 
     profile_admin = LLMProfileAdminService(
-        ProfileConfigStore(args.config, llm_profile_lock_path()),
+        ProfileConfigStore(runtime_config_path, llm_profile_lock_path()),
         runtime_apply=_apply_llm_profile_config,
         audit_recorder=_record_profile_audit,
     )
 
     # Telegram Bot
-    bot = TelegramBot(config=config, agent=agent, profile_admin=profile_admin)
-
-    sentinel_scheduler = None
+    if config.telegram_configured:
+        bot = TelegramBot(
+            config=config,
+            agent=agent,
+            profile_admin=profile_admin,
+            llm_manager=llm_manager,
+        )
 
     def _create_sentinel_scheduler(sentinel_config):
         from chatdome.sentinel.scheduler import SentinelScheduler
 
-        # Determine alert targets: sentinel.alert_chat_ids or fallback to telegram.allowed_chat_ids
-        alert_targets = sentinel_config.alert_chat_ids or config.telegram.allowed_chat_ids
+        alert_targets = config.telegram_alert_user_ids
         if alert_targets:
             logger.info("  Sentinel alert targets: %s", alert_targets)
         else:
             logger.warning(
-                "  Sentinel is enabled but no alert chat targets are configured. "
-                "Set chatdome.sentinel.alert_chat_ids or "
-                "chatdome.telegram.allowed_chat_ids in config.yaml to receive Telegram pushes."
+                "  Sentinel is enabled but no Telegram alert users are configured. "
+                "Set Telegram allowed_ids or Sentinel alert_targets to receive pushes."
             )
 
         return SentinelScheduler(
             config=sentinel_config,
             pack_loader=pack_loader,
             sandbox=sandbox,
-            send_alert_fn=bot.send_alert,
+            send_alert_fn=(bot.send_alert if bot is not None else discard_platform_delivery),
             alert_chat_ids=alert_targets,
             user_context_ledger=user_context_ledger,
         )
@@ -304,17 +347,34 @@ def main() -> None:
     if config.sentinel.enabled:
         sentinel_scheduler = _create_sentinel_scheduler(config.sentinel)
 
-        bot.set_sentinel(sentinel_scheduler, pack_loader)
+        if bot is not None:
+            bot.set_sentinel(sentinel_scheduler, pack_loader)
+        if agent is not None:
+            agent.set_sentinel(sentinel_scheduler)
         logger.info(
             "  Sentinel: ENABLED (%d checks, push>=%d, state-machine mode)",
-            len(config.sentinel.checks),
+            len(sentinel_scheduler.checks),
             config.sentinel.push_min_severity,
         )
     else:
-        bot.set_sentinel(None, pack_loader)
+        if bot is not None:
+            bot.set_sentinel(None, pack_loader)
         logger.info("  Sentinel: disabled")
 
-    app = bot.build()
+    capabilities = RuntimeCapabilities.from_config(config)
+    if config.llm_configured and llm_manager is None:
+        capabilities = capabilities.with_state(
+            "llm", "degraded", "模型组件初始化失败，请检查服务日志。"
+        )
+    app = None
+    if bot is not None:
+        try:
+            app = bot.build()
+        except Exception as exc:
+            capabilities = capabilities.with_state(
+                "telegram", "degraded", str(exc)
+            )
+            logger.error("Telegram component unavailable: %s", exc)
     reload_control = ReloadControl()
     reload_task: asyncio.Task | None = None
 
@@ -324,6 +384,17 @@ def main() -> None:
         )
 
     def _refresh_agent_runtime() -> None:
+        sandbox.default_timeout = config.agent.command_timeout
+        sandbox.max_output_chars = config.agent.max_output_chars
+        sandbox.persist_command_outputs = config.agent.persist_command_outputs
+        sandbox.command_output_retention_days = max(
+            1,
+            int(config.agent.command_output_retention_days),
+        )
+        sandbox.command_output_max_chars = max(1, int(config.agent.command_output_max_chars))
+        if agent is None:
+            return
+
         agent.config = config.agent
         agent.tools = build_tools()
         agent.session_manager.session_timeout = config.agent.session_timeout
@@ -331,6 +402,7 @@ def main() -> None:
         agent.session_manager.persisted_session_ttl = config.agent.persisted_session_ttl
         agent.session_manager.max_history_tokens = config.agent.max_history_tokens
         agent.session_manager.system_prompt = _agent_system_prompt()
+        agent.tool_dispatcher.command_approval_mode = config.agent.command_approval_mode
 
         sessions = getattr(agent.session_manager, "_sessions", {})
         for session in list(sessions.values()):
@@ -342,43 +414,44 @@ def main() -> None:
             except Exception:
                 logger.exception("Failed to refresh active session prompt")
 
-        sandbox.default_timeout = config.agent.command_timeout
-        sandbox.max_output_chars = config.agent.max_output_chars
-        agent.tool_dispatcher.command_approval_mode = config.agent.command_approval_mode
-        sandbox.persist_command_outputs = config.agent.persist_command_outputs
-        sandbox.command_output_retention_days = max(
-            1,
-            int(config.agent.command_output_retention_days),
-        )
-        sandbox.command_output_max_chars = max(1, int(config.agent.command_output_max_chars))
-
     async def _reload_sentinel_runtime() -> None:
-        nonlocal sentinel_scheduler
+        nonlocal sentinel_scheduler, capabilities
         old_scheduler = sentinel_scheduler
         if old_scheduler is not None and hasattr(old_scheduler, "stop_gracefully"):
             await old_scheduler.stop_gracefully()
 
-        pack_loader.load(enabled_packs=config.sentinel.builtin_packs)
+        pack_loader.load()
         if config.sentinel.enabled:
             sentinel_scheduler = _create_sentinel_scheduler(config.sentinel)
-            bot.set_sentinel(sentinel_scheduler, pack_loader)
+            if bot is not None:
+                bot.set_sentinel(sentinel_scheduler, pack_loader)
+            if agent is not None:
+                agent.set_sentinel(sentinel_scheduler)
             sentinel_scheduler.start()
             logger.info(
                 "Sentinel hot-reloaded: enabled (%d checks, push>=%d)",
-                len(config.sentinel.checks),
+                len(sentinel_scheduler.checks),
                 config.sentinel.push_min_severity,
             )
         else:
             sentinel_scheduler = None
-            bot.set_sentinel(None, pack_loader)
+            if bot is not None:
+                bot.set_sentinel(None, pack_loader)
+            if agent is not None:
+                agent.set_sentinel(None)
             logger.info("Sentinel hot-reloaded: disabled")
+        capabilities = capabilities.with_state(
+            "sentinel",
+            "ready" if config.sentinel.enabled else "disabled",
+        )
+        write_runtime_status(READY_PATH, capabilities)
 
     async def _apply_reload_request(domains: list[str], config_path: str = "") -> list[str]:
         requested = set(domains)
         if "all" in requested:
             requested = {"llm", "sentinel", "agent"}
 
-        new_config = load_config(config_path or args.config)
+        new_config = load_config(config_path or runtime_config_path)
         applied: list[str] = []
 
         if "llm" in requested:
@@ -436,39 +509,76 @@ def main() -> None:
             finally:
                 reload_control.clear_request(request.request_id)
 
-    original_post_init = bot.post_init
+    async def _run_service() -> None:
+        nonlocal reload_task, capabilities
+        stop_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for stop_signal in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+                loop.add_signal_handler(stop_signal, stop_event.set)
 
-    async def _post_init_with_runtime(app_instance):
-        nonlocal reload_task
-        await original_post_init(app_instance)
-        READY_PATH.write_text(
-            json.dumps({"pid": os.getpid(), "ready_at": time.time()}),
-            encoding="utf-8",
-        )
+        telegram_initialized = False
+        telegram_started = False
+        polling_started = False
+        if agent is not None:
+            agent.start()
         if sentinel_scheduler is not None:
             sentinel_scheduler.start()
-        reload_task = app_instance.create_task(_reload_watch_loop())
+        reload_task = asyncio.create_task(_reload_watch_loop())
 
-    app.post_init = _post_init_with_runtime
+        if app is not None and bot is not None:
+            logger.info("Starting Telegram bot polling...")
+            try:
+                await app.initialize()
+                telegram_initialized = True
+                if app.updater is None:
+                    raise RuntimeError("Telegram updater is unavailable")
+                await app.updater.start_polling(drop_pending_updates=True)
+                polling_started = True
+                await app.start()
+                telegram_started = True
+                await bot.post_init(app)
+            except Exception as exc:
+                capabilities = capabilities.with_state(
+                    "telegram", "degraded", str(exc)
+                )
+                logger.exception("Telegram component degraded")
+        else:
+            logger.info("Telegram component: %s", capabilities.telegram.state)
 
-    original_post_stop = bot.post_stop
-
-    async def _post_stop_with_runtime(app_instance):
-        nonlocal reload_task
-        if reload_task is not None:
-            reload_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await reload_task
-            reload_task = None
-        await original_post_stop(app_instance)
-
-    app.post_stop = _post_stop_with_runtime
+        write_runtime_status(READY_PATH, capabilities)
+        logger.info("ChatDome core service ready")
+        try:
+            await stop_event.wait()
+        finally:
+            if bot is not None and telegram_initialized:
+                with contextlib.suppress(Exception):
+                    await bot.post_stop(app)
+            if polling_started and app is not None and app.updater is not None:
+                with contextlib.suppress(Exception):
+                    await app.updater.stop()
+            if telegram_started and app is not None:
+                with contextlib.suppress(Exception):
+                    await app.stop()
+            if telegram_initialized and app is not None:
+                with contextlib.suppress(Exception):
+                    await app.shutdown()
+            if reload_task is not None:
+                reload_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await reload_task
+                reload_task = None
+            if sentinel_scheduler is not None:
+                with contextlib.suppress(Exception):
+                    await sentinel_scheduler.stop_gracefully()
+            if agent is not None:
+                with contextlib.suppress(Exception):
+                    await agent.stop()
 
     # ── Run ──
-    logger.info("Starting Telegram bot polling...")
     try:
         _write_pid_file()
-        app.run_polling(drop_pending_updates=True)
+        asyncio.run(_run_service())
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:

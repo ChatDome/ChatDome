@@ -37,17 +37,6 @@ class TelegramConfig:
     proxy_url: str = ""
     max_message_length: int = 4000
 
-    @property
-    def allowed_chat_ids(self) -> list[int]:
-        """Compatibility accessor for internal call sites during the ID rename."""
-        return self.allowed_ids
-
-    @property
-    def admin_chat_ids(self) -> list[int]:
-        """Compatibility accessor for internal call sites during the ID rename."""
-        return self.admin_ids
-
-
 @dataclass
 class AIConfig:
     """LLM profile connection settings."""
@@ -80,16 +69,18 @@ class AgentConfig:
 
 
 @dataclass
+class PlatformAlertTarget:
+    """Platform-specific Sentinel recipients."""
+    user_ids: list[int] = field(default_factory=list)
+
+
+@dataclass
 class SentinelConfig:
     """Sentinel 7x24 security monitoring configuration."""
     enabled: bool = False
-    alert_chat_ids: list[int] = field(default_factory=list)
+    alert_targets: dict[str, PlatformAlertTarget] = field(default_factory=dict)
     alert_retention_days: int = 30
     push_min_severity: int = 7
-    builtin_packs: list[str] = field(default_factory=lambda: [
-        "ssh_auth", "network", "system_resources", "processes_services", "logs",
-    ])
-    custom_packs_dir: str = ""
     global_rate_limit: int = 10
     global_rate_window: int = 300
     learning_rounds: int = 1
@@ -97,7 +88,6 @@ class SentinelConfig:
     daily_report: bool = True
     daily_report_time: str = "09:00"
     ai_analysis_min_severity: int = 7
-    checks: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -116,6 +106,13 @@ class ChatDomeConfig:
     @property
     def llm_configured(self) -> bool:
         return bool(self.active_ai_profile and self.ai_profiles)
+
+    @property
+    def telegram_alert_user_ids(self) -> list[int]:
+        target = self.sentinel.alert_targets.get("telegram")
+        if target is not None:
+            return list(target.user_ids)
+        return sorted(set(self.telegram.allowed_ids) | set(self.telegram.admin_ids))
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +262,7 @@ def parse_config_document(raw_document: Any) -> ChatDomeConfig:
         raise ValueError("chatdome configuration must be a mapping.")
 
     active_ai_profile, ai_profiles = _load_ai_profiles(yaml_data)
+    sentinel_data = yaml_data.get("sentinel")
     config = ChatDomeConfig(
         telegram=_dict_to_dataclass(TelegramConfig, yaml_data.get("telegram")),
         active_ai_profile=active_ai_profile,
@@ -274,6 +272,13 @@ def parse_config_document(raw_document: Any) -> ChatDomeConfig:
     )
     config.telegram.allowed_ids = _parse_chat_ids(config.telegram.allowed_ids)
     config.telegram.admin_ids = _parse_chat_ids(config.telegram.admin_ids)
+    raw_targets = sentinel_data.get("alert_targets", {}) if isinstance(sentinel_data, dict) else {}
+    config.sentinel.alert_targets = {
+        str(platform): PlatformAlertTarget(
+            user_ids=_parse_chat_ids(raw.get("user_ids")) if isinstance(raw, dict) else [],
+        )
+        for platform, raw in raw_targets.items()
+    }
     return config
 
 
@@ -295,13 +300,7 @@ def validate_llm_config(config: ChatDomeConfig) -> None:
 def validate_runtime_config(config: ChatDomeConfig) -> list[str]:
     """Validate process startup requirements and return non-fatal warnings."""
     validate_llm_config(config)
-    warnings: list[str] = []
-    if config.sentinel.enabled and not config.sentinel.checks:
-        warnings.append(
-            "Sentinel is enabled but no checks are configured. "
-            "Define chatdome.sentinel.checks in config.yaml."
-        )
-    return warnings
+    return []
 
 
 def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:

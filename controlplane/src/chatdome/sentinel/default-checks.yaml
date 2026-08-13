@@ -1,0 +1,54 @@
+checks:
+  - name: SSH 新访问来源检测
+    check_id: ssh_bruteforce
+    interval: 300
+    mode: differential
+    severity: 6
+    rule: {type: added_count, operator: ">", threshold: 0}
+  - name: SSH 短时多次失败登录告警（3分钟）
+    check_id: ssh_failed_burst
+    interval: 60
+    mode: snapshot
+    args: {minutes: 3, fallback_limit: 1000, max_lines: 500}
+    severity: 8
+    rule: {type: line_count, operator: ">=", threshold: 10}
+  - name: SSH 持续失败登录告警（1小时）
+    check_id: ssh_failed_burst
+    interval: 300
+    mode: snapshot
+    args: {minutes: 60, fallback_limit: 5000, max_lines: 1000}
+    severity: 7
+    rule: {type: line_count, operator: ">=", threshold: 15}
+  - name: SSH 成功登录告警
+    check_id: ssh_success_login
+    interval: 60
+    mode: differential
+    args: {limit: 200}
+    severity: 9
+    rule: {type: added_count, operator: ">", threshold: 0}
+  - name: SSH 异常时段成功登录告警
+    check_id: ssh_success_login_offhours
+    interval: 60
+    mode: differential
+    args: {since_hours: 24, fallback_limit: 3000, work_start_hour: 8, work_end_hour: 23, limit: 200}
+    severity: 8
+    rule: {type: added_count, operator: ">", threshold: 0}
+  - name: SSH 会话命令巡检
+    check_id: ssh_session_commands_patrol
+    interval: 900
+    mode: differential
+    args: {tracking_window_hours: 1, limit: 50}
+    severity: 7
+    rule: {type: added_count, operator: ">", threshold: 0}
+  - name: 磁盘使用率
+    check_id: disk_usage
+    interval: 600
+    mode: snapshot
+    severity: 4
+    rule: {type: regex_extract, pattern: '(\d+)%', aggregation: max, operator: ">", threshold: 85}
+  - name: 新增监听端口
+    check_id: open_ports
+    interval: 120
+    mode: differential
+    severity: 9
+    rule: {type: line_count, operator: ">", threshold: 0}

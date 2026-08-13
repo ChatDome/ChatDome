@@ -67,7 +67,7 @@ class CommandHandlerRuntime:
     publish_deferred: DeferredPublisher | None = None
     schedule_task: TaskScheduler | None = None
     defer_commands: bool = False
-    model_admin_allowed: bool = True
+    admin_allowed: bool = False
     abort_pending_request: Callable[[], Any] | None = None
     handle_deferred_message: Callable[[str, int | None], Any] | None = None
 
@@ -296,13 +296,13 @@ class CommandHandlerService:
         return value
 
     @staticmethod
-    def _require_model_admin(runtime: CommandHandlerRuntime) -> CommandResult | None:
-        if runtime.model_admin_allowed:
+    def _require_admin(runtime: CommandHandlerRuntime) -> CommandResult | None:
+        if runtime.admin_allowed:
             return None
         return CommandResult(
             outcome="unauthorized",
-            title="Model management",
-            text="当前会话没有 model 管理权限。",
+            title="Administrator access",
+            text="需要管理员权限。",
             severity="error",
         )
 
@@ -352,7 +352,7 @@ class CommandHandlerService:
         service = self._require(runtime.model_service, "model service")
         if not invocation.args:
             return service.list_profiles()
-        denied = self._require_model_admin(runtime)
+        denied = self._require_admin(runtime)
         if denied:
             return denied
         return await service.switch(invocation.args[0], self._actor(invocation, runtime))
@@ -361,7 +361,7 @@ class CommandHandlerService:
         return self._require(runtime.model_service, "model service").list_profiles()
 
     async def _model_add(self, invocation: CommandInvocation, runtime: CommandHandlerRuntime) -> CommandResult:
-        denied = self._require_model_admin(runtime)
+        denied = self._require_admin(runtime)
         if denied:
             return denied
         service = self._require(runtime.model_service, "model service")
@@ -373,7 +373,7 @@ class CommandHandlerService:
         return outcome.result
 
     async def _model_delete(self, invocation: CommandInvocation, runtime: CommandHandlerRuntime) -> CommandResult:
-        denied = self._require_model_admin(runtime)
+        denied = self._require_admin(runtime)
         if denied:
             return denied
         service = self._require(runtime.model_service, "model service")
@@ -384,7 +384,7 @@ class CommandHandlerService:
         return await self.model_workflow.prepare_delete(invocation, service)
 
     async def _model_cancel(self, invocation: CommandInvocation, runtime: CommandHandlerRuntime) -> CommandResult:
-        denied = self._require_model_admin(runtime)
+        denied = self._require_admin(runtime)
         if denied:
             return denied
         return self.model_workflow.cancel(
@@ -392,7 +392,7 @@ class CommandHandlerService:
         )
 
     async def _codex_login(self, invocation: CommandInvocation, runtime: CommandHandlerRuntime) -> CommandResult:
-        denied = self._require_model_admin(runtime)
+        denied = self._require_admin(runtime)
         if denied:
             return denied
         request = CodexWorkflowRequest(
@@ -707,11 +707,14 @@ class CommandHandlerService:
             facts={"alert_token": token, "event": event_payload},
         )
 
-    @staticmethod
     async def _sentinel_trigger(
+        self,
         _invocation: CommandInvocation,
         runtime: CommandHandlerRuntime,
     ) -> CommandResult:
+        denied = self._require_admin(runtime)
+        if denied:
+            return denied
         return await sentinel_trigger(runtime.sentinel)
 
     @staticmethod
@@ -733,6 +736,9 @@ class CommandHandlerService:
         invocation: CommandInvocation,
         runtime: CommandHandlerRuntime,
     ) -> CommandResult:
+        denied = self._require_admin(runtime)
+        if denied:
+            return denied
         result = sentinel_mute(
             runtime.sentinel,
             invocation.args,
@@ -751,6 +757,9 @@ class CommandHandlerService:
         invocation: CommandInvocation,
         runtime: CommandHandlerRuntime,
     ) -> CommandResult:
+        denied = self._require_admin(runtime)
+        if denied:
+            return denied
         result = sentinel_resume(
             runtime.sentinel,
             chat_id=invocation.context.chat_id,

@@ -17,6 +17,20 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI_PATH = REPO_ROOT / "chatdome-cli.py"
+MENU_PATH = REPO_ROOT / "chatdome"
+INSTALL_PATH = REPO_ROOT / "install.sh"
+
+
+def test_setup_uses_allowed_user_ids_command():
+    script = MENU_PATH.read_text(encoding="utf-8")
+    installer = INSTALL_PATH.read_text(encoding="utf-8")
+
+    assert "Set allowed User IDs? [y/N]: " in script
+    assert "User IDs (comma-separated): " in script
+    assert 'run_cli set-allowed-ids "$chat_ids"' in script
+    assert "set-chat-ids" not in script
+    assert "allowed User IDs" in installer
+    assert "allowed Chat IDs" not in installer
 
 
 def _load_cli_module():
@@ -100,6 +114,88 @@ class ChatDomeCLITests(unittest.TestCase):
             "配置检查失败，共 1 项",
         ):
             self.cli.validate_config(SimpleNamespace())
+
+    def test_migrate_config_converts_legacy_fields_and_preserves_secrets(self):
+        legacy = {
+            "chatdome": {
+                "telegram": {
+                    "bot_token": "secret-token",
+                    "allowed_chat_ids": [1],
+                    "admin_chat_ids": [2],
+                },
+                "active_ai_profile": "base",
+                "ai_profiles": {
+                    "base": {
+                        "model": "gpt-4o",
+                        "api_key": "secret-key",
+                    }
+                },
+                "agent": {
+                    "allow_generated_commands": True,
+                    "allow_unrestricted_commands": False,
+                },
+                "sentinel": {
+                    "enabled": True,
+                    "alert_chat_ids": [2],
+                    "checks": [{"name": "disk", "check_id": "disk_usage"}],
+                    "builtin_packs": ["network"],
+                    "custom_packs_dir": "./packs",
+                },
+            }
+        }
+        self.config_path.write_text(yaml.safe_dump(legacy), encoding="utf-8")
+        backup = self.root / "config.rollback"
+
+        self.cli.migrate_config(
+            SimpleNamespace(from_commit="old", backup_path=str(backup))
+        )
+
+        migrated = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))["chatdome"]
+        self.assertEqual(migrated["telegram"]["allowed_ids"], [1])
+        self.assertEqual(migrated["telegram"]["admin_ids"], [2])
+        self.assertNotIn("allowed_chat_ids", migrated["telegram"])
+        self.assertEqual(
+            migrated["agent"]["command_approval_mode"],
+            "require_approval_for_risky_commands",
+        )
+        self.assertNotIn("allow_generated_commands", migrated["agent"])
+        self.assertNotIn("allow_unrestricted_commands", migrated["agent"])
+        self.assertEqual(
+            migrated["sentinel"]["alert_targets"]["telegram"]["user_ids"],
+            [2],
+        )
+        self.assertNotIn("checks", migrated["sentinel"])
+        self.assertNotIn("builtin_packs", migrated["sentinel"])
+        self.assertNotIn("custom_packs_dir", migrated["sentinel"])
+        self.assertEqual(migrated["telegram"]["bot_token"], "secret-token")
+        self.assertEqual(migrated["ai_profiles"]["base"]["api_key"], "secret-key")
+        self.assertTrue(backup.is_file())
+
+    def test_migrate_config_is_idempotent(self):
+        first_backup = self.root / "first.rollback"
+        second_backup = self.root / "second.rollback"
+
+        self.cli.migrate_config(
+            SimpleNamespace(from_commit="old", backup_path=str(first_backup))
+        )
+        first = self.config_path.read_text(encoding="utf-8")
+        self.cli.migrate_config(
+            SimpleNamespace(from_commit="old", backup_path=str(second_backup))
+        )
+
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), first)
+
+    def test_migrate_config_restores_backup_when_candidate_validation_fails(self):
+        original = "chatdome:\n  unknown: true\n"
+        self.config_path.write_text(original, encoding="utf-8")
+        backup = self.root / "config.rollback"
+
+        with self.assertRaises(SystemExit):
+            self.cli.migrate_config(
+                SimpleNamespace(from_commit="old", backup_path=str(backup))
+            )
+
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), original)
 
     def test_agent_status_reports_only_command_approval_mode(self):
         with patch("builtins.print") as output:
@@ -1363,6 +1459,42 @@ class ChatDomeCLITests(unittest.TestCase):
 
         with patch.object(self.cli, "_process_running", return_value=True):
             self.cli.health_check(SimpleNamespace())
+
+    def test_health_check_reports_component_states(self):
+        self.pid_path.parent.mkdir(parents=True, exist_ok=True)
+        self.pid_path.write_text("1234\n", encoding="utf-8")
+        self.ready_path.write_text(
+            json.dumps(
+                {
+                    "pid": 1234,
+                    "components": {
+                        "core": {"state": "ready", "detail": ""},
+                        "sentinel": {"state": "ready", "detail": ""},
+                        "llm": {"state": "not_configured", "detail": ""},
+                        "telegram": {"state": "degraded", "detail": "API unavailable"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.object(self.cli, "_process_running", return_value=True):
+            with patch("builtins.print") as output:
+                self.cli.health_check(SimpleNamespace())
+
+        rendered = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("core: ready", rendered)
+        self.assertIn("llm: not_configured", rendered)
+        self.assertIn("telegram: degraded (API unavailable)", rendered)
+
+    def test_terminal_runtime_requires_configured_model(self):
+        data = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        data["chatdome"]["active_ai_profile"] = ""
+        data["chatdome"]["ai_profiles"] = {}
+        self.config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+        with self.assertRaisesRegex(SystemExit, "Model Configuration"):
+            self.cli._create_terminal_chat_runtime(SimpleNamespace(chat_id=-1))
 
     def test_health_check_rejects_stale_ready_file(self):
         self.pid_path.parent.mkdir(parents=True, exist_ok=True)

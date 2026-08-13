@@ -52,6 +52,7 @@ from chatdome.telegram.auth import Authenticator
 from chatdome.telegram.formatting import MessageMarkup, TelegramMessageFormatter
 from chatdome.telegram.progress import TelegramProgressMessage
 from chatdome.runtime_paths import environment_profile_path
+from chatdome.runtime import MODEL_SETUP_MESSAGE
 from chatdome.model_commands import ModelCommandService
 from chatdome.slash_commands import (
     CommandContext,
@@ -89,11 +90,13 @@ class TelegramBot:
     def __init__(
         self,
         config: ChatDomeConfig,
-        agent: Agent,
+        agent: Agent | None,
         profile_admin: LLMProfileAdminService | None = None,
+        llm_manager: Any = None,
     ):
         self.config = config
         self.agent = agent
+        self.llm_manager = llm_manager
         self.profile_admin = profile_admin
         self._codex_oauth = CodexOAuthService(profile_admin)
         self.auth = Authenticator(
@@ -135,21 +138,27 @@ class TelegramBot:
         """Inject Sentinel scheduler after construction (avoids circular deps)."""
         self._sentinel = scheduler
         self._pack_loader = pack_loader
-        if hasattr(self.agent, "set_sentinel"):
+        if self.agent is not None and hasattr(self.agent, "set_sentinel"):
             self.agent.set_sentinel(scheduler)
 
     async def post_init(self, app: Application) -> None:
         """Called by the Telegram application after initialization, inside the event loop."""
-        self.agent.start()
-        
         # Send startup notifications
-        for chat_id in self.config.telegram.allowed_chat_ids:
+        ready_components = ["管理命令"]
+        if self._sentinel is not None:
+            ready_components.insert(0, "Sentinel")
+        if self.agent is not None:
+            ready_components.append("大模型能力")
+        body = "🚀 ChatDome 已上线\n" + "、".join(ready_components) + "已就绪。"
+        for chat_id in sorted(
+            set(self.config.telegram.allowed_ids) | set(self.config.telegram.admin_ids)
+        ):
             try:
                 await self._platform_adapter.deliver(
                     build_notification_message(
                         title="ChatDome online",
                         summary="ChatDome 已上线。",
-                        body="🚀 ChatDome 已上线\n安全探针与大模型推理引擎已就绪。",
+                        body=body,
                         outcome="service_started",
                         facts={"lifecycle": "started"},
                     ),
@@ -167,7 +176,9 @@ class TelegramBot:
             except Exception as e:
                 logger.error("Failed to stop Sentinel scheduler gracefully: %s", e)
 
-        for chat_id in self.config.telegram.allowed_chat_ids:
+        for chat_id in sorted(
+            set(self.config.telegram.allowed_ids) | set(self.config.telegram.admin_ids)
+        ):
             try:
                 await self._platform_adapter.deliver(
                     build_notification_message(
@@ -271,8 +282,8 @@ class TelegramBot:
             actor_id=actor_id,
             event_recorder=record_event,
             capabilities=(
-                frozenset({"model_admin"})
-                if self._is_model_admin(update) else frozenset()
+                frozenset({"admin"})
+                if self._is_admin(update) else frozenset()
             ),
         )
         target = getattr(update, "effective_message", None)
@@ -280,14 +291,15 @@ class TelegramBot:
             self._command_targets[command_context.request_id] = target
         return command_context
 
-    def _is_model_admin(self, update: Update | None) -> bool:
-        if update is None or update.effective_chat is None or update.effective_user is None:
+    def _is_admin(self, update: Update | None) -> bool:
+        chat = getattr(update, "effective_chat", None)
+        user = getattr(update, "effective_user", None)
+        if chat is None or user is None:
             return False
-        chat = update.effective_chat
         return bool(
             self._check_auth(update)
             and getattr(chat, "type", "") == "private"
-            and self.auth.is_admin(update.effective_user.id)
+            and self.auth.is_admin(user.id)
         )
 
     async def _sync_model_manager(self) -> None:
@@ -369,7 +381,7 @@ class TelegramBot:
             schedule_task=schedule_task,
             handle_deferred_message=handle_deferred_message,
             defer_commands=True,
-            model_admin_allowed="model_admin" in invocation.context.capabilities,
+            admin_allowed="admin" in invocation.context.capabilities,
         )
 
     def _command_handler(
@@ -877,6 +889,10 @@ class TelegramBot:
             chat_id, user_message[:100],
         )
 
+        if self.agent is None:
+            await update.message.reply_text(MODEL_SETUP_MESSAGE)
+            return
+
         if self._active_task_for_chat(chat_id) is not None:
             await update.message.reply_text("任务正在运行。\n发送 /stop 中止。")
             return
@@ -966,6 +982,8 @@ class TelegramBot:
             kwargs["user_id"] = user_id
         if "deferred" in params or supports_kwargs:
             kwargs["deferred"] = deferred
+        if "source" in params or supports_kwargs:
+            kwargs["source"] = "telegram"
         return await handle_message(chat_id, user_message, **kwargs)
 
     async def _run_agent_message(
@@ -1245,7 +1263,7 @@ class TelegramBot:
     async def _send_round_limit_prompt(self, message, data: dict[str, Any] | None = None) -> None:
         """Ask user whether to continue after reaching one execution window."""
         payload = dict(data or {})
-        payload.setdefault("window", self.agent.config.max_rounds_per_turn)
+        payload.setdefault("window", self.config.agent.max_rounds_per_turn)
         outbound = OutboundMessageBuilder().from_agent_result(
             AgentResult.round_limit(payload)
         )
@@ -1378,7 +1396,7 @@ class TelegramBot:
                 await progress.delete(fallback_text=fallback_text)
 
     def _get_llm_manager(self):
-        return getattr(self.agent, "llm_manager", None)
+        return self.llm_manager or getattr(self.agent, "llm_manager", None)
 
     def _model_command_service(self) -> ModelCommandService:
         return ModelCommandService(

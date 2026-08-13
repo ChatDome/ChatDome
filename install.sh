@@ -481,7 +481,7 @@ ChatDome installed.
 
 Next:
   1. Run: chatdome
-  2. Configure Telegram Bot Token and allowed Chat IDs.
+  2. Configure Telegram Bot Token and allowed User IDs.
   3. Start: sudo systemctl start chatdome
 
 Config: $CONFIG_FILE

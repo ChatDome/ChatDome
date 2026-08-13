@@ -102,8 +102,10 @@ ChatDome 会根据用户明确请求生成 Shell 命令。必填配置 `chatdome
 
 - Python 3.9+
 - 一台 Linux 服务器
-- [Telegram Bot Token](https://core.telegram.org/bots/tutorial)
-- Codex OAuth 账号（默认 profile）或 OpenAI-compatible API Key（切换到 API-key profile 时）
+- 可选：[Telegram Bot Token](https://core.telegram.org/bots/tutorial)，用于远程访问和告警
+- 可选：Codex OAuth 账号或 OpenAI-compatible API Key，用于 AI 对话
+
+核心服务和 Sentinel 不依赖 Telegram 或 LLM。只配置 Telegram 时仍可接收 Sentinel 告警并使用确定性管理命令；只配置 LLM 时可通过本地 CLI 对话。
 
 ### 安装
 
@@ -160,7 +162,7 @@ python -m pip install -e ./controlplane
 ```bash
 cp config.example.yaml config.yaml
 chmod 600 config.yaml
-# 编辑 config.yaml：填写 chatdome.telegram.bot_token、allowed_chat_ids 和需要的 api_key
+# 编辑 config.yaml：按需填写 Telegram User ID 和模型 profile
 ```
 
 也可以直接运行仓库根目录的交互式菜单：
@@ -169,7 +171,7 @@ chmod 600 config.yaml
 ./chatdome
 ```
 
-默认未配置任何大模型（`active_ai_profile` 为空）。可通过本地菜单配置 profile。`System Maintenance` → `Update ChatDome` 会校验官方远端、精确拉取 `main`，commit 相同时直接结束，否则覆盖代码、在固定版本路径构建并校验 Python 环境、不移动 venv、仅保留当前和上一环境，并重启检查应用就绪状态；失败时恢复旧 commit。
+默认未配置任何大模型（`active_ai_profile` 为空）。可通过本地菜单配置 profile。`System Maintenance` → `Update ChatDome` 会备份并迁移生产配置、校验候选运行时；任一步失败时恢复旧代码、Python 环境、systemd unit 和配置文件。
 
 ### 运行
 
@@ -189,19 +191,19 @@ chatdome-server --config config.yaml
 
 打开 Telegram，给你的 Bot 发一条消息，搞定。
 
-### 获取你的 Telegram Chat ID
+### 获取你的 Telegram User ID
 
 给你的 Bot 发送任意消息，然后访问：
 ```
 https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 ```
-在返回结果中找到 `"chat":{"id": 123456789}`。
+在私聊更新中找到 `"from":{"id": 123456789}`，将该值写入 `allowed_ids` 或 `admin_ids`。
 
 ## 配置
 
 ### config.yaml 单文件配置
 
-ChatDome 采用单文件运行配置。服务器安装使用 `/etc/chatdome/config.yaml`，源码开发默认使用仓库内 `config.yaml`。Telegram Bot Token、允许访问的 Chat IDs、OpenAI-compatible API Key、Sentinel 和 Agent 策略均写入该文件。
+ChatDome 采用单文件运行配置。服务器安装使用 `/etc/chatdome/config.yaml`，源码开发默认使用仓库内 `config.yaml`。Sentinel 检查定义随程序发布，不属于用户配置。
 
 默认初始安装时不包含任何 API Key 或预设档案。最简单的起步方式是运行 `./chatdome` → `AI model management` → `Add Codex OAuth LLM`；ChatDome 会触发 OAuth Device Code 登录，并在 token 保存成功后写入 profile。
 
@@ -209,17 +211,18 @@ ChatDome 采用单文件运行配置。服务器安装使用 `/etc/chatdome/conf
 
 | 配置路径 | 配置要求 | 默认值（模板） | 说明 |
 |----------|----------|----------------|------|
-| `chatdome.telegram.bot_token` | 必填 | `""`；启动前填写 | Telegram Bot Token |
-| `chatdome.telegram.allowed_chat_ids` | 可选 | `[]`；不限制普通访问 | 允许访问的 Chat ID 列表 |
-| `chatdome.telegram.admin_chat_ids` | 可选 | `[]`；使用 `allowed_chat_ids` | 允许管理 LLM profile 的私聊管理员；两者均为空时禁用远程 LLM 管理 |
+| `chatdome.telegram.bot_token` | 可选 | `""`；不启用 Telegram | Telegram Bot Token |
+| `chatdome.telegram.allowed_ids` | 可选 | `[]`；拒绝所有非管理员用户 | 允许访问的私聊 Telegram User ID |
+| `chatdome.telegram.admin_ids` | 可选 | `[]`；无管理员 | 管理员 User ID，自动拥有普通访问权限 |
 | `chatdome.telegram.proxy_url` | 可选 | `""`；不使用代理 | Telegram Bot API 代理地址 |
 | `chatdome.active_ai_profile` | 配置 LLM 后必填 | `""`；未选择 profile | 当前启用的 LLM profile 名称 |
 | `chatdome.ai_profiles` | 配置 LLM 后必填 | `{}`；未配置 profile | LLM profile 集合，可通过本地菜单写入 |
 | `chatdome.ai_profiles.<name>.api_key` | 取决于 profile | `""`；OpenAI-compatible profile 未认证 | OpenAI-compatible profile 的 API Key，直接写入本地 `config.yaml` |
 | `chatdome.sentinel.enabled` | 可选 | `true` | 开启 7×24 Sentinel 哨兵主动监控模式 |
+| `chatdome.sentinel.alert_targets.telegram.user_ids` | 可选 | 省略时使用 `allowed_ids ∪ admin_ids` | Telegram Sentinel 告警目标；显式 `[]` 关闭 Telegram 告警推送 |
 | `chatdome.agent.command_approval_mode` | 必填 | `require_approval_for_risky_commands` | AI 生成的 `run_shell_command` 审批策略 |
 
-> ⚠️ **安全提醒**：切勿将 `config.yaml` 提交到版本控制。远程 LLM 管理仅允许 `admin_chat_ids` 中的私聊管理员使用；`admin_chat_ids` 为空时使用 `allowed_chat_ids`。API Key 消息会在保存配置前删除。
+> ⚠️ **安全提醒**：切勿将 `config.yaml` 提交到版本控制。Telegram 只接受私聊；`allowed_ids` 和 `admin_ids` 同时为空时拒绝所有 Telegram 入站请求。
 
 ### 🎛️ 核心能力控制
 
@@ -242,8 +245,8 @@ Sentinel 命令包仅用于内部定时巡检，不进入对话审批流程。
 chatdome:
   telegram:
     bot_token: "123456:ABC..."
-    allowed_chat_ids: [123456789]
-    admin_chat_ids: []
+    allowed_ids: [123456789]
+    admin_ids: []
     proxy_url: ""
     max_message_length: 4000
 
@@ -284,7 +287,7 @@ chatdome:
          │
          ▼
 ┌─────────────────────┐
-│  鉴权 (Chat ID)     │──── 未授权 → 忽略
+│  鉴权 (User ID)     │──── 未授权 → 忽略
 └────────┬────────────┘
          │
          ▼
@@ -363,11 +366,11 @@ chatdome hello
 | `/reject` | 拒绝当前待审批命令并取消任务 |
 | `/continue` | 继续暂停中的任务 |
 | `/sentinel_status` | 查看 Sentinel 状态 |
-| `/sentinel_trigger` | 运行全部 Sentinel 检查 |
+| `/sentinel_trigger` | 管理员运行全部 Sentinel 检查 |
 | `/sentinel_history` | 查看最近 Sentinel 告警 |
 | `/sentinel_packs` | 查看已加载 Sentinel Command Pack |
-| `/sentinel_mute [duration]` | 暂停 Sentinel 告警推送 |
-| `/sentinel_resume` | 恢复 Sentinel 告警推送 |
+| `/sentinel_mute [duration]` | 管理员暂停 Sentinel 告警推送 |
+| `/sentinel_resume` | 管理员恢复 Sentinel 告警推送 |
 | `/exit` | 退出终端会话；`/quit` 为别名 |
 
 CLI 与 Telegram 加载同一命令目录并调用同一业务服务。每个已注册命令都会规范化为 `CommandResult`，转换为统一 `OutboundMessage`，再由平台 Renderer 输出。`/model*`、`/codex_login` 和 `/env` 分别使用共享模型命令服务、OAuth 流程和环境 Facts Builder。`/exit` 与 `/quit` 只用于关闭本地终端进程。
@@ -403,7 +406,7 @@ CLI 与 Telegram 加载同一命令目录并调用同一业务服务。每个已
 
 没有死板的命令格式——直接说话就行。
 
-审批按钮会在内部绑定当前审批记录；用户无需查看或输入审批编号。同一会话同时只处理一个活动 turn，拒绝待审批命令会取消整个 turn。
+审批按钮会在内部绑定当前审批记录；用户无需查看或输入审批编号。Telegram、CLI 和未来交互平台全局共用一个活动 turn；等待审批时继续占用，只有完成、拒绝、取消或终态失败才释放。
 
 ### 示例问题
 
@@ -418,7 +421,7 @@ CLI 与 Telegram 加载同一命令目录并调用同一业务服务。每个已
 
 ChatDome 在你的服务器上执行命令——安全是第一优先级：
 
-1. **Telegram 鉴权** — 仅处理白名单 Chat ID 的消息，其他一律静默忽略。
+1. **Telegram 鉴权** — 仅处理白名单 User ID 的私聊消息；空白名单拒绝所有入站请求。
 2. **明确审批策略** — 必填的 `command_approval_mode` 只控制 AI 生成的 `run_shell_command`。
 3. **风险不确定时审批** — 默认模式仅自动执行明确低风险命令，无法确定时要求人工确认。
 4. **Sentinel 隔离** — 定时巡检使用内部命令包，不等待对话审批。
@@ -450,7 +453,7 @@ ChatDome/
             ├── runtime_environment.py # 运行环境采集与兼容上下文
             ├── telegram/
             │   ├── bot.py           # Telegram Bot 初始化 + 消息路由
-            │   └── auth.py          # Chat ID 鉴权
+            │   └── auth.py          # 私聊 User ID 鉴权
             ├── agent/
             │   ├── core.py          # AI Agent ReAct 循环
             │   ├── tools.py         # 工具定义 + 分发

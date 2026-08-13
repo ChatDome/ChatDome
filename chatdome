@@ -704,6 +704,7 @@ rollback_update() {
   local previous_venv="${5:-}"
   local venv_switched="${6:-0}"
   local legacy_rollback="$ROOT_DIR/.venv-rollback"
+  local config_backup="$UPDATE_STATE_DIR/config.yaml.rollback"
 
   echo "❌ Update failed: $reason"
   echo "Restoring $old_commit..."
@@ -715,6 +716,12 @@ rollback_update() {
   if ! git -C "$ROOT_DIR" reset --hard "$old_commit" || ! git -C "$ROOT_DIR" clean -fd; then
     echo "❌ Rollback failed. Run: git -C $ROOT_DIR reset --hard $old_commit"
     return 1
+  fi
+  if [[ -f "$config_backup" ]]; then
+    if ! run_as_root cp -p "$config_backup" "$CONFIG_FILE"; then
+      echo "❌ Rollback failed: cannot restore the configuration."
+      return 1
+    fi
   fi
 
   if [[ "$venv_switched" == "1" ]]; then
@@ -768,6 +775,7 @@ update_chatdome() (
   local venv_switched=0
   local config_was_valid=0
   local candidate_config_valid=0
+  local config_backup="$UPDATE_STATE_DIR/config.yaml.rollback"
 
   if ! command -v flock >/dev/null 2>&1; then
     echo "❌ Update failed: install flock from the util-linux package."
@@ -846,6 +854,11 @@ update_chatdome() (
   fi
 
   printf '%s\n' "$old_commit" >"$UPDATE_STATE_DIR/previous_commit"
+  run_as_root rm -f "$config_backup" || return 1
+  if ! run_as_root cp -p "$CONFIG_FILE" "$config_backup"; then
+    echo "❌ Update failed: cannot back up $CONFIG_FILE"
+    return 1
+  fi
   if ! backup_systemd_unit; then
     echo "❌ Update failed: cannot back up the systemd unit."
     return 1
@@ -899,6 +912,13 @@ update_chatdome() (
     rollback_update "$old_commit" "dependency installation failed." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
     return 1
   fi
+  if ! run_as_root "$candidate_python" "$CLI" migrate-config \
+    --from-commit "$old_commit" \
+    --config-path "$CONFIG_FILE" \
+    --backup-path "$config_backup"; then
+    rollback_update "$old_commit" "configuration migration failed." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
+    return 1
+  fi
   if "$candidate_python" "$CLI" validate-config; then
     candidate_config_valid=1
   elif [[ "$config_was_valid" == "1" ]]; then
@@ -946,7 +966,7 @@ update_chatdome() (
     rollback_update "$old_commit" "cannot install the systemd unit." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
     return 1
   fi
-  if [[ "$config_was_valid" == "1" ]]; then
+  if [[ "$candidate_config_valid" == "1" ]]; then
     if ! service_action restart; then
       rollback_update "$old_commit" "service restart failed." "$config_was_valid" "$candidate_venv" "$previous_venv" "$venv_switched"
       return 1
@@ -961,6 +981,7 @@ update_chatdome() (
     echo "⚠️ Update completed. Remove $ROOT_DIR/config.yaml and $ROOT_DIR/chat_data after verifying backups."
   fi
   run_as_root rm -f "$UPDATE_STATE_DIR/chatdome.service.rollback" || true
+  run_as_root rm -f "$config_backup" || true
   if [[ -d "$legacy_rollback" && ! -L "$legacy_rollback" ]]; then
     run_as_root rm -rf "$legacy_rollback" || true
   fi
@@ -969,12 +990,8 @@ update_chatdome() (
   fi
   version="$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
   echo "✅ ChatDome updated: $version"
-  if [[ "$config_was_valid" != "1" ]]; then
-    if [[ "$candidate_config_valid" == "1" ]]; then
-      echo "ℹ️ ChatDome remains stopped. Start it from the menu."
-    else
-      echo "⚠️ Fix $CONFIG_FILE, then start ChatDome from the menu."
-    fi
+  if [[ "$candidate_config_valid" != "1" ]]; then
+    echo "⚠️ Fix $CONFIG_FILE, then start ChatDome from the menu."
   fi
 )
 maintenance_menu() {
@@ -1046,12 +1063,12 @@ setup_wizard() {
       ;;
     *) echo "Skipped Bot Token." ;;
   esac
-  prompt_choice answer "Set allowed Chat IDs? [y/N]: " "n"
+  prompt_choice answer "Set allowed User IDs? [y/N]: " "n"
   case "${answer,,}" in
     y|yes)
-      prompt_value chat_ids "Chat IDs (comma-separated): " && run_cli set-chat-ids "$chat_ids"
+      prompt_value chat_ids "User IDs (comma-separated): " && run_cli set-allowed-ids "$chat_ids"
       ;;
-    *) echo "Skipped Chat IDs." ;;
+    *) echo "Skipped User IDs." ;;
   esac
   echo
 

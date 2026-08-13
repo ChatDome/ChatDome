@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import stat
 import sys
 import time
@@ -83,6 +84,7 @@ from chatdome.llm.profile_admin import (
     ProfileConfigStore,
 )
 from chatdome.model_commands import ModelCommandService
+from chatdome.runtime import MODEL_SETUP_MESSAGE
 from chatdome.terminal import (
     ChatSessionController,
     ChatSessionState,
@@ -259,6 +261,22 @@ def _parse_user_ids(raw: str) -> list[int]:
     return values
 
 
+def _configured_user_ids(raw: Any) -> list[int]:
+    if isinstance(raw, (list, tuple, set)):
+        values = raw
+    elif raw is None:
+        values = []
+    else:
+        values = str(raw).split(",")
+    result: list[int] = []
+    for value in values:
+        try:
+            result.append(int(str(value).strip()))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
 def _validate_profile_name(profile: str) -> str:
     try:
         return validate_profile_name(profile)
@@ -343,6 +361,92 @@ def validate_config(args: argparse.Namespace) -> None:
     print(f"config valid: {CONFIG_PATH}")
 
 
+def migrate_config(args: argparse.Namespace) -> None:
+    """Migrate known legacy fields and restore the original on validation failure."""
+    del args.from_commit
+    config_path = Path(getattr(args, "config_path", "") or CONFIG_PATH).expanduser()
+    backup_path = Path(args.backup_path).expanduser()
+    if not config_path.is_file():
+        raise SystemExit(f"Configuration file not found: {config_path}")
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(config_path, backup_path)
+
+    try:
+        document = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(document, dict):
+            raise ValueError("YAML root must be a mapping")
+        root = document.get("chatdome")
+        if not isinstance(root, dict):
+            raise ValueError("chatdome must be a mapping")
+        changed = _migrate_config_document(root)
+
+        if changed:
+            temporary = config_path.with_name(f".{config_path.name}.migrate.tmp")
+            temporary.write_text(
+                yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+            os.chmod(temporary, stat.S_IMODE(config_path.stat().st_mode))
+            temporary.replace(config_path)
+
+        from chatdome.config import load_config
+
+        load_config(config_path)
+    except Exception as exc:
+        shutil.copy2(backup_path, config_path)
+        raise SystemExit(f"Configuration migration failed: {exc}") from None
+
+    print(f"config migrated: {config_path}")
+    print(f"config backup: {backup_path}")
+
+
+def _migrate_config_document(root: dict[str, Any]) -> bool:
+    changed = False
+    telegram = root.get("telegram")
+    if isinstance(telegram, dict):
+        if "allowed_ids" not in telegram and "allowed_chat_ids" in telegram:
+            telegram["allowed_ids"] = telegram["allowed_chat_ids"]
+            changed = True
+        if "admin_ids" not in telegram and "admin_chat_ids" in telegram:
+            telegram["admin_ids"] = telegram["admin_chat_ids"]
+            changed = True
+        for key in ("allowed_chat_ids", "admin_chat_ids"):
+            if key in telegram:
+                telegram.pop(key)
+                changed = True
+
+    agent = root.get("agent")
+    if isinstance(agent, dict):
+        if "command_approval_mode" not in agent:
+            generated = agent.get("allow_generated_commands")
+            unrestricted = agent.get("allow_unrestricted_commands")
+            if generated is True and unrestricted is True:
+                mode = "execute_without_approval"
+            else:
+                mode = "require_approval_for_risky_commands"
+            agent["command_approval_mode"] = mode
+            changed = True
+        for key in ("allow_generated_commands", "allow_unrestricted_commands"):
+            if key in agent:
+                agent.pop(key)
+                changed = True
+
+    sentinel = root.get("sentinel")
+    if isinstance(sentinel, dict):
+        if "alert_targets" not in sentinel and "alert_chat_ids" in sentinel:
+            sentinel["alert_targets"] = {
+                "telegram": {"user_ids": sentinel["alert_chat_ids"]}
+            }
+            changed = True
+        for key in (
+            "alert_chat_ids", "checks", "builtin_packs", "custom_packs_dir",
+        ):
+            if key in sentinel:
+                sentinel.pop(key)
+                changed = True
+    return changed
+
+
 def health_check(args: argparse.Namespace) -> None:
     del args
     pid = _read_pid()
@@ -355,6 +459,15 @@ def health_check(args: argparse.Namespace) -> None:
     if int(ready.get("pid", 0)) != pid:
         raise SystemExit("ChatDome health state does not match the running process.")
     print(f"ChatDome healthy: pid={pid}")
+    components = ready.get("components")
+    if isinstance(components, dict):
+        for name in ("core", "sentinel", "llm", "telegram"):
+            component = components.get(name)
+            if not isinstance(component, dict):
+                continue
+            state = str(component.get("state") or "unknown")
+            detail = str(component.get("detail") or "").strip()
+            print(f"- {name}: {state}" + (f" ({detail})" if detail else ""))
 
 
 def _config_root_for_report() -> tuple[dict[str, Any], str]:
@@ -395,8 +508,7 @@ def _sentinel_status(root: dict[str, Any]) -> str:
     sentinel = root.get("sentinel") if isinstance(root.get("sentinel"), dict) else {}
     if not sentinel.get("enabled", False):
         return "disabled"
-    checks = sentinel.get("checks") if isinstance(sentinel.get("checks"), list) else []
-    return f"enabled, checks={len(checks)}"
+    return "enabled, policy=builtin"
 
 
 def _telegram_status(root: dict[str, Any]) -> str:
@@ -518,6 +630,8 @@ def _load_terminal_chat_config() -> Any:
 def _create_terminal_chat_runtime(args: argparse.Namespace) -> _TerminalChatRuntime:
     _sync_terminal_runtime_paths()
     config = _load_terminal_chat_config()
+    if not config.llm_configured:
+        raise SystemExit(MODEL_SETUP_MESSAGE)
 
     from chatdome.agent.core import Agent
     from chatdome.agent.engram import EngramStore
@@ -529,7 +643,7 @@ def _create_terminal_chat_runtime(args: argparse.Namespace) -> _TerminalChatRunt
     from chatdome.sentinel.user_context import UserContextLedger
 
     pack_loader = PackLoader(builtin_dir=CONTROLPLANE_SRC / "chatdome" / "packs")
-    pack_loader.load(enabled_packs=config.sentinel.builtin_packs)
+    pack_loader.load()
     llm_manager = LLMManager(config.ai_profiles, config.active_ai_profile)
     sandbox = CommandSandbox(
         default_timeout=config.agent.command_timeout,
@@ -554,6 +668,7 @@ def _create_terminal_chat_runtime(args: argparse.Namespace) -> _TerminalChatRunt
         user_context_ledger=user_context_ledger,
         engram_store=EngramStore(),
     )
+    agent.start()
 
     async def discard_alert(*_args: Any, **_kwargs: Any) -> None:
         return None
@@ -563,7 +678,7 @@ def _create_terminal_chat_runtime(args: argparse.Namespace) -> _TerminalChatRunt
         pack_loader,
         sandbox,
         discard_alert,
-        alert_chat_ids=list(config.telegram.allowed_chat_ids),
+        alert_chat_ids=config.telegram_alert_user_ids,
         user_context_ledger=user_context_ledger,
     )
     if hasattr(agent, "set_sentinel"):
@@ -720,7 +835,7 @@ def _build_terminal_command_registry(
                 else None
             ),
             defer_commands=False,
-            model_admin_allowed=True,
+            admin_allowed=True,
         )
 
     service = CommandHandlerService(command_runtime)
@@ -1372,6 +1487,8 @@ async def _send_terminal_user_message(
             kwargs["user_id"] = runtime.chat_id if user_id is None else user_id
         if "deferred" in params or supports_kwargs:
             kwargs["deferred"] = deferred
+        if "source" in params or supports_kwargs:
+            kwargs["source"] = "cli"
         result = await handle_message(runtime.chat_id, text, **kwargs)
     except Exception as exc:
         log_path, logged = _append_cli_exception_log("Terminal chat request", exc)
@@ -1553,31 +1670,32 @@ def doctor(args: argparse.Namespace) -> None:
             failures += _doctor_line("ok", "config-permission", "0600")
 
     llm_status, llm_detail = _profile_status(root)
-    llm_message = f"ready ({llm_detail})" if llm_status == "ready" else f"configure active model profile ({llm_detail})"
-    failures += _doctor_line("ok" if llm_status == "ready" else "fail", "model", llm_message)
+    llm_message = f"ready ({llm_detail})" if llm_status == "ready" else f"not configured ({llm_detail})"
+    failures += _doctor_line("ok" if llm_status == "ready" else "warn", "model", llm_message)
 
     telegram = root.get("telegram") if isinstance(root.get("telegram"), dict) else {}
     token_ready = bool(str(telegram.get("bot_token") or "").strip())
-    failures += _doctor_line("ok" if token_ready else "fail", "telegram", "ready" if token_ready else "set chatdome.telegram.bot_token")
+    failures += _doctor_line("ok" if token_ready else "warn", "telegram", "ready" if token_ready else "not configured")
 
     sentinel = root.get("sentinel") if isinstance(root.get("sentinel"), dict) else {}
-    allowed_chat_ids = telegram.get("allowed_chat_ids") if isinstance(telegram.get("allowed_chat_ids"), list) else []
-    alert_chat_ids = sentinel.get("alert_chat_ids") if isinstance(sentinel.get("alert_chat_ids"), list) else []
-    if allowed_chat_ids or alert_chat_ids:
-        failures += _doctor_line("ok", "chat-ids", "configured")
+    allowed_ids = telegram.get("allowed_ids") if isinstance(telegram.get("allowed_ids"), list) else []
+    admin_ids = telegram.get("admin_ids") if isinstance(telegram.get("admin_ids"), list) else []
+    alert_targets = sentinel.get("alert_targets") if isinstance(sentinel.get("alert_targets"), dict) else {}
+    telegram_target = alert_targets.get("telegram") if isinstance(alert_targets.get("telegram"), dict) else None
+    explicit_targets = telegram_target.get("user_ids") if telegram_target is not None else None
+    if allowed_ids or admin_ids or explicit_targets:
+        failures += _doctor_line("ok", "user-ids", "configured")
     else:
-        failures += _doctor_line("warn", "chat-ids", "set allowed_chat_ids or sentinel.alert_chat_ids")
+        failures += _doctor_line("warn", "user-ids", "set allowed_ids or admin_ids")
 
     pid = _read_pid()
     running = _process_running(pid)
     failures += _doctor_line("ok" if running else "warn", "service", f"pid={pid}" if running else "start ChatDome from menu")
 
     sentinel_enabled = bool(sentinel.get("enabled", False))
-    checks = sentinel.get("checks") if isinstance(sentinel.get("checks"), list) else []
-    if sentinel_enabled and not checks:
-        failures += _doctor_line("warn", "sentinel", "set sentinel checks or disable sentinel")
-    else:
-        failures += _doctor_line("ok", "sentinel", "enabled" if sentinel_enabled else "disabled")
+    failures += _doctor_line(
+        "ok", "sentinel", "enabled (builtin policy)" if sentinel_enabled else "disabled"
+    )
 
     for label, path in (("logs", Path(os.environ.get("CHATDOME_LOG_DIR", str(DATA_DIR)))), ("run", RUN_DIR)):
         if path.exists() and os.access(path, os.W_OK):
@@ -1891,22 +2009,24 @@ def check_telegram(args: argparse.Namespace) -> None:
 def send_test_message(args: argparse.Namespace) -> None:
     data = _load_yaml()
     telegram = _section(_chatdome_root(data), "telegram")
-    chat_ids = telegram.get("allowed_chat_ids") or []
-    if not chat_ids:
-        raise SystemExit("allowed_chat_ids is empty; no target for test message")
-    for chat_id in chat_ids:
-        _telegram_api_request("sendMessage", {"chat_id": int(chat_id), "text": args.text})
-        print(f"sent test message to {chat_id}")
+    user_ids = sorted(
+        set(_configured_user_ids(telegram.get("allowed_ids")))
+        | set(_configured_user_ids(telegram.get("admin_ids")))
+    )
+    if not user_ids:
+        raise SystemExit("allowed_ids and admin_ids are empty; no test target")
+    for user_id in user_ids:
+        _telegram_api_request("sendMessage", {"chat_id": user_id, "text": args.text})
+        print(f"sent test message to {user_id}")
 
 
 def sentinel_status(args: argparse.Namespace) -> None:
     del args
     data = _load_yaml()
     sentinel = _section(_chatdome_root(data), "sentinel")
-    checks = sentinel.get("checks") or []
     print("Sentinel")
     print(f"- enabled: {sentinel.get('enabled', False)}")
-    print(f"- checks: {len(checks)}")
+    print("- checks: built-in policy")
     print(f"- push_min_severity: {sentinel.get('push_min_severity')}")
     print(f"- global_rate_limit: {sentinel.get('global_rate_limit')}")
     print(f"- global_rate_window: {sentinel.get('global_rate_window')}")
@@ -1923,14 +2043,19 @@ def set_sentinel_enabled(args: argparse.Namespace) -> None:
 
 def list_sentinel_checks(args: argparse.Namespace) -> None:
     del args
-    data = _load_yaml()
-    checks = _section(_chatdome_root(data), "sentinel").get("checks") or []
+    from chatdome.sentinel.checks import load_builtin_checks
+
+    checks = load_builtin_checks()
     for index, check in enumerate(checks, start=1):
-        rule = check.get("rule") or {}
+        rule = check.rule
         print(
-            f"{index}. {check.get('name')} "
-            f"check_id={check.get('check_id')} interval={check.get('interval')} "
-            f"severity={check.get('severity')} rule={rule.get('type')} {rule.get('operator')} {rule.get('threshold')}"
+            f"{index}. {check.name} "
+            f"check_id={check.check_id} interval={check.interval} "
+            f"severity={check.severity} rule="
+            + (
+                f"{rule.type} {rule.operator} {rule.threshold}"
+                if rule is not None else "none"
+            )
         )
 
 
@@ -2040,6 +2165,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("ensure-config").set_defaults(func=ensure_config)
     sub.add_parser("validate-config").set_defaults(func=validate_config)
+    p = sub.add_parser("migrate-config")
+    p.add_argument("--from-commit", required=True)
+    p.add_argument("--backup-path", required=True)
+    p.add_argument("--config-path", default="")
+    p.set_defaults(func=migrate_config)
     sub.add_parser("health-check").set_defaults(func=health_check)
     p = sub.add_parser("hello")
     p.add_argument("--chat-id", type=int, default=None, help=argparse.SUPPRESS)

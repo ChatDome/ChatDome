@@ -284,6 +284,44 @@ def test_cli_and_telegram_hide_task_scope_approval_command() -> None:
     assert cli_names == telegram_names
 
 
+def test_sentinel_mutations_require_administrator_access() -> None:
+    class Sentinel:
+        def __init__(self) -> None:
+            self.triggered = 0
+
+        async def trigger_all(self) -> str:
+            self.triggered += 1
+            return "done"
+
+    sentinel = Sentinel()
+    command = CommandDef("/sentinel_trigger", "trigger", "sentinel")
+    invocation = CommandInvocation(
+        raw="/sentinel_trigger",
+        raw_name="/sentinel_trigger",
+        args=(),
+        arg_text="",
+        command=command,
+        context=CommandContext(source="telegram", chat_id=1, actor_id="1"),
+    )
+
+    denied = CommandHandlerService(
+        lambda _invocation: CommandHandlerRuntime(sentinel=sentinel)
+    )
+    denied_result = asyncio.run(denied.handle(invocation))
+
+    allowed = CommandHandlerService(
+        lambda _invocation: CommandHandlerRuntime(
+            sentinel=sentinel,
+            admin_allowed=True,
+        )
+    )
+    allowed_result = asyncio.run(allowed.handle(invocation))
+
+    assert denied_result.outcome == "unauthorized"
+    assert allowed_result.outcome == "sentinel_triggered"
+    assert sentinel.triggered == 1
+
+
 def test_platform_adapter_runs_post_delivery_once_after_current_message() -> None:
     events = []
 
@@ -559,7 +597,7 @@ def test_model_workflow_returns_same_overwrite_semantics_for_cli_and_telegram() 
     handler_service = CommandHandlerService(
         lambda _invocation: CommandHandlerRuntime(
             model_service=model_service,
-            model_admin_allowed=True,
+            admin_allowed=True,
         )
     )
     command = CommandDef(
@@ -581,7 +619,7 @@ def test_model_workflow_returns_same_overwrite_semantics_for_cli_and_telegram() 
                 source=source,
                 chat_id=1,
                 actor_id="2",
-                capabilities=frozenset({"model_admin"}),
+                capabilities=frozenset({"admin"}),
             ),
             action="submit_openai",
             interaction_id=f"{source}-interaction",
@@ -621,7 +659,7 @@ def test_command_handler_service_maps_domain_errors_identically() -> None:
     service = CommandHandlerService(
         lambda _invocation: CommandHandlerRuntime(
             model_service=ModelCommandService(manager, admin),
-            model_admin_allowed=True,
+            admin_allowed=True,
         )
     )
     command = CommandDef(
@@ -704,7 +742,7 @@ def test_codex_oauth_deferred_lifecycle_records_pending_and_final_events() -> No
             model_service=model_service,
             codex_oauth=oauth,
             config=ChatDomeConfig(),
-            model_admin_allowed=True,
+            admin_allowed=True,
             defer_commands=True,
             schedule_task=scheduled.append,
             publish_deferred=published.append,
@@ -722,7 +760,7 @@ def test_codex_oauth_deferred_lifecycle_records_pending_and_final_events() -> No
             actor_id="2",
             request_id="request-shared",
             event_recorder=events.append,
-            capabilities=frozenset({"model_admin"}),
+            capabilities=frozenset({"admin"}),
         )
         invocation = CommandInvocation(
             raw="/codex_login",

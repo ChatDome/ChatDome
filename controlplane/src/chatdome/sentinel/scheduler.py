@@ -23,7 +23,7 @@ from chatdome.config import SentinelConfig
 from chatdome.logger import log_origin
 from chatdome.executor.sandbox import CommandSandbox
 from chatdome.sentinel.alerter import AlertEvent, AlertHistory, format_alert_message
-from chatdome.sentinel.checks import CheckDefinition, load_checks, severity_label
+from chatdome.sentinel.checks import CheckDefinition, load_builtin_checks, severity_label
 from chatdome.sentinel.evaluator import EvalResult, evaluate
 from chatdome.sentinel.pack_loader import PackLoader
 from chatdome.sentinel.suppressor import SuppressionResult, Suppressor
@@ -63,6 +63,7 @@ class SentinelScheduler:
         send_alert_fn: Callable[..., Coroutine[Any, Any, None]],
         alert_chat_ids: list[int] | None = None,
         user_context_ledger: UserContextLedger | None = None,
+        checks: list[CheckDefinition] | None = None,
     ) -> None:
         self._config = config
         self._pack_loader = pack_loader
@@ -71,7 +72,7 @@ class SentinelScheduler:
         self._alert_chat_ids = alert_chat_ids or []
         self._ledger = user_context_ledger or UserContextLedger()
 
-        self._checks = load_checks(config.checks)
+        self._checks = list(checks) if checks is not None else load_builtin_checks()
         self._suppressor = Suppressor(
             global_rate_limit=config.global_rate_limit,
             global_rate_window=config.global_rate_window,

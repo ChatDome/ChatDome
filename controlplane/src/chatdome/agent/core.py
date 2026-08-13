@@ -8,6 +8,7 @@ Orchestrates the cycle:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import inspect
@@ -20,6 +21,7 @@ from chatdome.agent.approval_input import (
     classify_approval_input,
 )
 from chatdome.agent.audit import CommandAuditTracker
+from chatdome.agent.global_turn import GlobalTurnCoordinator, GlobalTurnLease
 from chatdome.agent.prompts import build_system_prompt, build_tools
 from chatdome.agent.result import AgentResult, coerce_agent_result
 from chatdome.agent.session import SessionManager
@@ -56,10 +58,15 @@ class Agent:
         user_context_ledger: Any = None,
         engram_store: 'Any' = None,
         llm_manager: LLMManager | None = None,
+        global_turn_coordinator: GlobalTurnCoordinator | None = None,
     ):
         self.llm = llm
         self.llm_manager = llm_manager
         self.config = config
+        self.global_turn_coordinator = global_turn_coordinator or GlobalTurnCoordinator()
+        self._global_turn_lease: GlobalTurnLease | None = None
+        self._global_turn_chat_id: int | None = None
+        self._global_turn_release_pending_chat_id: int | None = None
         self.tools = build_tools()
         self.tool_dispatcher = ToolDispatcher(
             sandbox,
@@ -165,6 +172,14 @@ class Agent:
             self.session_manager.save_session(session)
         except Exception as e:
             logger.warning("Session persistence failed for chat_id=%s: %s", getattr(session, "chat_id", "?"), e)
+            return
+        if (
+            getattr(self, "_global_turn_release_pending_chat_id", None)
+            == getattr(session, "chat_id", None)
+            and getattr(session, "active_turn", None) is None
+        ):
+            self._global_turn_release_pending_chat_id = None
+            self._release_global_turn_lease(getattr(session, "chat_id", None))
 
     @staticmethod
     def _latest_user_message(session: Any) -> str:
@@ -209,6 +224,7 @@ class Agent:
             }
         )
         logger.info("Turn state changed: %s -> %s", previous_state, state)
+        self._update_global_turn_lease(session)
 
     def _finish_turn(self, session: Any, outcome: str) -> None:
         if getattr(session, "active_turn", None) is None:
@@ -223,6 +239,128 @@ class Agent:
             }
         )
         logger.info("Turn completed: outcome=%s rounds=%d", outcome, session.round_count)
+        self._global_turn_release_pending_chat_id = session.chat_id
+
+    def _claim_global_turn(
+        self,
+        session: Any,
+        *,
+        source: str,
+        user_id: int | None,
+    ) -> bool:
+        """Claim or reuse the process-safe lease before mutating a turn."""
+        return self._claim_global_turn_identity(
+            session.chat_id,
+            source=source,
+            user_id=user_id,
+        )
+
+    def _claim_global_turn_identity(
+        self,
+        chat_id: int,
+        *,
+        source: str,
+        user_id: int | None,
+    ) -> bool:
+        """Claim a lease without loading or creating a session."""
+        lease = getattr(self, "_global_turn_lease", None)
+        owner_chat_id = getattr(self, "_global_turn_chat_id", None)
+        if lease is not None:
+            return owner_chat_id == chat_id
+        coordinator = getattr(self, "global_turn_coordinator", None)
+        if coordinator is None:
+            return True
+        lease = coordinator.try_acquire(source, chat_id, user_id)
+        if lease is None:
+            return False
+        self._global_turn_lease = lease
+        self._global_turn_chat_id = chat_id
+        return True
+
+    def _recover_global_turn_lease(self) -> None:
+        """Reclaim the newest persisted waiting turn after process restart."""
+        if getattr(self, "_global_turn_lease", None) is not None:
+            return
+        store_dir = getattr(self.session_manager, "_session_store_dir", None)
+        if store_dir is None or not hasattr(store_dir, "glob"):
+            return
+        candidates: list[tuple[float, int]] = []
+        try:
+            paths = list(store_dir.glob("*.json"))
+        except (AttributeError, OSError):
+            return
+        for path in paths:
+            try:
+                chat_id = int(path.stem)
+                document = json.loads(path.read_text(encoding="utf-8"))
+                saved_at = float(document.get("saved_at", 0)) if isinstance(document, dict) else 0
+                session = self.session_manager.load_persisted_session(chat_id)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+            if session is not None and (
+                session.pending_approval or session.pending_round_limit
+            ):
+                candidates.append((saved_at, chat_id))
+        if not candidates:
+            return
+
+        candidates.sort(reverse=True)
+        selected_chat_id = candidates[0][1]
+        selected_session = self.session_manager.load_persisted_session(selected_chat_id)
+        active_turn = getattr(selected_session, "active_turn", None)
+        user_id = active_turn.user_id if active_turn is not None else None
+        if not self._claim_global_turn_identity(
+            selected_chat_id,
+            source="recovered",
+            user_id=user_id,
+        ):
+            return
+        selected_session = self.session_manager.get_or_create(selected_chat_id)
+        if not (
+            selected_session.pending_approval
+            or selected_session.pending_round_limit
+        ):
+            self._release_global_turn_lease(selected_chat_id)
+            self._recover_global_turn_lease()
+            return
+        self._update_global_turn_lease(selected_session)
+
+        for _, chat_id in candidates[1:]:
+            session = self.session_manager.get_or_create(chat_id)
+            session.clear_pending_state()
+            session.clear_pending_round_limit()
+            session.take_deferred_message()
+            if session.active_turn is not None:
+                self._finish_turn(session, "cancelled")
+            self._persist_session(session)
+            logger.warning(
+                "Cancelled extra persisted waiting turn during global recovery: chat_id=%d",
+                chat_id,
+            )
+        logger.info("Recovered global waiting turn: chat_id=%d", selected_chat_id)
+
+    def _update_global_turn_lease(self, session: Any) -> None:
+        lease = getattr(self, "_global_turn_lease", None)
+        if lease is None or getattr(self, "_global_turn_chat_id", None) != session.chat_id:
+            return
+        active_turn = getattr(session, "active_turn", None)
+        if active_turn is not None:
+            lease.update(active_turn.turn_id, active_turn.state)
+
+    def _release_global_turn_lease(self, chat_id: int | None = None) -> None:
+        lease = getattr(self, "_global_turn_lease", None)
+        if lease is None:
+            return
+        if chat_id is not None and getattr(self, "_global_turn_chat_id", None) != chat_id:
+            return
+        self._global_turn_lease = None
+        self._global_turn_chat_id = None
+        self._global_turn_release_pending_chat_id = None
+        lease.release()
+
+    @staticmethod
+    def _global_turn_busy_result() -> AgentResult:
+        return AgentResult.reply("已有任务正在执行。请等待当前任务完成或取消后再试。")
 
     @staticmethod
     def _release_deferred_after_terminal(
@@ -270,6 +408,14 @@ class Agent:
             session.clear_pending_round_limit()
             session.take_deferred_message()
             self._finish_turn(session, "cancelled")
+            self._persist_session(session)
+            raise
+        except Exception:
+            session.task_auto_approve = False
+            session.clear_pending_state()
+            session.clear_pending_round_limit()
+            session.take_deferred_message()
+            self._finish_turn(session, "failed")
             self._persist_session(session)
             raise
         finally:
@@ -437,8 +583,15 @@ class Agent:
         user_id: int | None = None,
         progress_callback: Any = None,
         deferred: bool = False,
+        source: str = "unknown",
     ) -> AgentResult:
         """Process a user message through the full ReAct loop."""
+        if not self._claim_global_turn_identity(
+            chat_id,
+            source=source,
+            user_id=user_id,
+        ):
+            return self._global_turn_busy_result()
         session = self.session_manager.get_or_create(chat_id)
         turn_lock = self.session_manager.get_turn_lock(chat_id)
         route = "new"
@@ -446,6 +599,23 @@ class Agent:
         async with turn_lock:
             if session.repair_missing_tool_outputs():
                 self._persist_session(session)
+            if (
+                deferred
+                and not session.pending_approval
+                and not session.pending_round_limit
+                and session.active_turn is None
+            ):
+                deferred_message, _ = session.peek_deferred_input()
+                if deferred_message != user_message:
+                    self._release_global_turn_lease(chat_id)
+                    return AgentResult.reply("该暂存任务已处理。")
+            needs_lease = bool(
+                session.pending_approval
+                or session.pending_round_limit
+                or session.active_turn is None
+            )
+            if needs_lease:
+                self._update_global_turn_lease(session)
             if session.pending_approval:
                 if session.approval_processing:
                     processing_id = session.processing_approval_id or "当前命令"
@@ -475,8 +645,6 @@ class Agent:
             else:
                 if deferred:
                     deferred_message, deferred_user_id = session.peek_deferred_input()
-                    if deferred_message != user_message:
-                        return AgentResult.reply("该暂存任务已处理。")
                     session.take_deferred_input()
                     if deferred_user_id is not None:
                         user_id = deferred_user_id
@@ -489,6 +657,8 @@ class Agent:
                 ):
                     self._record_turn_started(session)
                 self._persist_session(session)
+
+            self._update_global_turn_lease(session)
 
         assert turn_context is not None
         context_fields = {
@@ -544,8 +714,16 @@ class Agent:
 
     async def resolve_round_limit(self, chat_id: int, action: str) -> AgentResult:
         """Resolve a round-limit confirmation by continuing or abandoning the task."""
+        if not self._claim_global_turn_identity(
+            chat_id,
+            source="control",
+            user_id=None,
+        ):
+            return self._global_turn_busy_result()
         session = self.session_manager.get_or_create(chat_id)
         if not session.pending_round_limit:
+            if session.active_turn is None and not session.pending_approval:
+                self._release_global_turn_lease(chat_id)
             return AgentResult.reply("ℹ️ 当前没有等待继续执行的任务。")
 
         turn_context = self._ensure_active_turn(session, "waiting_round_limit")
@@ -597,8 +775,17 @@ class Agent:
         approval_id: str | None = None,
     ) -> tuple[str, AgentResult]:
         """Resume a suspended session after user approval/rejection. Returns (raw_result, agent_result)."""
+        if not self._claim_global_turn_identity(
+            chat_id,
+            source="control",
+            user_id=None,
+        ):
+            return "", self._global_turn_busy_result()
         turn_lock = self.session_manager.get_turn_lock(chat_id)
         async with turn_lock:
+            session = self.session_manager.get_or_create(chat_id)
+            if not session.pending_approval and session.active_turn is None:
+                self._release_global_turn_lease(chat_id)
             return await self._resume_session_locked(chat_id, action, approval_id)
 
     async def _resume_session_locked(
@@ -828,8 +1015,16 @@ class Agent:
         approval_id: str | None = None,
     ) -> bool:
         """Abort a pending approval without resuming the agent loop."""
+        if not self._claim_global_turn_identity(
+            chat_id,
+            source="control",
+            user_id=None,
+        ):
+            return False
         session = self.session_manager.get_or_create(chat_id)
         if session.approval_processing or not session.pending_approval:
+            if session.active_turn is None and not session.pending_round_limit:
+                self._release_global_turn_lease(chat_id)
             return False
 
         pending_approval_id = session.pending_approval_id or ""
@@ -886,8 +1081,19 @@ class Agent:
 
         Safety analysis is computed lazily and cached in session state.
         """
+        if not self._claim_global_turn_identity(
+            chat_id,
+            source="control",
+            user_id=None,
+        ):
+            return {
+                "ok": False,
+                "message": self._global_turn_busy_result().content,
+            }
         session = self.session_manager.get_or_create(chat_id)
         if not session.pending_approval or not session.pending_command:
+            if session.active_turn is None and not session.pending_round_limit:
+                self._release_global_turn_lease(chat_id)
             return {
                 "ok": False,
                 "message": "No pending command requires approval.",
@@ -1463,13 +1669,31 @@ class Agent:
 
     def clear_session(self, chat_id: int) -> bool:
         """Clear a chat session. Returns True if it existed."""
-        return self.session_manager.clear_session(chat_id)
+        if not self._claim_global_turn_identity(
+            chat_id,
+            source="control",
+            user_id=None,
+        ):
+            return False
+        cleared = self.session_manager.clear_session(chat_id)
+        self._release_global_turn_lease(chat_id)
+        return cleared
 
     def start(self) -> None:
         """Start background tasks (session cleanup)."""
+        self._recover_global_turn_lease()
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
         self.session_manager.start_cleanup_task()
 
     async def stop(self) -> None:
         """Stop background tasks and clean up resources."""
+        cleanup_task = getattr(self.session_manager, "_cleanup_task", None)
         self.session_manager.stop_cleanup_task()
+        if cleanup_task is not None and cleanup_task is not asyncio.current_task():
+            with contextlib.suppress(asyncio.CancelledError):
+                await cleanup_task
         await self.tool_dispatcher.close()
+        self._release_global_turn_lease()

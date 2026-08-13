@@ -4,6 +4,13 @@
 
 用户询问哨兵告警是什么意思、为什么持续提醒、某条告警是否误报，或希望 ChatDome 记住某个正常变更背景。
 
+## 运行与配置边界
+
+- Sentinel 使用随 ChatDome 发布的唯一内置检查策略，`config.yaml` 不配置检查项、阈值或执行周期。
+- Sentinel 不依赖 LLM 或 Telegram；缺少这些能力时仍执行巡检并写入本地历史。
+- Telegram 告警目标位于 `sentinel.alert_targets.telegram.user_ids`。省略时使用 `telegram.allowed_ids ∪ telegram.admin_ids`，显式空列表表示关闭 Telegram 告警推送。
+- Sentinel 后台巡检不属于用户 turn，不占用全局活动 turn。
+
 ## 告警状态机
 
 Sentinel 对每种威胁类型维护一个独立的状态机，共六种状态：
