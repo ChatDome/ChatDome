@@ -23,6 +23,22 @@ class FakeCompressionLLM:
         return SimpleNamespace(content=self.contents[index])
 
 
+def test_session_cleanup_stop_awaits_task_and_clears_reference():
+    async def scenario():
+        manager = SessionManager(session_timeout=600, system_prompt="system")
+        manager.start_cleanup_task()
+        cleanup_task = manager._cleanup_task
+
+        await manager.stop_cleanup_task()
+        await manager.stop_cleanup_task()
+
+        assert cleanup_task is not None
+        assert cleanup_task.done()
+        assert manager._cleanup_task is None
+
+    asyncio.run(scenario())
+
+
 def test_redact_sensitive_text_removes_common_secret_shapes():
     raw = "\n".join(
         [

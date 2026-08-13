@@ -1408,11 +1408,21 @@ class SessionManager:
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
             logger.info("Session cleanup task started (timeout=%ds)", self.session_timeout)
 
-    def stop_cleanup_task(self) -> None:
-        """Stop the background cleanup task."""
-        if self._cleanup_task and not self._cleanup_task.done():
-            self._cleanup_task.cancel()
-            logger.info("Session cleanup task stopped")
+    async def stop_cleanup_task(self) -> None:
+        """Cancel and await the background cleanup task."""
+        task = self._cleanup_task
+        if task is None:
+            return
+        self._cleanup_task = None
+        if task is asyncio.current_task():
+            return
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Session cleanup task stopped")
 
     async def _cleanup_loop(self) -> None:
         """Periodically remove expired sessions."""

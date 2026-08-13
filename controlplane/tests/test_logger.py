@@ -253,7 +253,10 @@ class LoggerTests(unittest.TestCase):
 
         self.assertEqual(disk_full_stream.write_attempts, 1)
         self.assertTrue(handler._disabled_for_full_disk)
-        self.assertEqual(stderr.getvalue(), "")
+        diagnostic = stderr.getvalue()
+        self.assertEqual(diagnostic.count("ChatDome file logging disabled"), 1)
+        self.assertIn("Free disk space and restart ChatDome", diagnostic)
+        self.assertIn("chatdome.log", diagnostic)
 
     @unittest.skipIf(os.name == "nt", reason="requires POSIX rename of an open log file")
     def test_file_handler_reopens_after_external_log_replacement(self):

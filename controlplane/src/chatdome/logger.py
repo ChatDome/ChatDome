@@ -177,7 +177,7 @@ class ChatDomeFileHandler(RotatingFileHandler):
             super().emit(record)
         except OSError as exc:
             if exc.errno == errno.ENOSPC:
-                self._disabled_for_full_disk = True
+                self._disable_for_full_disk()
                 return
             self.handleError(record)
         except Exception:
@@ -186,7 +186,7 @@ class ChatDomeFileHandler(RotatingFileHandler):
     def handleError(self, record: logging.LogRecord) -> None:
         exc = sys.exc_info()[1]
         if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
-            self._disabled_for_full_disk = True
+            self._disable_for_full_disk()
             return
         super().handleError(record)
 
@@ -197,9 +197,22 @@ class ChatDomeFileHandler(RotatingFileHandler):
             super().flush()
         except OSError as exc:
             if exc.errno == errno.ENOSPC:
-                self._disabled_for_full_disk = True
+                self._disable_for_full_disk()
                 return
             raise
+
+    def _disable_for_full_disk(self) -> None:
+        if self._disabled_for_full_disk:
+            return
+        self._disabled_for_full_disk = True
+        try:
+            sys.stderr.write(
+                "ChatDome file logging disabled: no space left for "
+                f"{self.baseFilename}. Free disk space and restart ChatDome.\n"
+            )
+            sys.stderr.flush()
+        except Exception:
+            pass
 
 
 class ChatDomeFormatter(logging.Formatter):

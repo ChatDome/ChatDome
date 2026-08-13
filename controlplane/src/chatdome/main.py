@@ -522,36 +522,36 @@ def main() -> None:
         telegram_initialized = False
         telegram_started = False
         polling_started = False
-        if agent is not None:
-            agent.start()
-        if sentinel_scheduler is not None:
-            sentinel_scheduler.start()
-        reload_task = asyncio.create_task(_reload_watch_loop())
-
-        if bot is not None:
-            logger.info("Starting Telegram bot polling...")
-            try:
-                app = await build_telegram_application(bot)
-                await app.initialize()
-                telegram_initialized = True
-                if app.updater is None:
-                    raise RuntimeError("Telegram updater is unavailable")
-                await app.updater.start_polling(drop_pending_updates=True)
-                polling_started = True
-                await app.start()
-                telegram_started = True
-                await bot.post_init(app)
-            except Exception as exc:
-                capabilities = capabilities.with_state(
-                    "telegram", "degraded", str(exc)
-                )
-                logger.exception("Telegram component degraded")
-        else:
-            logger.info("Telegram component: %s", capabilities.telegram.state)
-
-        write_runtime_status(READY_PATH, capabilities)
-        logger.info("ChatDome core service ready")
         try:
+            if agent is not None:
+                agent.start()
+            if sentinel_scheduler is not None:
+                sentinel_scheduler.start()
+            reload_task = asyncio.create_task(_reload_watch_loop())
+
+            if bot is not None:
+                logger.info("Starting Telegram bot polling...")
+                try:
+                    app = await build_telegram_application(bot)
+                    await app.initialize()
+                    telegram_initialized = True
+                    if app.updater is None:
+                        raise RuntimeError("Telegram updater is unavailable")
+                    await app.updater.start_polling(drop_pending_updates=True)
+                    polling_started = True
+                    await app.start()
+                    telegram_started = True
+                    await bot.post_init(app)
+                except Exception as exc:
+                    capabilities = capabilities.with_state(
+                        "telegram", "degraded", str(exc)
+                    )
+                    logger.exception("Telegram component degraded")
+            else:
+                logger.info("Telegram component: %s", capabilities.telegram.state)
+
+            write_runtime_status(READY_PATH, capabilities)
+            logger.info("ChatDome core service ready")
             await stop_event.wait()
         finally:
             if bot is not None and telegram_initialized:

@@ -14,6 +14,8 @@ def test_service_templates_use_python_module_entrypoint():
     assert "Environment=CHATDOME_SENTINEL_LOG_FILE=$SENTINEL_LOG_FILE" in installer
     assert "Environment=CHATDOME_RUN_DIR=$RUN_DIR" in installer
     assert "RuntimeDirectory=chatdome" in installer
+    assert "StandardOutput=null" in installer
+    assert "StandardError=journal" in installer
 
     updater = (REPO_ROOT / "chatdome").read_text(encoding="utf-8")
     assert "ExecStart=$runtime_python -m chatdome.main --config" in updater
@@ -21,6 +23,8 @@ def test_service_templates_use_python_module_entrypoint():
     assert "Environment=CHATDOME_SENTINEL_LOG_FILE=$SENTINEL_LOG_FILE" in updater
     assert "Environment=CHATDOME_RUN_DIR=$RUN_DIR" in updater
     assert "RuntimeDirectory=chatdome" in updater
+    assert "StandardOutput=null" in updater
+    assert "StandardError=journal" in updater
 
     fallback = (REPO_ROOT / "scripts/start.sh").read_text(encoding="utf-8")
     assert 'SERVER_CMD=("$ROOT_DIR/venv/bin/python" -m chatdome.main)' in fallback

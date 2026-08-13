@@ -8,7 +8,6 @@ Orchestrates the cycle:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import inspect
@@ -1690,10 +1689,6 @@ class Agent:
 
     async def stop(self) -> None:
         """Stop background tasks and clean up resources."""
-        cleanup_task = getattr(self.session_manager, "_cleanup_task", None)
-        self.session_manager.stop_cleanup_task()
-        if cleanup_task is not None and cleanup_task is not asyncio.current_task():
-            with contextlib.suppress(asyncio.CancelledError):
-                await cleanup_task
+        await self.session_manager.stop_cleanup_task()
         await self.tool_dispatcher.close()
         self._release_global_turn_lease()

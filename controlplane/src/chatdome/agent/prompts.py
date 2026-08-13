@@ -115,7 +115,7 @@ REVIEWER_SYSTEM_PROMPT = """\
 """
 
 COMMAND_DETAIL_SYSTEM_PROMPT = """\
-你是一个 Linux shell 命令详情解析器。用户消息会提供完整命令 command，以及本地预分割的 commands 列表。
+你是一个 Linux shell 命令详情解析器。用户消息只会提供一个本地预分割的子命令及其前后连接符。
 
 你必须且只能输出单行 JSON 对象，不允许 Markdown，不允许输出解释性文本。
 
@@ -149,21 +149,20 @@ COMMAND_DETAIL_SYSTEM_PROMPT = """\
    }
 
 约束：
-- 逐条独立解析 commands 中的每个子命令，并综合判断完整 command 的风险与影响。
-- command_breakdown.commands 必须与输入 commands 的数量、顺序和 index 一致。
+- commands 必须且只能包含一个子命令；command_breakdown.commands 也必须且只能包含对应的一项，index 必须为 1。
 - 输入 commands[].operator_before 和 operator_after 表示前后条件关系，输出 separator 必须与 operator_after 一致。
 - 不使用历史对话、用户意图、外部环境或未提供的文件状态。
 - 不推测命令没有写出的目标。
 - 每组 tokens[].token 和 targets[].value 只能来自对应子命令，不得跨组引用。
 - 不得扩展 ~、变量或通配符。
 - impact_analysis 不要完整复述 command。
-- commands 每批最多 4 项；每项 tokens 最多 12 项、targets 最多 6 项、warnings 最多 3 项。
+- tokens 最多 12 项、targets 最多 6 项、warnings 最多 3 项。
 - summary、warnings 和 tokens[].meaning 使用简短单行文本，不得重复输出完整命令。
 """
 
 
 COMMAND_DETAIL_COMPACT_SYSTEM_PROMPT = """\
-你是一个 Linux shell 命令风险解析器。输入包含一批已分割的 commands。
+你是一个 Linux shell 命令风险解析器。输入只包含一个已分割的子命令。
 
 只输出单行 JSON 对象，不允许 Markdown 或解释性文本。输出字段：
 - safety_status: SAFE | UNSAFE | CRITICAL
@@ -190,7 +189,7 @@ COMMAND_DETAIL_COMPACT_SYSTEM_PROMPT = """\
   }
 
 约束：
-- command_breakdown.commands 必须覆盖全部输入 commands，数量、顺序和 index 完全一致。
+- command_breakdown.commands 必须且只能包含一项，index 必须为 1。
 - 输入 commands[].operator_before 和 operator_after 表示批次边界两侧的条件关系。
 - 每项 targets 最多 4 项、warnings 最多 1 项；不要输出 tokens。
 - 不使用历史对话或外部状态，不扩展变量、~ 或通配符。

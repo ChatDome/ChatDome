@@ -429,6 +429,8 @@ Environment=CHATDOME_SENTINEL_LOG_FILE=$SENTINEL_LOG_FILE
 Environment=CHATDOME_RUN_DIR=$RUN_DIR
 RuntimeDirectory=chatdome
 RuntimeDirectoryMode=0755
+StandardOutput=null
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

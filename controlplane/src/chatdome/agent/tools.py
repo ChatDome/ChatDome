@@ -10,6 +10,7 @@ Handles:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -26,9 +27,7 @@ from chatdome.executor.sandbox import CommandSandbox, CommandResult
 from chatdome.llm.client import LLMClient
 from chatdome.sentinel.alert_controls import format_alert_push_status, parse_alert_mute_until
 
-_COMMAND_DETAIL_BATCH_SIZE = 4
-_COMMAND_DETAIL_MAX_CONCURRENCY = 2
-_COMMAND_DETAIL_TIMEOUT_SECONDS = 30.0
+_COMMAND_DETAIL_SEGMENT_TIMEOUT_SECONDS = 20.0
 _COMMAND_DETAIL_MAX_TOKENS_PER_SEGMENT = 12
 _COMMAND_DETAIL_MAX_TARGETS_PER_SEGMENT = 6
 _COMMAND_DETAIL_MAX_WARNINGS_PER_SEGMENT = 3
@@ -798,145 +797,145 @@ class ToolDispatcher:
             )
             return self._apply_static_detail_floor(details, static_gate)
 
-        batch_specs = [
-            (offset, segments[offset : offset + _COMMAND_DETAIL_BATCH_SIZE])
-            for offset in range(0, len(segments), _COMMAND_DETAIL_BATCH_SIZE)
-        ]
-        semaphore = asyncio.Semaphore(_COMMAND_DETAIL_MAX_CONCURRENCY)
+        segment_specs = list(enumerate(segments))
 
-        async def analyze_batch(
+        async def analyze_segment(
             offset: int,
-            batch_segments: tuple[ShellCommandSegment, ...],
+            segment: ShellCommandSegment,
         ) -> tuple[int, dict[str, Any] | None, bool, str]:
-            async with semaphore:
-                try:
-                    payload = await self._request_command_detail_batch(
-                        reviewer_llm,
-                        batch_segments,
-                        chat_id=chat_id,
-                        previous_separator=(
-                            segments[offset - 1].separator if offset else ""
-                        ),
-                        compact=False,
-                    )
-                    return (
-                        offset,
-                        self._normalize_llm_command_details(payload, batch_segments),
-                        False,
-                        "",
-                    )
-                except _InvalidCommandDetailResponse as exc:
-                    self._log_invalid_command_detail_response(
-                        exc,
-                        offset=offset,
-                        command_count=len(batch_segments),
-                        retrying=True,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.warning(
-                        "Command detail batch failed: start=%d count=%d error=%s",
-                        offset + 1,
-                        len(batch_segments),
-                        type(exc).__name__,
-                    )
-                    return offset, None, False, "provider_error"
-
-                try:
-                    payload = await self._request_command_detail_batch(
-                        reviewer_llm,
-                        batch_segments,
-                        chat_id=chat_id,
-                        previous_separator=(
-                            segments[offset - 1].separator if offset else ""
-                        ),
-                        compact=True,
-                    )
-                    return (
-                        offset,
-                        self._normalize_llm_command_details(payload, batch_segments),
-                        True,
-                        "compact_retry",
-                    )
-                except _InvalidCommandDetailResponse as exc:
-                    self._log_invalid_command_detail_response(
-                        exc,
-                        offset=offset,
-                        command_count=len(batch_segments),
-                        retrying=False,
-                    )
-                    return offset, None, False, "invalid_response"
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.warning(
-                        "Compact command detail batch failed: "
-                        "start=%d count=%d error=%s",
-                        offset + 1,
-                        len(batch_segments),
-                        type(exc).__name__,
-                    )
-                    return offset, None, False, "provider_error"
-
-        tasks = {
-            asyncio.create_task(analyze_batch(offset, batch_segments)): (
-                offset,
-                len(batch_segments),
-            )
-            for offset, batch_segments in batch_specs
-        }
-        try:
-            done, pending = await asyncio.wait(
-                tuple(tasks),
-                timeout=_COMMAND_DETAIL_TIMEOUT_SECONDS,
-            )
-        except asyncio.CancelledError:
-            _cancel_command_detail_tasks(tasks)
-            raise
-
-        _cancel_command_detail_tasks(pending)
-
-        batch_results: dict[int, tuple[dict[str, Any], bool]] = {}
-        batch_errors: dict[int, str] = {
-            tasks[task][0]: "timeout"
-            for task in pending
-        }
-        for task in done:
             try:
-                offset, analysis, compact, error_code = task.result()
+                payload = await self._request_command_detail_segment(
+                    reviewer_llm,
+                    segment,
+                    chat_id=chat_id,
+                    previous_separator=(
+                        segments[offset - 1].separator if offset else ""
+                    ),
+                    compact=False,
+                )
+                normalized = self._normalize_llm_command_details(
+                    payload,
+                    (segment,),
+                )
+                segment_gate = self._analyze_command_static_gate(segment.command)
+                normalized = self._apply_static_detail_floor(
+                    normalized,
+                    segment_gate,
+                    command=command,
+                    segment=segment.command,
+                    segment_index=offset + 1,
+                )
+                return offset, normalized, False, ""
+            except _InvalidCommandDetailResponse as exc:
+                self._log_invalid_command_detail_response(
+                    exc,
+                    offset=offset,
+                    command_count=1,
+                    retrying=True,
+                )
             except asyncio.CancelledError:
-                offset = tasks[task][0]
-                batch_errors[offset] = "timeout"
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Command detail segment failed: index=%d error=%s",
+                    offset + 1,
+                    type(exc).__name__,
+                )
+                return offset, None, False, "provider_error"
+
+            try:
+                payload = await self._request_command_detail_segment(
+                    reviewer_llm,
+                    segment,
+                    chat_id=chat_id,
+                    previous_separator=(
+                        segments[offset - 1].separator if offset else ""
+                    ),
+                    compact=True,
+                )
+                normalized = self._normalize_llm_command_details(
+                    payload,
+                    (segment,),
+                )
+                segment_gate = self._analyze_command_static_gate(segment.command)
+                normalized = self._apply_static_detail_floor(
+                    normalized,
+                    segment_gate,
+                    command=command,
+                    segment=segment.command,
+                    segment_index=offset + 1,
+                )
+                return offset, normalized, True, "compact_retry"
+            except _InvalidCommandDetailResponse as exc:
+                self._log_invalid_command_detail_response(
+                    exc,
+                    offset=offset,
+                    command_count=1,
+                    retrying=False,
+                )
+                return offset, None, False, "invalid_response"
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Compact command detail segment failed: index=%d error=%s",
+                    offset + 1,
+                    type(exc).__name__,
+                )
+                return offset, None, False, "provider_error"
+
+        loop = asyncio.get_running_loop()
+        overall_deadline = (
+            loop.time() + _COMMAND_DETAIL_SEGMENT_TIMEOUT_SECONDS * len(segments)
+        )
+        segment_results: dict[int, tuple[dict[str, Any], bool]] = {}
+        segment_errors: dict[int, str] = {}
+        for offset, segment in segment_specs:
+            remaining = max(0.0, overall_deadline - loop.time())
+            timeout = min(_COMMAND_DETAIL_SEGMENT_TIMEOUT_SECONDS, remaining)
+            if timeout <= 0:
+                segment_errors[offset] = "timeout"
+                continue
+            task = asyncio.create_task(analyze_segment(offset, segment))
+            try:
+                done, pending = await asyncio.wait((task,), timeout=timeout)
+            except asyncio.CancelledError:
+                _cancel_command_detail_tasks((task,))
+                raise
+            if pending:
+                _cancel_command_detail_tasks(pending)
+                segment_errors[offset] = "timeout"
+                logger.warning(
+                    "Command detail segment timed out after %.3fs: index=%d total=%d",
+                    timeout,
+                    offset + 1,
+                    len(segments),
+                )
+                continue
+            try:
+                _, analysis, compact, error_code = task.result()
+            except asyncio.CancelledError:
+                segment_errors[offset] = "timeout"
                 continue
             if analysis is None:
-                batch_errors[offset] = error_code or "provider_error"
+                segment_errors[offset] = error_code or "provider_error"
                 continue
-            batch_results[offset] = (analysis, compact)
+            segment_results[offset] = (analysis, compact)
             if error_code:
-                batch_errors[offset] = error_code
+                segment_errors[offset] = error_code
 
-        if pending:
-            logger.warning(
-                "Command detail analysis timed out after %.1fs: completed=%d total=%d",
-                _COMMAND_DETAIL_TIMEOUT_SECONDS,
-                len(done),
-                len(tasks),
-            )
-
-        details = self._merge_command_detail_batches(
+        details = self._merge_command_detail_segments(
             command=command,
             segments=segments,
-            batch_specs=batch_specs,
-            batch_results=batch_results,
-            batch_errors=batch_errors,
+            segment_results=segment_results,
+            segment_errors=segment_errors,
         )
         return self._apply_static_detail_floor(details, static_gate)
 
-    async def _request_command_detail_batch(
+    async def _request_command_detail_segment(
         self,
         reviewer_llm: Any,
-        segments: tuple[ShellCommandSegment, ...],
+        segment: ShellCommandSegment,
         *,
         chat_id: int,
         previous_separator: str,
@@ -947,28 +946,16 @@ class ToolDispatcher:
             COMMAND_DETAIL_SYSTEM_PROMPT,
         )
 
-        command_parts: list[str] = []
-        for position, segment in enumerate(segments):
-            command_parts.append(segment.command)
-            if position < len(segments) - 1 and segment.separator:
-                command_parts.append(segment.separator)
         command_payload = json.dumps(
             {
-                "command": " ".join(command_parts),
-                "commands": [
-                    {
-                        "index": position + 1,
-                        "command": segment.command,
-                        "separator": segment.separator,
-                        "operator_before": (
-                            previous_separator
-                            if position == 0
-                            else segments[position - 1].separator
-                        ),
-                        "operator_after": segment.separator,
-                    }
-                    for position, segment in enumerate(segments)
-                ],
+                "command": segment.command,
+                "commands": [{
+                    "index": 1,
+                    "command": segment.command,
+                    "separator": segment.separator,
+                    "operator_before": previous_separator,
+                    "operator_after": segment.separator,
+                }],
                 "shell": "bash",
             },
             ensure_ascii=False,
@@ -990,10 +977,7 @@ class ToolDispatcher:
                 ),
             },
         ]
-        kwargs: dict[str, Any] = {
-            "messages": messages,
-            "response_format": {"type": "json_object"},
-        }
+        kwargs: dict[str, Any] = {"messages": messages}
         requested_max_tokens = 0
         try:
             params = inspect.signature(reviewer_llm.chat_completion).parameters
@@ -1002,11 +986,7 @@ class ToolDispatcher:
         if "temperature" in params:
             kwargs["temperature"] = 0.0
         if "max_tokens" in params:
-            requested_tokens = (
-                250 + 120 * len(segments)
-                if compact
-                else 420 + 220 * len(segments)
-            )
+            requested_tokens = 370 if compact else 640
             configured_tokens = int(
                 getattr(reviewer_llm, "max_tokens", requested_tokens)
                 or requested_tokens
@@ -1073,7 +1053,7 @@ class ToolDispatcher:
             ) from exc
 
         try:
-            self._validate_command_detail_payload(parsed, len(segments))
+            self._validate_command_detail_payload(parsed, 1)
         except asyncio.CancelledError:
             raise
         except _InvalidCommandDetailResponse as exc:
@@ -1188,12 +1168,6 @@ class ToolDispatcher:
             raise _InvalidCommandDetailResponse("missing_command_breakdown")
 
         raw_commands = breakdown.get("commands")
-        if command_count == 1 and not isinstance(raw_commands, list):
-            if not str(breakdown.get("base_cmd") or "").strip():
-                raise _InvalidCommandDetailResponse("missing_base_command", index=1)
-            if not str(breakdown.get("summary") or "").strip():
-                raise _InvalidCommandDetailResponse("missing_command_summary", index=1)
-            return
         if not isinstance(raw_commands, list):
             raise _InvalidCommandDetailResponse("missing_command_groups")
         if len(raw_commands) != command_count:
@@ -1227,14 +1201,13 @@ class ToolDispatcher:
                 raise _InvalidCommandDetailResponse("missing_command_summary", index=position)
 
     @classmethod
-    def _merge_command_detail_batches(
+    def _merge_command_detail_segments(
         cls,
         *,
         command: str,
         segments: tuple[ShellCommandSegment, ...],
-        batch_specs: list[tuple[int, tuple[ShellCommandSegment, ...]]],
-        batch_results: dict[int, tuple[dict[str, Any], bool]],
-        batch_errors: dict[int, str],
+        segment_results: dict[int, tuple[dict[str, Any], bool]],
+        segment_errors: dict[int, str],
     ) -> dict[str, Any]:
         commands = []
         for index, segment in enumerate(segments, start=1):
@@ -1251,34 +1224,32 @@ class ToolDispatcher:
         analyzed_command_count = 0
         analyses: list[dict[str, Any]] = []
         compact_used = False
-        for offset, batch_segments in batch_specs:
-            stored = batch_results.get(offset)
+        for offset, segment in enumerate(segments):
+            stored = segment_results.get(offset)
             if stored is None:
                 continue
             analysis, compact = stored
             analyses.append(analysis)
             compact_used = compact_used or compact
-            batch_commands = (
+            result_commands = (
                 analysis.get("command_breakdown", {}).get("commands", [])
             )
-            for position, child in enumerate(batch_commands):
-                if position >= len(batch_segments):
-                    break
-                normalized = dict(child)
+            if result_commands:
+                normalized = dict(result_commands[0])
                 normalized.update(
                     {
-                        "index": offset + position + 1,
-                        "command": batch_segments[position].command,
-                        "separator": batch_segments[position].separator,
+                        "index": offset + 1,
+                        "command": segment.command,
+                        "separator": segment.separator,
                     }
                 )
-                commands[offset + position] = normalized
-            analyzed_command_count += len(batch_segments)
+                commands[offset] = normalized
+                analyzed_command_count += 1
 
         errors = [
-            batch_errors[offset]
-            for offset, _ in batch_specs
-            if batch_errors.get(offset)
+            segment_errors[offset]
+            for offset, _ in enumerate(segments)
+            if segment_errors.get(offset)
         ]
         errors = list(dict.fromkeys(errors))
         if not analyses:
@@ -1389,25 +1360,34 @@ class ToolDispatcher:
             return text
         return text[: max_chars - 1].rstrip() + "…"
 
-    @staticmethod
+    @classmethod
     def _apply_static_detail_floor(
+        cls,
         details: dict[str, Any],
         static_gate: dict[str, Any],
+        *,
+        command: str = "",
+        segment: str = "",
+        segment_index: int = 0,
     ) -> dict[str, Any]:
         safety_order = {"SAFE": 0, "UNSAFE": 1, "CRITICAL": 2}
         risk_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
         bounded = dict(details)
+        llm_status = str(bounded.get("safety_status", "UNSAFE")).strip().upper()
+        llm_risk = str(bounded.get("risk_level", "HIGH")).strip().upper()
+        static_status = str(static_gate.get("safety_status", "UNSAFE")).strip().upper()
+        static_risk = str(static_gate.get("risk_level", "HIGH")).strip().upper()
         safety_status = max(
             (
-                str(bounded.get("safety_status", "UNSAFE")).strip().upper(),
-                str(static_gate.get("safety_status", "UNSAFE")).strip().upper(),
+                llm_status,
+                static_status,
             ),
             key=lambda value: safety_order.get(value, 1),
         )
         risk_level = max(
             (
-                str(bounded.get("risk_level", "HIGH")).strip().upper(),
-                str(static_gate.get("risk_level", "HIGH")).strip().upper(),
+                llm_risk,
+                static_risk,
             ),
             key=lambda value: risk_order.get(value, 2),
         )
@@ -1424,6 +1404,25 @@ class ToolDispatcher:
             if risk_order.get(risk_level, 2) < risk_order["HIGH"]:
                 risk_level = "HIGH"
 
+        if command and segment and (
+            safety_order.get(static_status, 1) > safety_order.get(llm_status, 1)
+            or risk_order.get(static_risk, 2) > risk_order.get(llm_risk, 2)
+        ):
+            logger.warning(
+                "Static risk floor applied: command=%s segment_index=%d segment=%s "
+                "command_hash=%s llm_status=%s llm_risk=%s "
+                "static_status=%s static_risk=%s static_reason=%s",
+                cls._command_detail_log_text(command),
+                segment_index,
+                cls._command_detail_log_text(segment),
+                hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()[:12],
+                llm_status,
+                llm_risk,
+                static_status,
+                static_risk,
+                cls._command_detail_log_text(static_gate.get("static_reason", "-"), 240),
+            )
+
         bounded.update(
             {
                 "safety_status": safety_status,
@@ -1435,6 +1434,15 @@ class ToolDispatcher:
             }
         )
         return bounded
+
+    @staticmethod
+    def _command_detail_log_text(value: Any, max_chars: int = 2000) -> str:
+        from chatdome.agent.session import redact_sensitive_text
+
+        text = redact_sensitive_text(str(value or ""))
+        if len(text) > max_chars:
+            text = text[: max_chars - 1] + "…"
+        return json.dumps(text, ensure_ascii=False)
 
     @classmethod
     def _normalize_llm_command_details(
@@ -1599,10 +1607,6 @@ class ToolDispatcher:
                     continue
                 if 1 <= index <= len(segments) and index not in commands_by_index:
                     commands_by_index[index] = item
-        elif len(segments) == 1 and payload:
-            # Accept cached or mocked responses that use the legacy flat schema.
-            commands_by_index[1] = payload
-
         commands: list[dict[str, Any]] = []
         for index, segment in enumerate(segments, start=1):
             item = commands_by_index.get(index)
