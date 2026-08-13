@@ -12,6 +12,7 @@ from chatdome.outbound.models import (
     CodexAuthorizationFacts,
     CommandEchoFacts,
     CommandHelpFacts,
+    DecisionOperationFacts,
     EnvironmentFacts,
     ModelProfilesFacts,
     OutboundMessage,
@@ -346,4 +347,13 @@ class TerminalOutboundRenderer:
                     "Continue? [y/n]",
                 )
             )
+        if isinstance(message.facts, DecisionOperationFacts):
+            core = DecisionPromptComposer.compose(message.facts.decision)
+            details = (message.body or "").strip()
+            parts = [core]
+            if details:
+                parts.extend(["", details])
+            if message.actions:
+                parts.extend(["", "Confirm? [y/n]"])
+            return RenderedMessage(text_parts=("\n".join(parts),))
         return RenderedMessage(text_parts=((message.body or message.summary),))

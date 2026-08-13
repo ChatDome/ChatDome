@@ -190,6 +190,15 @@ class TaskPausedFacts:
 
 
 @dataclass(frozen=True)
+class DecisionOperationFacts:
+    operation: str
+    stage: str
+    decision: DecisionPromptFacts
+    profile: str = ""
+    api_key_status: str = ""
+
+
+@dataclass(frozen=True)
 class CommandHelpItemFacts:
     """One command entry exposed by the shared command catalog."""
 

@@ -14,6 +14,7 @@ from chatdome.outbound.models import (
     CodexAuthorizationFacts,
     CommandEchoFacts,
     CommandHelpFacts,
+    DecisionOperationFacts,
     EnvironmentFacts,
     ModelProfilesFacts,
     OutboundAction,
@@ -370,10 +371,13 @@ class TelegramOutboundRenderer:
             )
             for action in message.actions
         )
-        return RenderedMessage(
-            text_parts=((message.body or message.summary),),
-            controls=controls,
-        )
+        if isinstance(message.facts, DecisionOperationFacts):
+            core = DecisionPromptComposer.compose(message.facts.decision)
+            details = (message.body or "").strip()
+            text = f"{core}\n\n{details}" if details else core
+        else:
+            text = message.body or message.summary
+        return RenderedMessage(text_parts=(text,), controls=controls)
 
     def render(self, message: OutboundMessage) -> RenderedMessage:
         if isinstance(message.facts, CommandHelpFacts):

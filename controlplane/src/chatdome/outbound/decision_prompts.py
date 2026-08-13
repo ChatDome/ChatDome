@@ -83,7 +83,8 @@ class DecisionPromptComposer:
         if effect.kind == DecisionEffectKind.POLICY_CHANGE:
             return f"之后，{detail or target}。" if detail or target else ""
         if effect.kind == DecisionEffectKind.AUTHORIZE:
-            return f"这会启动{target or '外部授权流程'}。"
+            separator = " " if target and target[0].isascii() else ""
+            return f"这会启动{separator}{target or '外部授权流程'}。"
         if effect.kind == DecisionEffectKind.TASK_WINDOW:
             try:
                 rounds = max(0, int(target))

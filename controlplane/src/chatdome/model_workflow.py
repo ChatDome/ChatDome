@@ -10,7 +10,15 @@ from typing import Any, Mapping
 from chatdome.config import AIConfig, validate_profile_name
 from chatdome.llm.profile_admin import CreateOpenAIProfileRequest, ProfileActor
 from chatdome.model_commands import ModelCommandService
-from chatdome.outbound.models import ActionKind, OutboundAction
+from chatdome.outbound.models import (
+    ActionKind,
+    DecisionEffect,
+    DecisionEffectKind,
+    DecisionOperationFacts,
+    DecisionPromptFacts,
+    DecisionQuestion,
+    OutboundAction,
+)
 from chatdome.slash_commands import CommandInvocation, CommandResult
 
 
@@ -167,9 +175,23 @@ class ModelCommandWorkflow:
         return CommandResult(
             outcome="model_delete_confirmation_requested",
             title="Delete model profile",
-            text=f"Delete model profile '{summary.name}'?",
+            text="",
             event_refs=refs,
-            facts={"operation": "model_delete", "profile": summary.name},
+            facts=DecisionOperationFacts(
+                operation="model_delete",
+                stage="confirm_delete",
+                profile=summary.name,
+                decision=DecisionPromptFacts(
+                    intent=f"删除模型配置 {summary.name}",
+                    effects=(
+                        DecisionEffect(
+                            DecisionEffectKind.DELETE,
+                            f"模型配置 {summary.name}",
+                        ),
+                    ),
+                    question=DecisionQuestion.CONFIRM_DELETE,
+                ),
+            ),
             actions=self._actions(
                 invocation.command.name,
                 nonce,
@@ -353,9 +375,23 @@ class ModelCommandWorkflow:
         return CommandResult(
             outcome="codex_authorization_confirmation_requested",
             title="Codex OAuth",
-            text=f"为 profile '{session['name']}' 启动 Codex OAuth？",
+            text="",
             event_refs={"interaction_id": nonce},
-            facts={"operation": "model_add", "stage": "codex_confirmation", "profile": session["name"]},
+            facts=DecisionOperationFacts(
+                operation="model_add",
+                stage="codex_confirmation",
+                profile=str(session["name"]),
+                decision=DecisionPromptFacts(
+                    intent=f"为模型配置 {session['name']} 启动 Codex OAuth",
+                    effects=(
+                        DecisionEffect(
+                            DecisionEffectKind.AUTHORIZE,
+                            "Codex OAuth 授权流程",
+                        ),
+                    ),
+                    question=DecisionQuestion.CONFIRM,
+                ),
+            ),
             actions=self._actions(
                 "/model_add",
                 nonce,
@@ -377,7 +413,21 @@ class ModelCommandWorkflow:
                 f"model={summary.model}, address={summary.base_url}"
             ),
             event_refs={"interaction_id": nonce},
-            facts={"operation": "model_add", "stage": "confirm_overwrite", "profile": summary.name},
+            facts=DecisionOperationFacts(
+                operation="model_add",
+                stage="confirm_overwrite",
+                profile=summary.name,
+                decision=DecisionPromptFacts(
+                    intent=f"覆盖模型配置 {summary.name}",
+                    effects=(
+                        DecisionEffect(
+                            DecisionEffectKind.MODIFY,
+                            f"模型配置 {summary.name}",
+                        ),
+                    ),
+                    question=DecisionQuestion.CONFIRM_CHANGE,
+                ),
+            ),
             actions=self._actions(
                 command,
                 nonce,
@@ -394,21 +444,32 @@ class ModelCommandWorkflow:
         api_key = str(session.get("api_key") or "")
         existing = session.get("existing")
         action = "更新" if existing is not None else "新增"
+        api_key_status = "unchanged" if not api_key else "configured"
         return CommandResult(
             outcome="model_save_confirmation_requested",
             title="Save model profile",
             text=(
-                f"{action} {session['name']}？\n模型: {session['model']}\n"
+                f"模型: {session['model']}\n"
                 f"地址: {session['base_url']}\nAPI Key: "
-                f"{'unchanged' if not api_key else 'configured'}"
+                f"{api_key_status}"
             ),
             event_refs={"interaction_id": nonce},
-            facts={
-                "operation": "model_add",
-                "stage": "confirm_save",
-                "profile": session["name"],
-                "api_key_status": "unchanged" if not api_key else "configured",
-            },
+            facts=DecisionOperationFacts(
+                operation="model_add",
+                stage="confirm_save",
+                profile=str(session["name"]),
+                api_key_status=api_key_status,
+                decision=DecisionPromptFacts(
+                    intent=f"{action}模型配置 {session['name']}",
+                    effects=(
+                        DecisionEffect(
+                            DecisionEffectKind.MODIFY,
+                            f"模型配置 {session['name']}",
+                        ),
+                    ),
+                    question=DecisionQuestion.CONFIRM_CHANGE,
+                ),
+            ),
             actions=self._actions(
                 command,
                 nonce,

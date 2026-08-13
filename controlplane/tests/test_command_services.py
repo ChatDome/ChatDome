@@ -20,14 +20,19 @@ from chatdome.llm.profile_admin import (
     ProfileSummary,
 )
 from chatdome.model_commands import ModelCommandService
-from chatdome.outbound.builders import EnvironmentFactsBuilder
+from chatdome.outbound.builders import EnvironmentFactsBuilder, OutboundMessageBuilder
+from chatdome.outbound.decision_prompts import DecisionPromptComposer
 from chatdome.outbound.models import (
     CodexAuthorizationFacts,
     ActionKind,
+    DecisionOperationFacts,
     EnvironmentFacts,
     OutboundAction,
     OutboundMessageKind,
 )
+from chatdome.outbound.renderers.plaintext import PlainTextOutboundRenderer
+from chatdome.outbound.renderers.telegram import TelegramOutboundRenderer
+from chatdome.outbound.renderers.terminal import TerminalOutboundRenderer
 from chatdome.platform_adapters import CLIPlatformAdapter, TelegramPlatformAdapter
 from chatdome.slash_commands import (
     CommandContext,
@@ -641,6 +646,128 @@ def test_model_workflow_returns_same_overwrite_semantics_for_cli_and_telegram() 
         "overwrite_yes",
         "overwrite_no",
     ]
+
+
+def test_model_confirmations_use_structured_decision_facts_and_shared_copy() -> None:
+    manager = FakeManager()
+    admin = FakeProfileAdmin()
+    admin.summaries["base"] = ProfileSummary(
+        name="base",
+        provider="openai",
+        api_mode="openai_api",
+        model="gpt-4o",
+        base_url="https://api.openai.com/v1",
+        fingerprint="base-fingerprint",
+        active=True,
+        has_api_key=True,
+    )
+    admin.summaries["other"] = ProfileSummary(
+        name="other",
+        provider="openai",
+        api_mode="openai_api",
+        model="gpt-4o-mini",
+        base_url="https://api.openai.com/v1",
+        fingerprint="other-fingerprint",
+        active=False,
+        has_api_key=True,
+    )
+    service = CommandHandlerService(
+        lambda _invocation: CommandHandlerRuntime(
+            model_service=ModelCommandService(manager, admin),
+            admin_allowed=True,
+        )
+    )
+
+    def invoke(
+        command_name: str,
+        *,
+        args: tuple[str, ...] = (),
+        action: str | None = None,
+        params: dict[str, object] | None = None,
+        chat_id: int,
+    ):
+        command = CommandDef(command_name, "model", "model", handler=service.handle)
+        invocation = CommandInvocation(
+            raw=command_name,
+            raw_name=command_name,
+            args=args,
+            arg_text=" ".join(args),
+            command=command,
+            context=CommandContext(
+                source="telegram",
+                chat_id=chat_id,
+                actor_id="2",
+                capabilities=frozenset({"admin"}),
+            ),
+            action=action,
+            interaction_id=f"interaction-{chat_id}",
+            params=params or {},
+        )
+        result = asyncio.run(service.handle(invocation))
+        return invocation, result
+
+    cases = (
+        invoke("/model_delete", args=("other",), chat_id=11),
+        invoke(
+            "/model_add",
+            action="submit_openai",
+            params={
+                "name": "base",
+                "model": "gpt-4o",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "",
+            },
+            chat_id=12,
+        ),
+        invoke(
+            "/model_add",
+            action="submit_openai",
+            params={
+                "name": "new-profile",
+                "model": "gpt-4o-mini",
+                "base_url": "https://api.example.test/v1",
+                "api_key": "sk-secret",
+            },
+            chat_id=13,
+        ),
+        invoke(
+            "/model_add",
+            action="submit_codex",
+            params={"name": "codex-profile", "model": "gpt-5.5"},
+            chat_id=14,
+        ),
+    )
+    expected = (
+        "ChatDome 想删除模型配置 other。"
+        "这可能会删除模型配置 other，删除后可能无法恢复。"
+        "是否确认删除？",
+        "ChatDome 想覆盖模型配置 base。"
+        "这可能会修改模型配置 base。"
+        "是否确认这项调整？",
+        "ChatDome 想新增模型配置 new-profile。"
+        "这可能会修改模型配置 new-profile。"
+        "是否确认这项调整？",
+        "ChatDome 想为模型配置 codex-profile 启动 Codex OAuth。"
+        "这会启动 Codex OAuth 授权流程。"
+        "是否确认继续？",
+    )
+
+    for (invocation, result), core in zip(cases, expected):
+        assert isinstance(result.facts, DecisionOperationFacts)
+        assert DecisionPromptComposer.compose(result.facts.decision) == core
+        outbound = OutboundMessageBuilder().from_command_result(invocation, result)
+        rendered = (
+            TerminalOutboundRenderer().render(outbound).text_parts[0],
+            TelegramOutboundRenderer().render(outbound).text_parts[0],
+            PlainTextOutboundRenderer().render(outbound).text_parts[0],
+        )
+        assert all(core in text for text in rendered)
+
+    delete_actions = [
+        action.params["action"] for action in cases[0][1].actions
+    ]
+    assert delete_actions == ["delete_yes", "delete_no"]
+    assert "sk-secret" not in cases[2][1].text
 
 
 def test_command_handler_service_maps_domain_errors_identically() -> None:

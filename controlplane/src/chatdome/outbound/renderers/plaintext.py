@@ -7,6 +7,7 @@ from chatdome.outbound.models import (
     ActionKind,
     ApprovalDetailsFacts,
     ApprovalRequestFacts,
+    DecisionOperationFacts,
     OutboundMessage,
     OutboundMessageKind,
     RenderedMessage,
@@ -88,4 +89,14 @@ class PlainTextOutboundRenderer:
                     "回复 /continue 继续，或 /reject 放弃。",
                 )
             )
+        if isinstance(message.facts, DecisionOperationFacts):
+            core = DecisionPromptComposer.compose(message.facts.decision)
+            details = (message.body or "").strip()
+            parts = [core]
+            if details:
+                parts.extend(["", details])
+            if message.actions:
+                labels = " / ".join(action.label for action in message.actions)
+                parts.extend(["", f"请选择：{labels}。"])
+            return RenderedMessage(text_parts=("\n".join(parts),))
         return RenderedMessage(text_parts=((message.body or message.summary),))
