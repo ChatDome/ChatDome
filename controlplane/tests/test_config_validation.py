@@ -126,6 +126,63 @@ chatdome:
             "require_approval_for_risky_commands",
         )
 
+    def test_optional_telegram_and_llm_can_be_empty(self):
+        config = self._load_text(
+            """\
+chatdome:
+  telegram:
+    bot_token: ""
+    allowed_ids: []
+    admin_ids: []
+  active_ai_profile: ""
+  ai_profiles: {}
+  agent:
+    command_approval_mode: require_approval_for_risky_commands
+  sentinel:
+    enabled: true
+"""
+        )
+
+        self.assertFalse(config.telegram_configured)
+        self.assertFalse(config.llm_configured)
+        self.assertEqual(config.telegram.allowed_ids, [])
+        self.assertEqual(config.telegram.admin_ids, [])
+
+    def test_profiles_require_an_active_profile(self):
+        text = """\
+chatdome:
+  telegram: {}
+  active_ai_profile: ""
+  ai_profiles:
+    primary:
+      model: gpt-4o
+  agent:
+    command_approval_mode: require_approval_for_risky_commands
+"""
+
+        with self.assertRaises(ConfigValidationError) as raised:
+            self._load_text(text)
+
+        self.assertIn(
+            "chatdome.active_ai_profile 必须填写非空字符串",
+            str(raised.exception),
+        )
+
+    def test_legacy_telegram_id_fields_are_rejected(self):
+        text = VALID_CONFIG.replace(
+            "    bot_token: telegram-token\n",
+            "    bot_token: telegram-token\n"
+            "    allowed_chat_ids: [123]\n"
+            "    admin_chat_ids: [456]\n",
+        )
+
+        with self.assertRaises(ConfigValidationError) as raised:
+            self._load_text(text)
+
+        message = str(raised.exception)
+        self.assertIn("chatdome.telegram.allowed_chat_ids 是未知字段", message)
+        self.assertIn("chatdome.telegram.admin_chat_ids 是未知字段", message)
+
     def test_null_required_sections_are_all_reported_with_lines(self):
         text = """\
 chatdome:
@@ -192,20 +249,9 @@ chatdome:
         self.assertIn("第 21 行：chatdome.sentinel.checks[0].rule.operator 取值无效", message)
         self.assertIn("第 22 行：chatdome.sentinel.checks[0].rule.aggregation 取值无效", message)
 
-    def test_example_config_becomes_valid_after_required_credentials_are_filled(self):
+    def test_example_config_is_valid_without_optional_credentials(self):
         example_path = Path(__file__).parents[2] / "config.example.yaml"
         document = yaml.safe_load(example_path.read_text(encoding="utf-8"))
-        root = document["chatdome"]
-        root["telegram"]["bot_token"] = "telegram-token"
-        root["active_ai_profile"] = "primary"
-        root["ai_profiles"] = {
-            "primary": {
-                "provider": "openai",
-                "api_mode": "openai_api",
-                "api_key": "sk-test",
-                "model": "gpt-4o",
-            }
-        }
 
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.yaml"
@@ -219,6 +265,8 @@ chatdome:
             config.agent.command_approval_mode,
             "require_approval_for_risky_commands",
         )
+        self.assertFalse(config.telegram_configured)
+        self.assertFalse(config.llm_configured)
 
 
 if __name__ == "__main__":

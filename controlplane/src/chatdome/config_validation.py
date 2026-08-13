@@ -20,7 +20,7 @@ APPROVAL_MODES = {
 _ROOT_FIELDS = {"chatdome"}
 _CHATDOME_FIELDS = {"telegram", "active_ai_profile", "ai_profiles", "agent", "sentinel"}
 _TELEGRAM_FIELDS = {
-    "bot_token", "allowed_chat_ids", "admin_chat_ids", "proxy_url", "max_message_length",
+    "bot_token", "allowed_ids", "admin_ids", "proxy_url", "max_message_length",
 }
 _AI_FIELDS = {
     "provider", "api_mode", "base_url", "api_key", "model", "temperature", "max_tokens",
@@ -206,28 +206,43 @@ class _Validator:
         return self.issues
 
     def _telegram(self, root: dict[str, Any]) -> None:
+        if "telegram" not in root:
+            return
         data = self.mapping(root.get("telegram"), "chatdome.telegram", required=True)
         if data is None:
-            if "telegram" not in root:
-                self.add("chatdome", "缺少必填字段 telegram")
             return
         self.reject_unknown(data, _TELEGRAM_FIELDS, "chatdome.telegram")
-        self.require_nonempty_string(data, "bot_token", "chatdome.telegram")
-        for key in ("allowed_chat_ids", "admin_chat_ids"):
+        self.optional_type(data, "bot_token", str, "chatdome.telegram")
+        for key in ("allowed_ids", "admin_ids"):
             if key in data and not isinstance(data[key], (list, str, int)):
                 self.add(f"chatdome.telegram.{key}", "必须是整数、字符串或列表")
         self.optional_type(data, "proxy_url", str, "chatdome.telegram")
         self.positive_int(data, "max_message_length", "chatdome.telegram")
 
     def _profiles(self, root: dict[str, Any]) -> None:
-        self.require_nonempty_string(root, "active_ai_profile", "chatdome")
-        profiles = self.mapping(root.get("ai_profiles"), "chatdome.ai_profiles", required=True)
+        active_present = "active_ai_profile" in root
+        profiles_present = "ai_profiles" in root
+        self.optional_type(root, "active_ai_profile", str, "chatdome")
+        profiles = (
+            self.mapping(root.get("ai_profiles"), "chatdome.ai_profiles", required=True)
+            if profiles_present else {}
+        )
         if profiles is None:
-            if "ai_profiles" not in root:
-                self.add("chatdome", "缺少必填字段 ai_profiles")
             return
-        if not profiles:
-            self.add("chatdome.ai_profiles", "必须至少定义一个模型配置")
+        active = root.get("active_ai_profile")
+        active_value = active.strip() if isinstance(active, str) else ""
+        if profiles and not active_value:
+            self.add(
+                "chatdome.active_ai_profile",
+                "必须填写非空字符串",
+                parent="chatdome.ai_profiles",
+            )
+        if active_value and not profiles:
+            self.add(
+                "chatdome.ai_profiles",
+                "必须至少定义一个模型配置",
+                parent="chatdome.active_ai_profile",
+            )
         for name, raw in profiles.items():
             path = f"chatdome.ai_profiles.{name}"
             if not _PROFILE_NAME_PATTERN.fullmatch(str(name)):
@@ -248,8 +263,7 @@ class _Validator:
             if "temperature" in profile and not _is_number(profile["temperature"]):
                 self.add(f"{path}.temperature", "必须是数字")
             self.positive_int(profile, "max_tokens", path)
-        active = root.get("active_ai_profile")
-        if isinstance(active, str) and active.strip() and active not in profiles:
+        if active_value and active_value not in profiles:
             self.add("chatdome.active_ai_profile", "未在 chatdome.ai_profiles 中定义")
 
     def _agent(self, root: dict[str, Any]) -> None:

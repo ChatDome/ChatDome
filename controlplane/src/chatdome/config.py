@@ -32,10 +32,20 @@ logger = logging.getLogger(__name__)
 class TelegramConfig:
     """Telegram bot connection settings."""
     bot_token: str = ""
-    allowed_chat_ids: list[int] = field(default_factory=list)
-    admin_chat_ids: list[int] = field(default_factory=list)
+    allowed_ids: list[int] = field(default_factory=list)
+    admin_ids: list[int] = field(default_factory=list)
     proxy_url: str = ""
     max_message_length: int = 4000
+
+    @property
+    def allowed_chat_ids(self) -> list[int]:
+        """Compatibility accessor for internal call sites during the ID rename."""
+        return self.allowed_ids
+
+    @property
+    def admin_chat_ids(self) -> list[int]:
+        """Compatibility accessor for internal call sites during the ID rename."""
+        return self.admin_ids
 
 
 @dataclass
@@ -98,6 +108,14 @@ class ChatDomeConfig:
     ai_profiles: dict[str, AIConfig] = field(default_factory=dict)
     agent: AgentConfig = field(default_factory=AgentConfig)
     sentinel: SentinelConfig = field(default_factory=SentinelConfig)
+
+    @property
+    def telegram_configured(self) -> bool:
+        return bool(self.telegram.bot_token.strip())
+
+    @property
+    def llm_configured(self) -> bool:
+        return bool(self.active_ai_profile and self.ai_profiles)
 
 
 # ---------------------------------------------------------------------------
@@ -210,12 +228,15 @@ def _load_ai_profiles(yaml_data: dict[str, Any]) -> tuple[str, dict[str, AIConfi
         )
 
     active = str(yaml_data.get("active_ai_profile") or "").strip()
+    raw_profiles = yaml_data.get("ai_profiles") or {}
+    if not isinstance(raw_profiles, dict):
+        raise ValueError("chatdome.ai_profiles must be a mapping.")
+    if not active and not raw_profiles:
+        return "", {}
     if not active:
-        raise ValueError("chatdome.active_ai_profile is required.")
-
-    raw_profiles = yaml_data.get("ai_profiles")
-    if not isinstance(raw_profiles, dict) or not raw_profiles:
-        raise ValueError("chatdome.ai_profiles must contain at least one profile.")
+        raise ValueError("chatdome.active_ai_profile is required when ai_profiles are configured.")
+    if not raw_profiles:
+        raise ValueError("chatdome.ai_profiles must contain the active profile.")
 
     profiles: dict[str, AIConfig] = {}
     for raw_name, raw_profile in raw_profiles.items():
@@ -251,15 +272,19 @@ def parse_config_document(raw_document: Any) -> ChatDomeConfig:
         agent=_dict_to_dataclass(AgentConfig, yaml_data.get("agent")),
         sentinel=_dict_to_dataclass(SentinelConfig, yaml_data.get("sentinel")),
     )
-    config.telegram.allowed_chat_ids = _parse_chat_ids(config.telegram.allowed_chat_ids)
-    config.telegram.admin_chat_ids = _parse_chat_ids(config.telegram.admin_chat_ids)
+    config.telegram.allowed_ids = _parse_chat_ids(config.telegram.allowed_ids)
+    config.telegram.admin_ids = _parse_chat_ids(config.telegram.admin_ids)
     return config
 
 
 def validate_llm_config(config: ChatDomeConfig) -> None:
     """Validate only the LLM configuration domain."""
+    if not config.active_ai_profile and not config.ai_profiles:
+        return
+    if not config.active_ai_profile:
+        raise ValueError("chatdome.active_ai_profile is required when ai_profiles are configured.")
     if not config.ai_profiles:
-        raise ValueError("chatdome.ai_profiles must contain at least one profile.")
+        raise ValueError("chatdome.ai_profiles must contain the active profile.")
     if config.active_ai_profile not in config.ai_profiles:
         raise ValueError(
             f"chatdome.active_ai_profile {config.active_ai_profile!r} "
@@ -270,11 +295,6 @@ def validate_llm_config(config: ChatDomeConfig) -> None:
 def validate_runtime_config(config: ChatDomeConfig) -> list[str]:
     """Validate process startup requirements and return non-fatal warnings."""
     validate_llm_config(config)
-    if not config.telegram.bot_token:
-        raise ValueError(
-            "Telegram Bot Token is not configured.\n"
-            "Set chatdome.telegram.bot_token in config.yaml."
-        )
     warnings: list[str] = []
     if config.sentinel.enabled and not config.sentinel.checks:
         warnings.append(
@@ -307,14 +327,21 @@ def load_config(config_path: str | Path | None = None) -> ChatDomeConfig:
     for warning in validate_runtime_config(config):
         logger.warning("%s", warning)
 
-    active_profile = config.ai_profiles[config.active_ai_profile]
-    logger.info(
-        "Configuration loaded: active_ai_profile=%s, provider=%s, api_mode=%s, model=%s, profile_count=%d, allowed_chats=%s",
-        config.active_ai_profile,
-        active_profile.provider,
-        active_profile.api_mode,
-        active_profile.model,
-        len(config.ai_profiles),
-        config.telegram.allowed_chat_ids,
-    )
+    if config.llm_configured:
+        active_profile = config.ai_profiles[config.active_ai_profile]
+        logger.info(
+            "Configuration loaded: active_ai_profile=%s, provider=%s, api_mode=%s, model=%s, profile_count=%d, allowed_users=%s",
+            config.active_ai_profile,
+            active_profile.provider,
+            active_profile.api_mode,
+            active_profile.model,
+            len(config.ai_profiles),
+            config.telegram.allowed_ids,
+        )
+    else:
+        logger.info(
+            "Configuration loaded: llm=not_configured, telegram=%s, allowed_users=%s",
+            "configured" if config.telegram_configured else "not_configured",
+            config.telegram.allowed_ids,
+        )
     return config

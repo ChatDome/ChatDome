@@ -96,7 +96,10 @@ class TelegramBot:
         self.agent = agent
         self.profile_admin = profile_admin
         self._codex_oauth = CodexOAuthService(profile_admin)
-        self.auth = Authenticator(config.telegram.allowed_chat_ids)
+        self.auth = Authenticator(
+            config.telegram.allowed_ids,
+            config.telegram.admin_ids,
+        )
         self.max_message_length = config.telegram.max_message_length
         self._app: Application | None = None
         self._environment_profile_path = environment_profile_path()
@@ -278,22 +281,13 @@ class TelegramBot:
         return command_context
 
     def _is_model_admin(self, update: Update | None) -> bool:
-        if update is None or update.effective_chat is None:
+        if update is None or update.effective_chat is None or update.effective_user is None:
             return False
         chat = update.effective_chat
-        config = getattr(self, "config", None)
-        if config is None:
-            return False
-        telegram_config = config.telegram
-        admin_ids = set(
-            telegram_config.admin_chat_ids
-            or telegram_config.allowed_chat_ids
-            or []
-        )
         return bool(
             self._check_auth(update)
             and getattr(chat, "type", "") == "private"
-            and chat.id in admin_ids
+            and self.auth.is_admin(update.effective_user.id)
         )
 
     async def _sync_model_manager(self) -> None:
@@ -1900,9 +1894,16 @@ class TelegramBot:
 
     def _check_auth(self, update: Update) -> bool:
         """Check if the message sender is authorized."""
-        if update.effective_chat is None:
+        if update.effective_chat is None or update.effective_user is None:
             return False
-        return self.auth.is_authorized(update.effective_chat.id)
+        if getattr(update.effective_chat, "type", "") != "private":
+            logger.info(
+                "Ignored non-private Telegram update: chat_type=%s user_id=%s",
+                getattr(update.effective_chat, "type", "unknown"),
+                getattr(update.effective_user, "id", "-"),
+            )
+            return False
+        return self.auth.is_authorized(update.effective_user.id)
 
     async def _send_long_message(
         self,

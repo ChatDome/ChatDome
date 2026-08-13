@@ -129,8 +129,8 @@ class FakeProfileAdmin:
 def make_bot(*, admin_ids=None, allowed_ids=None):
     config = ChatDomeConfig(
         telegram=TelegramConfig(
-            allowed_chat_ids=list(allowed_ids if allowed_ids is not None else [1]),
-            admin_chat_ids=list(admin_ids if admin_ids is not None else [1]),
+            allowed_ids=list(allowed_ids if allowed_ids is not None else [1]),
+            admin_ids=list(admin_ids if admin_ids is not None else [2]),
         ),
         active_ai_profile="base",
         ai_profiles={
@@ -193,14 +193,22 @@ def test_non_admin_model_switch_is_rejected_by_shared_service():
     assert not admin.switched
 
 
-def test_allowed_private_chat_can_manage_when_admin_list_is_empty():
+def test_allowed_private_user_cannot_manage_when_admin_list_is_empty():
     bot, admin = make_bot(admin_ids=[], allowed_ids=[1])
     update = FakeUpdate(FakeMessage())
 
     result = invoke(bot, update, "/model", args=("other",))
 
-    assert result.outcome == "model_switched"
-    assert admin.switched[0][0] == "other"
+    assert result.outcome == "unauthorized"
+    assert not admin.switched
+
+
+def test_admin_user_inherits_ordinary_access():
+    bot, _ = make_bot(admin_ids=[2], allowed_ids=[])
+    update = FakeUpdate(FakeMessage(), chat_id=1, user_id=2)
+
+    assert bot._check_auth(update)
+    assert bot._is_model_admin(update)
 
 
 def test_group_chat_cannot_manage_models():

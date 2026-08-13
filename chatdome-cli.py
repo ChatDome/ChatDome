@@ -246,7 +246,7 @@ def _mask_secret(value: str, keep: int = 4) -> str:
     return f"{text[:keep]}...{text[-keep:]}"
 
 
-def _parse_chat_ids(raw: str) -> list[int]:
+def _parse_user_ids(raw: str) -> list[int]:
     values: list[int] = []
     for part in str(raw or "").split(","):
         item = part.strip()
@@ -255,16 +255,8 @@ def _parse_chat_ids(raw: str) -> list[int]:
         try:
             values.append(int(item))
         except ValueError as exc:
-            raise SystemExit(f"invalid chat id: {item}") from exc
+            raise SystemExit(f"invalid user id: {item}") from exc
     return values
-
-
-def _llm_admin_chat_ids_display(telegram: dict[str, Any]) -> list[int] | str:
-    admin_chat_ids = telegram.get("admin_chat_ids") or []
-    if admin_chat_ids:
-        return admin_chat_ids
-    allowed_chat_ids = telegram.get("allowed_chat_ids") or []
-    return allowed_chat_ids or "(none)"
 
 
 def _validate_profile_name(profile: str) -> str:
@@ -1831,8 +1823,8 @@ def telegram_status(args: argparse.Namespace) -> None:
     telegram = _section(_chatdome_root(data), "telegram")
     print("Telegram")
     print(f"- bot token: {_mask_secret(telegram.get('bot_token', ''))}")
-    print(f"- allowed chat ids: {telegram.get('allowed_chat_ids') or '(all)'}")
-    print(f"- model admin chat ids: {_llm_admin_chat_ids_display(telegram)}")
+    print(f"- allowed ids: {telegram.get('allowed_ids') or '(none)'}")
+    print(f"- admin ids: {telegram.get('admin_ids') or '(none)'}")
     print(f"- proxy_url: {telegram.get('proxy_url') or '(none)'}")
 
 
@@ -1844,20 +1836,20 @@ def set_bot_token(args: argparse.Namespace) -> None:
     print("Telegram bot token updated. Restart ChatDome for this change to take effect.")
 
 
-def set_chat_ids(args: argparse.Namespace) -> None:
+def set_allowed_ids(args: argparse.Namespace) -> None:
     data = _load_yaml()
     telegram = _section(_chatdome_root(data), "telegram")
-    telegram["allowed_chat_ids"] = _parse_chat_ids(args.chat_ids)
+    telegram["allowed_ids"] = _parse_user_ids(args.ids)
     _write_yaml(data)
-    print("allowed_chat_ids updated. Restart ChatDome for this change to take effect.")
+    print("allowed_ids updated. Restart ChatDome for this change to take effect.")
 
 
-def set_admin_chat_ids(args: argparse.Namespace) -> None:
+def set_admin_ids(args: argparse.Namespace) -> None:
     data = _load_yaml()
     telegram = _section(_chatdome_root(data), "telegram")
-    telegram["admin_chat_ids"] = _parse_chat_ids(args.chat_ids)
+    telegram["admin_ids"] = _parse_user_ids(args.ids)
     _write_yaml(data)
-    print("admin_chat_ids updated. Restart ChatDome for this change to take effect.")
+    print("admin_ids updated. Restart ChatDome for this change to take effect.")
 
 
 def set_telegram_proxy(args: argparse.Namespace) -> None:
@@ -2116,12 +2108,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("set-bot-token")
     p.add_argument("token")
     p.set_defaults(func=set_bot_token)
-    p = sub.add_parser("set-chat-ids")
-    p.add_argument("chat_ids")
-    p.set_defaults(func=set_chat_ids)
-    p = sub.add_parser("set-admin-chat-ids")
-    p.add_argument("chat_ids")
-    p.set_defaults(func=set_admin_chat_ids)
+    p = sub.add_parser("set-allowed-ids")
+    p.add_argument("ids")
+    p.set_defaults(func=set_allowed_ids)
+    p = sub.add_parser("set-admin-ids")
+    p.add_argument("ids")
+    p.set_defaults(func=set_admin_ids)
     p = sub.add_parser("set-telegram-proxy")
     p.add_argument("proxy_url")
     p.set_defaults(func=set_telegram_proxy)

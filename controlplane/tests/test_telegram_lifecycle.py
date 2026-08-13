@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 
 from chatdome.config import ChatDomeConfig
+from chatdome.telegram.auth import Authenticator
 from chatdome.telegram.bot import TelegramBot
 
 
@@ -19,6 +20,40 @@ class FakeSentinel:
 
 
 class TelegramLifecycleTests(unittest.TestCase):
+    def test_empty_user_lists_deny_every_user(self):
+        auth = Authenticator([], [])
+
+        self.assertFalse(auth.is_authorized(123))
+        self.assertFalse(auth.is_admin(123))
+
+    def test_admin_inherits_allowed_access(self):
+        auth = Authenticator([], [123])
+
+        self.assertTrue(auth.is_authorized(123))
+        self.assertTrue(auth.is_admin(123))
+
+    def test_bot_authorizes_private_sender_user_id(self):
+        config = ChatDomeConfig()
+        config.telegram.allowed_ids = [123]
+        bot = TelegramBot(config, FakeAgent())
+        update = SimpleNamespace(
+            effective_chat=SimpleNamespace(id=999, type="private"),
+            effective_user=SimpleNamespace(id=123),
+        )
+
+        self.assertTrue(bot._check_auth(update))
+
+    def test_bot_rejects_group_even_for_allowed_user(self):
+        config = ChatDomeConfig()
+        config.telegram.allowed_ids = [123]
+        bot = TelegramBot(config, FakeAgent())
+        update = SimpleNamespace(
+            effective_chat=SimpleNamespace(id=-999, type="group"),
+            effective_user=SimpleNamespace(id=123),
+        )
+
+        self.assertFalse(bot._check_auth(update))
+
     def test_post_stop_stops_sentinel_gracefully(self):
         asyncio.run(self._run_post_stop_stops_sentinel_gracefully())
 

@@ -44,7 +44,8 @@ class ChatDomeCLITests(unittest.TestCase):
                     "chatdome": {
                         "telegram": {
                             "bot_token": "telegram-token",
-                            "allowed_chat_ids": [123],
+                            "allowed_ids": [123],
+                            "admin_ids": [],
                         },
                         "active_ai_profile": "base",
                         "ai_profiles": {
@@ -96,7 +97,7 @@ class ChatDomeCLITests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             SystemExit,
-            "配置检查失败，共 4 项",
+            "配置检查失败，共 1 项",
         ):
             self.cli.validate_config(SimpleNamespace())
 
@@ -1335,25 +1336,25 @@ class ChatDomeCLITests(unittest.TestCase):
         self.assertIn("model switched: other", printed)
         self.assertIn("Active: other", printed)
 
-    def test_set_admin_chat_ids_writes_telegram_config(self):
+    def test_set_admin_ids_writes_telegram_config(self):
         with patch("builtins.print") as output:
-            self.cli.set_admin_chat_ids(SimpleNamespace(chat_ids="1, 2"))
+            self.cli.set_admin_ids(SimpleNamespace(ids="1, 2"))
             output.assert_called_once_with(
-                "admin_chat_ids updated. Restart ChatDome for this change to take effect."
+                "admin_ids updated. Restart ChatDome for this change to take effect."
             )
 
         data = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
-        self.assertEqual(data["chatdome"]["telegram"]["admin_chat_ids"], [1, 2])
+        self.assertEqual(data["chatdome"]["telegram"]["admin_ids"], [1, 2])
 
-    def test_telegram_status_shows_effective_llm_admin_chat_ids(self):
+    def test_telegram_status_shows_allowed_and_admin_ids(self):
         with patch("builtins.print"):
-            self.cli.set_chat_ids(SimpleNamespace(chat_ids="123"))
+            self.cli.set_allowed_ids(SimpleNamespace(ids="123"))
 
         with patch("builtins.print") as output:
             self.cli.telegram_status(SimpleNamespace())
 
-        output.assert_any_call("- allowed chat ids: [123]")
-        output.assert_any_call("- model admin chat ids: [123]")
+        output.assert_any_call("- allowed ids: [123]")
+        output.assert_any_call("- admin ids: (none)")
 
     def test_health_check_requires_matching_ready_process(self):
         self.pid_path.parent.mkdir(parents=True, exist_ok=True)

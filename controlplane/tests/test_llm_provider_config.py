@@ -228,14 +228,29 @@ chatdome:
         )
 
         validate_llm_config(config)
-        with self.assertRaisesRegex(ValueError, "Telegram Bot Token"):
-            validate_runtime_config(config)
+        self.assertEqual(validate_runtime_config(config), [])
 
-    def test_scalar_admin_chat_id_is_normalized(self):
+    def test_empty_llm_configuration_is_valid_for_core_runtime(self):
         config = parse_config_document(
             {
                 "chatdome": {
-                    "telegram": {"admin_chat_ids": 123},
+                    "telegram": {},
+                    "active_ai_profile": "",
+                    "ai_profiles": {},
+                }
+            }
+        )
+
+        validate_llm_config(config)
+        self.assertEqual(validate_runtime_config(config), [])
+        self.assertFalse(config.llm_configured)
+        self.assertFalse(config.telegram_configured)
+
+    def test_scalar_admin_id_is_normalized(self):
+        config = parse_config_document(
+            {
+                "chatdome": {
+                    "telegram": {"admin_ids": 123},
                     "active_ai_profile": "base",
                     "ai_profiles": {
                         "base": {
@@ -249,15 +264,15 @@ chatdome:
             }
         )
 
-        self.assertEqual(config.telegram.admin_chat_ids, [123])
+        self.assertEqual(config.telegram.admin_ids, [123])
 
-    def test_admin_chat_ids_are_normalized_without_logging(self):
+    def test_user_ids_are_normalized_without_logging(self):
         config = parse_config_document(
             {
                 "chatdome": {
                     "telegram": {
-                        "allowed_chat_ids": ["1", "invalid"],
-                        "admin_chat_ids": "2,invalid,3",
+                        "allowed_ids": ["1", "invalid"],
+                        "admin_ids": "2,invalid,3",
                     },
                     "active_ai_profile": "base",
                     "ai_profiles": {
@@ -272,8 +287,8 @@ chatdome:
             }
         )
 
-        self.assertEqual(config.telegram.allowed_chat_ids, [1])
-        self.assertEqual(config.telegram.admin_chat_ids, [2, 3])
+        self.assertEqual(config.telegram.allowed_ids, [1])
+        self.assertEqual(config.telegram.admin_ids, [2, 3])
 
 
 if __name__ == "__main__":

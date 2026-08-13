@@ -8,9 +8,9 @@
 chatdome:
   telegram:
     bot_token: ""
-    allowed_chat_ids: []
-    # Empty = private chats in allowed_chat_ids can manage LLM profiles.
-    admin_chat_ids: []
+    allowed_ids: []
+    # Administrators also receive ordinary access.
+    admin_ids: []
     proxy_url: ""
     max_message_length: 4000
 
