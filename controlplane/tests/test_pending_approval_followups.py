@@ -440,6 +440,9 @@ def _pending_session() -> AgentSession:
     session.pending_command_hash = Agent._command_hash(session.pending_command)
     session.pending_reason = "查询 sshd jail 中当前被封禁的 IP 数量及列表"
     session.pending_risk_level = "LOW"
+    session.pending_static_is_safe = False
+    session.pending_mutation_detected = False
+    session.pending_deletion_detected = False
     session.messages = [
         {"role": "system", "content": "system prompt"},
         {"role": "user", "content": "帮我看看 fail2ban 封禁状态"},
@@ -1265,6 +1268,9 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         self.assertEqual(restored.pending_run_id, session.pending_run_id)
         self.assertEqual(restored.pending_command_hash, session.pending_command_hash)
         self.assertEqual(restored.pending_risk_level, "LOW")
+        self.assertFalse(restored.pending_static_is_safe)
+        self.assertFalse(restored.pending_mutation_detected)
+        self.assertFalse(restored.pending_deletion_detected)
 
     def test_missing_legacy_tool_output_is_repaired(self):
         session = AgentSession(chat_id=123)

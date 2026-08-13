@@ -13,7 +13,7 @@ import logging
 import re
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Conflict
@@ -40,7 +40,7 @@ from chatdome.outbound.builders import (
     build_notification_message,
     build_sentinel_alert,
 )
-from chatdome.outbound.renderers.common import compact_approval_purpose
+from chatdome.outbound.decision_prompts import DecisionPromptComposer
 from chatdome.outbound.renderers.telegram import TelegramOutboundRenderer, group_controls
 from chatdome.platform_adapters import (
     TelegramDeliveryTarget,
@@ -617,37 +617,26 @@ class TelegramBot:
             "command": str(getattr(session, "pending_command", "") or ""),
             "reason": str(getattr(session, "pending_reason", "") or ""),
             "risk_level": str(getattr(session, "pending_risk_level", "") or ""),
+            "static_is_safe": getattr(session, "pending_static_is_safe", None),
+            "mutation_detected": getattr(session, "pending_mutation_detected", None),
+            "deletion_detected": getattr(session, "pending_deletion_detected", None),
             "requires_detail_expansion": True,
         }
 
     @staticmethod
-    def _approval_purpose(message: Any, *, reason: str = "") -> str:
-        """Prefer approval state while retaining compatibility with older cards."""
-        source = str(getattr(message, "text", "") or getattr(message, "caption", "") or "")
-        rendered_reason = next(
-            (
-                line.strip().removeprefix("目的：").strip()
-                for line in source.splitlines()
-                if line.strip().startswith("目的：")
-            ),
-            "",
-        )
-        return compact_approval_purpose(
-            reason or rendered_reason,
-            fallback="信息不可用",
-        )
-
-    @staticmethod
     def _approval_decision_text(
-        message: Any,
         action: str,
         *,
-        reason: str = "",
+        approval: Mapping[str, Any],
     ) -> str:
-        """Keep the approval purpose visible after replacing the action card."""
-        purpose = TelegramBot._approval_purpose(message, reason=reason)
+        """Render the resolved card from approval facts only."""
+        facts = build_approval_request(approval).facts
+        summary = DecisionPromptComposer.compose(
+            facts.decision,
+            include_question=False,
+        )
         title = "❌ 已拒绝" if action == "REJECT" else "✅ 已批准"
-        return f"{title}\n目的：{purpose}"
+        return f"{title}\n{summary}"
 
     @staticmethod
     async def _restore_approval_request(
@@ -689,7 +678,7 @@ class TelegramBot:
         chat_id: int,
         *,
         action: str,
-        reason: str,
+        approval: Mapping[str, Any],
         approval_id: str | None,
         data: str,
         command_name: str,
@@ -706,7 +695,7 @@ class TelegramBot:
             message=message,
             chat_id=chat_id,
             action=action,
-            reason=reason,
+            approval=dict(approval),
             approval_id=approval_id,
             data=data,
             command_name=command_name,
@@ -734,7 +723,7 @@ class TelegramBot:
         message: Any,
         chat_id: int,
         action: str,
-        reason: str,
+        approval: Mapping[str, Any],
         approval_id: str | None,
         data: str,
         command_name: str,
@@ -750,9 +739,8 @@ class TelegramBot:
             await self._cancel_message_task_for_chat(chat_id)
             await query.edit_message_text(
                 text=self._approval_decision_text(
-                    message,
                     action,
-                    reason=reason,
+                    approval=approval,
                 ),
                 reply_markup=None,
             )
@@ -1677,12 +1665,11 @@ class TelegramBot:
                 )
                 return
 
-            reason = str((snapshot or {}).get("reason", ""))
             started = self._start_approval_resolution(
                 query,
                 chat_id,
                 action=action,
-                reason=reason,
+                approval=snapshot,
                 approval_id=approval_id or None,
                 data=callback_data,
                 command_name=command_name,

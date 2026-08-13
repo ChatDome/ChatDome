@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Mapping
 from typing import DefaultDict, List
 
+from chatdome.outbound.decision_prompts import DecisionPromptComposer
 from chatdome.outbound.models import (
     ActionKind,
     ApprovalDetailsFacts,
@@ -23,7 +24,7 @@ from chatdome.outbound.models import (
     SessionControlFacts,
     TokenUsageFacts,
 )
-from chatdome.outbound.renderers.common import compact_approval_purpose, compact_impact
+from chatdome.outbound.renderers.common import compact_impact
 
 
 _ACTION_LABELS = {
@@ -74,13 +75,16 @@ class TelegramOutboundRenderer:
         facts = message.facts
         if not isinstance(facts, ApprovalRequestFacts):
             raise TypeError("approval request facts are required")
-        purpose = compact_approval_purpose(
-            facts.reason,
-            fallback="信息不可用，请先查看命令分析。",
-        )
-        lines = ["⚠️ 待审批", f"目的：{purpose}"]
-        if any(action.kind == ActionKind.APPROVE for action in message.actions):
-            lines.extend(["是否允许本次操作？", "点击“命令分析”查看详情。"])
+        can_approve = any(action.kind == ActionKind.APPROVE for action in message.actions)
+        lines = [
+            "⚠️ 待审批",
+            DecisionPromptComposer.compose(
+                facts.decision,
+                include_question=can_approve,
+            ),
+        ]
+        if can_approve:
+            lines.append("点击“命令分析”查看详情。")
         elif any(action.kind == ActionKind.SHOW_DETAILS for action in message.actions):
             lines.append("请先查看命令分析，再决定是否允许。")
         else:
@@ -129,11 +133,13 @@ class TelegramOutboundRenderer:
         if not facts.ok:
             return RenderedMessage(text_parts=(f"ℹ️ {facts.error_message or '没有待审批操作。'}",))
 
-        purpose = compact_approval_purpose(facts.reason, fallback="")
+        action_kinds = {action.kind for action in message.actions}
+        decision = DecisionPromptComposer.compose(
+            facts.decision,
+            include_question=ActionKind.APPROVE in action_kinds,
+        )
         if facts.detail_status == "failed":
-            lines = ["⚠️ 命令分析不可用"]
-            if purpose:
-                lines.extend(["", f"目的：{purpose}"])
+            lines = ["⚠️ 命令分析不可用", decision]
             lines.extend(
                 [
                     "请核对原始命令后决定是否允许。",
@@ -167,7 +173,7 @@ class TelegramOutboundRenderer:
             lines = ["🔎 命令审批详情", ""]
         lines.extend(
             [
-                f"目的：{purpose or '信息不可用'}",
+                decision,
                 "",
                 "🛡 安全评估",
                 f"风险等级: {facts.risk_level or 'unknown'} | 安全状态: {facts.safety_status or 'unknown'}",

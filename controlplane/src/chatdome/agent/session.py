@@ -297,6 +297,9 @@ class AgentSession:
     pending_followups: list[dict[str, str]] = field(default_factory=list)
     pending_reason: str | None = None
     pending_risk_level: str | None = None
+    pending_static_is_safe: bool | None = None
+    pending_mutation_detected: bool | None = None
+    pending_deletion_detected: bool | None = None
     pending_analysis: dict[str, Any] | None = None
     approval_processing: bool = False
     processing_approval_id: str | None = None
@@ -332,6 +335,9 @@ class AgentSession:
             "pending_followups": self.pending_followups,
             "pending_reason": self.pending_reason,
             "pending_risk_level": self.pending_risk_level,
+            "pending_static_is_safe": self.pending_static_is_safe,
+            "pending_mutation_detected": self.pending_mutation_detected,
+            "pending_deletion_detected": self.pending_deletion_detected,
             "pending_analysis": self.pending_analysis,
             "approval_processing": self.approval_processing,
             "processing_approval_id": self.processing_approval_id,
@@ -438,6 +444,21 @@ class AgentSession:
             pending_followups=pending_followups,
             pending_reason=payload.get("pending_reason"),
             pending_risk_level=payload.get("pending_risk_level"),
+            pending_static_is_safe=(
+                payload.get("pending_static_is_safe")
+                if isinstance(payload.get("pending_static_is_safe"), bool)
+                else None
+            ),
+            pending_mutation_detected=(
+                payload.get("pending_mutation_detected")
+                if isinstance(payload.get("pending_mutation_detected"), bool)
+                else None
+            ),
+            pending_deletion_detected=(
+                payload.get("pending_deletion_detected")
+                if isinstance(payload.get("pending_deletion_detected"), bool)
+                else None
+            ),
             pending_analysis=payload.get("pending_analysis")
             if isinstance(payload.get("pending_analysis"), dict)
             else None,
@@ -822,6 +843,9 @@ class AgentSession:
         self.pending_followups.clear()
         self.pending_reason = None
         self.pending_risk_level = None
+        self.pending_static_is_safe = None
+        self.pending_mutation_detected = None
+        self.pending_deletion_detected = None
         self.pending_analysis = None
 
     def clear_pending_round_limit(self) -> None:

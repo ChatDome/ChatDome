@@ -589,7 +589,12 @@ class TelegramStopTests(unittest.TestCase):
             message=old_card,
             chat_id=123,
             action="APPROVE",
-            reason="执行第一条命令",
+            approval={
+                "reason": "执行第一条命令",
+                "static_is_safe": False,
+                "mutation_detected": False,
+                "deletion_detected": False,
+            },
             approval_id="AP-1",
             data="approval:approve:AP-1",
             command_name="/confirm",

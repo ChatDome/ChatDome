@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 from chatdome.agent.result import coerce_agent_result
+from chatdome.outbound.decision_prompts import build_approval_decision_facts
 from chatdome.outbound.models import (
     ActionKind,
     ApprovalDetailsFacts,
@@ -15,6 +16,7 @@ from chatdome.outbound.models import (
     CodexAuthorizationFacts,
     CommandBreakdownGroup,
     CommandBreakdownItem,
+    DecisionUncertainty,
     EnvironmentFacts,
     OutboundAction,
     OutboundMessage,
@@ -84,14 +86,25 @@ def build_approval_request(payload: Optional[Mapping[str, Any]]) -> OutboundMess
     data = dict(payload or {})
     approval_id = normalize_text(data.get("approval_id", ""))
     details_available = _optional_bool(data.get("requires_detail_expansion", True))
+    static_is_safe = _optional_bool(data.get("static_is_safe"))
+    mutation_detected = _optional_bool(data.get("mutation_detected"))
+    deletion_detected = _optional_bool(data.get("deletion_detected"))
+    reason = normalize_text(data.get("reason", ""))
     facts = ApprovalRequestFacts(
         command=str(data.get("command") or "").strip(),
-        reason=normalize_text(data.get("reason", "")),
+        reason=reason,
         impact_analysis=str(data.get("impact_analysis") or "").strip(),
         risk_level=normalize_text(data.get("risk_level", "")),
+        decision=build_approval_decision_facts(
+            reason=reason,
+            static_is_safe=static_is_safe,
+            mutation_detected=mutation_detected,
+            deletion_detected=deletion_detected,
+        ),
         safety_status=normalize_text(data.get("safety_status", "")),
-        mutation_detected=_optional_bool(data.get("mutation_detected")),
-        deletion_detected=_optional_bool(data.get("deletion_detected")),
+        static_is_safe=static_is_safe,
+        mutation_detected=mutation_detected,
+        deletion_detected=deletion_detected,
         details_available=True if details_available is None else details_available,
     )
     message = OutboundMessage(
@@ -203,20 +216,48 @@ def build_approval_details(details: Optional[Mapping[str, Any]]) -> OutboundMess
             command_count if detail_status == "complete" else 0,
         ),
     )
+    reason = str(data.get("reason") or "").strip()
+    static_is_safe = _optional_bool(
+        analysis.get("static_is_safe", data.get("static_is_safe"))
+    )
+    mutation_detected = _optional_bool(
+        analysis.get("mutation_detected", data.get("mutation_detected"))
+    )
+    deletion_detected = _optional_bool(
+        analysis.get("deletion_detected", data.get("deletion_detected"))
+    )
+    decision = build_approval_decision_facts(
+        reason=reason,
+        static_is_safe=static_is_safe,
+        mutation_detected=mutation_detected,
+        deletion_detected=deletion_detected,
+    )
+    if detail_status == "partial":
+        decision = replace(
+            decision,
+            uncertainty=DecisionUncertainty.ANALYSIS_PARTIAL,
+        )
+    elif detail_status == "failed":
+        decision = replace(
+            decision,
+            uncertainty=DecisionUncertainty.IMPACT_UNKNOWN,
+        )
     facts = ApprovalDetailsFacts(
         ok=ok,
+        decision=decision,
         detail_status=detail_status,
         reviewer_mode=normalize_text(analysis.get("reviewer_mode", "")),
         analyzed_command_count=analyzed_command_count,
         command_count=command_count,
         detail_errors=_warnings(analysis.get("detail_errors")),
         command=str(data.get("command") or "").strip(),
-        reason=str(data.get("reason") or "").strip(),
+        reason=reason,
         impact_analysis=str(analysis.get("impact_analysis") or data.get("impact_analysis") or "").strip(),
         risk_level=normalize_text(analysis.get("risk_level") or data.get("risk_level") or ""),
         safety_status=normalize_text(analysis.get("safety_status") or data.get("safety_status") or ""),
-        mutation_detected=_optional_bool(analysis.get("mutation_detected", data.get("mutation_detected"))),
-        deletion_detected=_optional_bool(analysis.get("deletion_detected", data.get("deletion_detected"))),
+        static_is_safe=static_is_safe,
+        mutation_detected=mutation_detected,
+        deletion_detected=deletion_detected,
         command_breakdown=_breakdown_items(breakdown.get("tokens")),
         command_groups=command_groups,
         warnings=_warnings(breakdown.get("warnings")),

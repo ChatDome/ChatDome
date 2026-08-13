@@ -1566,6 +1566,15 @@ class Agent:
                         session.pending_command_hash = command_hash
                         session.pending_reason = getattr(e, "reason", "")
                         session.pending_risk_level = getattr(e, "risk_level", "")
+                        session.pending_static_is_safe = bool(
+                            getattr(e, "static_is_safe", False)
+                        )
+                        session.pending_mutation_detected = bool(
+                            getattr(e, "mutation_detected", False)
+                        )
+                        session.pending_deletion_detected = bool(
+                            getattr(e, "deletion_detected", False)
+                        )
                         session.pending_analysis = None
                         session.pending_since = time.time()
                         session.pending_followups.clear()
@@ -1610,6 +1619,9 @@ class Agent:
                             "risk_level": getattr(e, "risk_level", ""),
                             "impact_analysis": getattr(e, "impact_analysis", ""),
                             "safety_status": getattr(e, "safety_status", ""),
+                            "static_is_safe": bool(
+                                getattr(e, "static_is_safe", False)
+                            ),
                             "mutation_detected": bool(getattr(e, "mutation_detected", False)),
                             "deletion_detected": bool(getattr(e, "deletion_detected", False)),
                             "requires_detail_expansion": True,

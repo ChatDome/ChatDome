@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, List
 
+from chatdome.outbound.decision_prompts import DecisionPromptComposer
 from chatdome.outbound.models import (
     ActionKind,
     ApprovalDetailsFacts,
@@ -20,7 +21,6 @@ from chatdome.outbound.models import (
     TokenUsageFacts,
 )
 from chatdome.outbound.renderers.common import (
-    compact_approval_purpose,
     compact_impact,
     reason_adds_context,
 )
@@ -56,14 +56,14 @@ class TerminalOutboundRenderer:
         facts = message.facts
         if not isinstance(facts, ApprovalRequestFacts):
             raise TypeError("approval request facts are required")
-        purpose = compact_approval_purpose(
-            facts.reason,
-            fallback="Unavailable; review details before approval.",
-        )
+        action_kinds = {action.kind for action in message.actions}
         text = "\n".join(
             [
                 self._status("⚠️", "[!]", "Approval required"),
-                f"Purpose: {purpose}",
+                DecisionPromptComposer.compose(
+                    facts.decision,
+                    include_question=ActionKind.APPROVE in action_kinds,
+                ),
                 self._action_prompt(message, include_details=facts.details_available),
             ]
         )
@@ -118,11 +118,16 @@ class TerminalOutboundRenderer:
             text = self._status("ℹ️", "[i]", facts.error_message or "No pending approval.")
             return RenderedMessage(text_parts=(text,))
 
+        action_kinds = {action.kind for action in message.actions}
+        decision = DecisionPromptComposer.compose(
+            facts.decision,
+            include_question=ActionKind.APPROVE in action_kinds,
+        )
         if facts.detail_status == "failed":
-            purpose = compact_approval_purpose(facts.reason, fallback="")
-            lines = [self._status("⚠️", "[!]", "Command analysis unavailable")]
-            if purpose:
-                lines.append(f"Purpose: {purpose}")
+            lines = [
+                self._status("⚠️", "[!]", "Command analysis unavailable"),
+                decision,
+            ]
             lines.extend(
                 [
                     "Review the original command before allowing it.",
@@ -166,6 +171,7 @@ class TerminalOutboundRenderer:
                 )
         else:
             lines = [self._status("🔎", "[details]", "Approval details")]
+        lines.append(decision)
         lines.append(f"Risk: {risk}    Safety: {safety}")
         if flags:
             lines.append(f"Flags: {', '.join(flags)}")

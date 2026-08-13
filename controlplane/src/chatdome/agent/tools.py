@@ -208,6 +208,7 @@ class PendingApprovalError(Exception):
         tool_call_id: str,
         reason: str = "",
         risk_level: str = "HIGH",
+        static_is_safe: bool = False,
         mutation_detected: bool = False,
         deletion_detected: bool = False,
         command_breakdown: dict[str, Any] | None = None,
@@ -218,6 +219,7 @@ class PendingApprovalError(Exception):
         self.tool_call_id = tool_call_id
         self.reason = reason
         self.risk_level = risk_level
+        self.static_is_safe = static_is_safe
         self.mutation_detected = mutation_detected
         self.deletion_detected = deletion_detected
         self.command_breakdown = command_breakdown or {}
@@ -655,6 +657,7 @@ class ToolDispatcher:
             tool_call_id=tool_call_id,
             reason=reason,
             risk_level=risk_level,
+            static_is_safe=static_is_safe,
             mutation_detected=mutation_detected,
             deletion_detected=deletion_detected,
         )

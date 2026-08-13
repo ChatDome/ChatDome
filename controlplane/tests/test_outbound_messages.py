@@ -95,6 +95,34 @@ class OutboundMessageTests(unittest.TestCase):
         self.assertEqual([control.label for control in rows[1]], ["❌ 拒绝", "🔎 命令分析"])
         self.assertEqual(rows[1][1].data, "approval:details:AP-1")
 
+    def test_request_renderers_share_decision_prompt_without_purpose_field(self):
+        payload = {
+            "approval_id": "AP-1",
+            "command": "du -sh /var/log/journal",
+            "reason": "检查系统日志占用空间",
+            "static_is_safe": False,
+            "mutation_detected": False,
+            "deletion_detected": False,
+            "requires_detail_expansion": True,
+        }
+
+        message = build_approval_request(payload)
+        rendered = (
+            TerminalOutboundRenderer().render(message).text_parts[0],
+            TelegramOutboundRenderer().render(message).text_parts[0],
+            PlainTextOutboundRenderer().render(message).text_parts[0],
+        )
+
+        for text in rendered:
+            self.assertIn(
+                "ChatDome 请求执行一项操作：检查系统日志占用空间。",
+                text,
+            )
+            self.assertIn("当前还不能确认具体影响，请先查看命令分析。", text)
+            self.assertNotIn("未发现修改或删除操作", text)
+            self.assertNotIn("目的：", text)
+            self.assertNotIn("du -sh", text)
+
     def test_details_renderers_follow_cli_semantic_order(self):
         details = {
             "ok": True,
@@ -127,6 +155,38 @@ class OutboundMessageTests(unittest.TestCase):
         self.assertIn("标记: 修改系统", telegram)
         self.assertIn("命令解析:", terminal)
         self.assertIn("命令解析:", telegram)
+
+    def test_details_renderers_lead_with_shared_decision_prompt(self):
+        details = {
+            "ok": True,
+            "approval_id": "AP-1",
+            "command": "systemctl restart sshd",
+            "reason": "重启 SSH 服务",
+            "static_is_safe": False,
+            "analysis": {
+                "risk_level": "HIGH",
+                "safety_status": "UNSAFE",
+                "static_is_safe": False,
+                "mutation_detected": True,
+                "deletion_detected": False,
+                "impact_analysis": "现有 SSH 会话可能短暂中断。",
+                "command_breakdown": {"commands": []},
+            },
+        }
+
+        message = build_approval_details(details)
+        rendered = (
+            TerminalOutboundRenderer().render(message).text_parts[0],
+            TelegramOutboundRenderer().render(message).text_parts[0],
+            PlainTextOutboundRenderer().render(message).text_parts[0],
+        )
+
+        for text in rendered:
+            self.assertIn("ChatDome 请求执行一项操作：重启 SSH 服务。", text)
+            self.assertIn("这可能会修改系统状态或文件。", text)
+            self.assertLess(text.index("ChatDome"), text.index("systemctl restart sshd"))
+            self.assertNotIn("目的：", text)
+            self.assertNotIn("Purpose:", text)
 
     def test_details_renderers_group_semicolon_separated_commands(self):
         details = {

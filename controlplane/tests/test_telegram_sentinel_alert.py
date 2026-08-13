@@ -300,7 +300,9 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         text = TelegramBot._format_approval_detail_text(details)
 
         self.assertIn("命令审批详情", text)
-        self.assertIn("目的：delete old helper", text)
+        self.assertIn("ChatDome 请求执行一项操作：delete old helper。", text)
+        self.assertIn("这可能会删除系统中的内容，删除后可能无法恢复。", text)
+        self.assertNotIn("目的：", text)
         self.assertIn("命令解析", text)
         self.assertIn("/root/show_time.sh", text)
         self.assertIn("目标文件（将被永久删除）", text)
@@ -324,7 +326,8 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
 
         text = bot._send_long_message.await_args.args[1]
         self.assertIn("待审批", text)
-        self.assertIn("目的：delete file", text)
+        self.assertIn("ChatDome 请求执行一项操作：delete file。", text)
+        self.assertNotIn("目的：", text)
         self.assertIn("命令分析", text)
         self.assertNotIn("风险等级", text)
         self.assertNotIn("审批编号", text)
@@ -339,7 +342,9 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
 
         await bot._send_approval_request(message, {"approval_id": "AP-2", "reason": "无说明"})
         fallback_text = bot._send_long_message.await_args.args[1]
-        self.assertIn("目的：信息不可用，请先查看命令分析。", fallback_text)
+        self.assertIn("ChatDome 请求执行一项命令。", fallback_text)
+        self.assertIn("当前还不能确认具体影响，请先查看命令分析。", fallback_text)
+        self.assertNotIn("目的：", fallback_text)
         fallback_markup = bot._send_long_message.await_args.kwargs["reply_markup"]
         fallback_labels = [button.text for row in fallback_markup.inline_keyboard for button in row]
         self.assertEqual(fallback_labels, ["❌ 拒绝", "🔎 命令分析"])
@@ -518,7 +523,11 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
 
         query.edit_message_text.assert_awaited_once_with(
-            text="✅ 已批准\n目的：检查系统日志",
+            text=(
+                "✅ 已批准\n"
+                "ChatDome 请求执行一项操作：检查系统日志。"
+                "当前还不能确认具体影响，请先查看命令分析。"
+            ),
             reply_markup=None,
         )
         bot.agent.resume_session.assert_awaited_once_with(
@@ -536,6 +545,24 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["command"], "/confirm")
         self.assertEqual(event["outcome"], "approval_confirmed")
         self.assertEqual(event["argument_count"], 0)
+
+    def test_approval_status_uses_snapshot_facts_without_rendered_message(self):
+        text = TelegramBot._approval_decision_text(
+            "APPROVE",
+            approval={
+                "reason": "检查系统日志",
+                "static_is_safe": False,
+                "mutation_detected": False,
+                "deletion_detected": False,
+            },
+        )
+
+        self.assertEqual(
+            text,
+            "✅ 已批准\n"
+            "ChatDome 请求执行一项操作：检查系统日志。"
+            "当前还不能确认具体影响，请先查看命令分析。",
+        )
 
     async def test_approval_resolution_reserves_slot_before_editing_card(self):
         bot = _bot()
@@ -564,7 +591,12 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
             approve_query,
             123,
             action="APPROVE",
-            reason="检查系统日志",
+            approval={
+                "reason": "检查系统日志",
+                "static_is_safe": False,
+                "mutation_detected": False,
+                "deletion_detected": False,
+            },
             approval_id="AP-1",
             data="approval:approve:AP-1",
             command_name="/confirm",
@@ -575,7 +607,12 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
             reject_query,
             123,
             action="REJECT",
-            reason="检查系统日志",
+            approval={
+                "reason": "检查系统日志",
+                "static_is_safe": False,
+                "mutation_detected": False,
+                "deletion_detected": False,
+            },
             approval_id="AP-1",
             data="approval:reject:AP-1",
             command_name="/reject",
@@ -588,7 +625,11 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(approve_started)
         self.assertFalse(reject_started)
         approve_query.edit_message_text.assert_awaited_once_with(
-            text="✅ 已批准\n目的：检查系统日志",
+            text=(
+                "✅ 已批准\n"
+                "ChatDome 请求执行一项操作：检查系统日志。"
+                "当前还不能确认具体影响，请先查看命令分析。"
+            ),
             reply_markup=None,
         )
         reject_query.edit_message_text.assert_not_awaited()
@@ -637,7 +678,11 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
 
         query.edit_message_text.assert_awaited_once_with(
-            text="✅ 已批准\n目的：检查系统日志",
+            text=(
+                "✅ 已批准\n"
+                "ChatDome 请求执行一项操作：检查系统日志。"
+                "当前还不能确认具体影响，请先查看命令分析。"
+            ),
             reply_markup=None,
         )
         message.edit_text.assert_awaited_once_with(
@@ -692,7 +737,11 @@ class TelegramSentinelAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(session.pending_followups), 2)
         bot._send_bot_text.assert_awaited_once()
         query.edit_message_text.assert_awaited_once_with(
-            text="✅ 已批准\n目的：检查系统日志",
+            text=(
+                "✅ 已批准\n"
+                "ChatDome 请求执行一项操作：检查系统日志。"
+                "当前还不能确认具体影响，请先查看命令分析。"
+            ),
             reply_markup=None,
         )
         resume_session.assert_awaited_once_with(

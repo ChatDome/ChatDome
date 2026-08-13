@@ -151,7 +151,9 @@ class ApprovalRequestFacts:
     reason: str
     impact_analysis: str
     risk_level: str
+    decision: DecisionPromptFacts
     safety_status: str = ""
+    static_is_safe: Optional[bool] = None
     mutation_detected: Optional[bool] = None
     deletion_detected: Optional[bool] = None
     details_available: bool = True
@@ -160,6 +162,7 @@ class ApprovalRequestFacts:
 @dataclass(frozen=True)
 class ApprovalDetailsFacts:
     ok: bool
+    decision: DecisionPromptFacts
     detail_status: str = "complete"
     reviewer_mode: str = ""
     analyzed_command_count: int = 0
@@ -170,6 +173,7 @@ class ApprovalDetailsFacts:
     impact_analysis: str = ""
     risk_level: str = ""
     safety_status: str = ""
+    static_is_safe: Optional[bool] = None
     mutation_detected: Optional[bool] = None
     deletion_detected: Optional[bool] = None
     command_breakdown: Tuple[CommandBreakdownItem, ...] = ()
