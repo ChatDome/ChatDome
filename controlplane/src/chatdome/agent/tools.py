@@ -721,7 +721,10 @@ class ToolDispatcher:
 
         segments = split_shell_commands(command)
         segment_checks = [
-            validate_command(segment.command, check_allowlist=True)
+            validate_command(
+                segment.command,
+                require_recognized_read_only=True,
+            )
             for segment in segments
         ]
         static_is_safe = bool(segment_checks) and all(check.is_safe for check in segment_checks)

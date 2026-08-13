@@ -2,7 +2,7 @@
 Safety validator for AI-generated shell commands.
 
 Implements a regex-based dangerous command blocklist (design doc §5.2)
-and an optional read-only command allowlist.
+and optional recognition of known read-only commands.
 """
 
 from __future__ import annotations
@@ -91,10 +91,10 @@ DANGEROUS_PATTERNS: list[tuple[re.Pattern, str]] = CRITICAL_PATTERNS + RISKY_PAT
 
 
 # ---------------------------------------------------------------------------
-# Read-only command allowlist (optional second layer)
+# Recognized read-only commands (optional second layer)
 # ---------------------------------------------------------------------------
 
-READONLY_COMMANDS = {
+READ_ONLY_COMMANDS = {
     "awk", "grep", "egrep", "fgrep", "cat", "head", "tail", "sort", "uniq",
     "wc", "find", "ls", "ps", "ss", "netstat", "journalctl", "dmesg",
     "df", "free", "uptime", "last", "who", "id", "uname", "hostnamectl",
@@ -216,14 +216,17 @@ def has_write_intent(command: str) -> bool:
     return False
 
 
-def validate_command(command: str, check_allowlist: bool = False) -> ValidationResult:
+def validate_command(
+    command: str,
+    require_recognized_read_only: bool = False,
+) -> ValidationResult:
     """
     Validate a shell command for safety.
 
     Args:
         command: The shell command string to validate.
-        check_allowlist: If True, also verify the base command is in the
-                         read-only allowlist.
+        require_recognized_read_only: If True, require every base command to
+                                      be recognized as read-only.
 
     Returns:
         ValidationResult with is_safe flag and rejection reason.
@@ -240,20 +243,22 @@ def validate_command(command: str, check_allowlist: bool = False) -> ValidationR
                 reason=f"命令包含危险操作: {description}",
             )
 
-    # Optional: check that the base command is in the allowlist
-    if check_allowlist:
+    # Optional: require every base command to be recognized as read-only.
+    if require_recognized_read_only:
         command_names, parse_error = _extract_command_names(command)
         if parse_error:
             return ValidationResult(is_safe=False, reason=parse_error)
         for base_cmd in command_names:
-            if base_cmd in READONLY_COMMANDS:
+            if base_cmd in READ_ONLY_COMMANDS:
                 continue
             logger.warning(
-                "Command not in allowlist: %s (base: %s)", command, base_cmd
+                "Command not recognized as read-only: %s (base: %s)",
+                command,
+                base_cmd,
             )
             return ValidationResult(
                 is_safe=False,
-                reason=f"命令 '{base_cmd}' 不在只读命令白名单中",
+                reason=f"本地规则未将 '{base_cmd}' 识别为只读命令",
             )
 
     return ValidationResult(is_safe=True)
