@@ -36,6 +36,79 @@ class ActionKind(str, Enum):
     CANCEL = "cancel"
 
 
+class DecisionIntentStyle(str, Enum):
+    """Controlled ways to introduce a ChatDome action."""
+
+    WANT = "want"
+    CONTINUE = "continue"
+    WILL = "will"
+    DESCRIBE = "describe"
+    REQUEST = "request"
+
+
+class DecisionEffectKind(str, Enum):
+    """User-visible effects supplied by deterministic business facts."""
+
+    READ = "read"
+    MODIFY = "modify"
+    DELETE = "delete"
+    INTERRUPT = "interrupt"
+    POLICY_CHANGE = "policy_change"
+    AUTHORIZE = "authorize"
+    TASK_WINDOW = "task_window"
+
+
+class DecisionBoundaryKind(str, Enum):
+    """Safety boundaries that callers have already established."""
+
+    NO_MUTATION_OR_DELETION = "no_mutation_or_deletion"
+    NO_FILE_CHANGE = "no_file_change"
+    PATROL_CONTINUES = "patrol_continues"
+
+
+class DecisionUncertainty(str, Enum):
+    """Known gaps that must remain visible in a decision prompt."""
+
+    NONE = "none"
+    IMPACT_UNKNOWN = "impact_unknown"
+    ANALYSIS_PARTIAL = "analysis_partial"
+
+
+class DecisionQuestion(str, Enum):
+    """The decision currently requested from the user."""
+
+    APPROVE = "approve"
+    CONFIRM_DELETE = "confirm_delete"
+    CONTINUE_TASK = "continue_task"
+    STOP_TASK = "stop_task"
+    CONFIRM_CHANGE = "confirm_change"
+    CONFIRM = "confirm"
+
+
+@dataclass(frozen=True)
+class DecisionEffect:
+    kind: DecisionEffectKind
+    target: str = ""
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class DecisionBoundary:
+    kind: DecisionBoundaryKind
+    target: str = ""
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class DecisionPromptFacts:
+    intent: str
+    intent_style: DecisionIntentStyle = DecisionIntentStyle.WANT
+    effects: Tuple[DecisionEffect, ...] = ()
+    boundaries: Tuple[DecisionBoundary, ...] = ()
+    uncertainty: DecisionUncertainty = DecisionUncertainty.NONE
+    question: DecisionQuestion = DecisionQuestion.CONFIRM
+
+
 @dataclass(frozen=True)
 class OutboundAction:
     """One platform-independent action attached to an outbound message."""
