@@ -18,6 +18,7 @@ from chatdome.outbound.models import (
     OutboundMessageKind,
     RenderedMessage,
     SessionControlFacts,
+    TaskPausedFacts,
     TokenUsageFacts,
 )
 from chatdome.outbound.renderers.common import (
@@ -336,5 +337,13 @@ class TerminalOutboundRenderer:
         if message.kind == OutboundMessageKind.APPROVAL_DETAILS:
             return self._render_details(message)
         if message.kind == OutboundMessageKind.TASK_PAUSED:
-            return RenderedMessage(text_parts=(f"{message.summary}\nContinue? [y/n]",))
+            facts = message.facts
+            if not isinstance(facts, TaskPausedFacts):
+                raise TypeError("task paused facts are required")
+            return RenderedMessage(
+                text_parts=(
+                    f"{DecisionPromptComposer.compose(facts.decision)}\n"
+                    "Continue? [y/n]",
+                )
+            )
         return RenderedMessage(text_parts=((message.body or message.summary),))

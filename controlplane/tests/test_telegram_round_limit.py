@@ -62,7 +62,9 @@ class TelegramRoundLimitTests(unittest.TestCase):
             {"rounds": 10, "window": 10, "run_id": "RUN-1"},
         )
 
-        self.assertIn("当前任务已执行 10 轮", message.replies[-1])
+        self.assertIn("ChatDome 还需要继续处理当前任务。", message.replies[-1])
+        self.assertIn("当前任务已执行 10 轮，尚未完成。", message.replies[-1])
+        self.assertIn("是否让 ChatDome 继续处理？", message.replies[-1])
         keyboard = message.reply_kwargs[-1]["reply_markup"].inline_keyboard
         self.assertEqual(
             [button.text for button in keyboard[0]],

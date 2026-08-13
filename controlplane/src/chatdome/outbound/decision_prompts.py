@@ -85,7 +85,22 @@ class DecisionPromptComposer:
         if effect.kind == DecisionEffectKind.AUTHORIZE:
             return f"这会启动{target or '外部授权流程'}。"
         if effect.kind == DecisionEffectKind.TASK_WINDOW:
-            return detail
+            try:
+                rounds = max(0, int(target))
+            except (TypeError, ValueError):
+                rounds = 0
+            try:
+                window = max(0, int(detail))
+            except (TypeError, ValueError):
+                window = 0
+            sentences = []
+            if rounds:
+                sentences.append(f"当前任务已执行 {rounds} 轮，尚未完成。")
+            else:
+                sentences.append("当前任务尚未完成。")
+            if window:
+                sentences.append(f"继续后，ChatDome 最多再运行 {window} 轮。")
+            return "".join(sentences)
         return ""
 
     @staticmethod

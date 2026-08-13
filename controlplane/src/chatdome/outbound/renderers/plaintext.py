@@ -10,6 +10,7 @@ from chatdome.outbound.models import (
     OutboundMessage,
     OutboundMessageKind,
     RenderedMessage,
+    TaskPausedFacts,
 )
 from chatdome.outbound.renderers.common import compact_impact
 
@@ -77,4 +78,14 @@ class PlainTextOutboundRenderer:
             if ActionKind.APPROVE in action_kinds:
                 lines.append("回复 /confirm 允许，或 /reject 拒绝。")
             return RenderedMessage(text_parts=("\n".join(lines),))
+        if message.kind == OutboundMessageKind.TASK_PAUSED:
+            facts = message.facts
+            if not isinstance(facts, TaskPausedFacts):
+                raise TypeError("task paused facts are required")
+            return RenderedMessage(
+                text_parts=(
+                    f"{DecisionPromptComposer.compose(facts.decision)}\n"
+                    "回复 /continue 继续，或 /reject 放弃。",
+                )
+            )
         return RenderedMessage(text_parts=((message.body or message.summary),))

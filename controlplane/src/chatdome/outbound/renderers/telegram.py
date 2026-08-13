@@ -22,6 +22,7 @@ from chatdome.outbound.models import (
     RenderedControl,
     RenderedMessage,
     SessionControlFacts,
+    TaskPausedFacts,
     TokenUsageFacts,
 )
 from chatdome.outbound.renderers.common import compact_impact
@@ -322,14 +323,10 @@ class TelegramOutboundRenderer:
 
     @staticmethod
     def _render_task_paused(message: OutboundMessage) -> RenderedMessage:
-        facts = message.facts if isinstance(message.facts, Mapping) else {}
-        rounds = int(facts.get("rounds") or 0)
-        window = int(facts.get("window") or 0)
-        lines = [f"当前任务已执行 {rounds} 轮，尚未完成。"]
-        if window:
-            lines.append(f"是否继续执行，再运行 {window} 轮？")
-        else:
-            lines.append("是否继续执行？")
+        facts = message.facts
+        if not isinstance(facts, TaskPausedFacts):
+            raise TypeError("task paused facts are required")
+        lines = [DecisionPromptComposer.compose(facts.decision)]
         controls = []
         for action in message.actions:
             if action.kind == ActionKind.CONTINUE:

@@ -183,6 +183,13 @@ class ApprovalDetailsFacts:
 
 
 @dataclass(frozen=True)
+class TaskPausedFacts:
+    rounds: int
+    window: int
+    decision: DecisionPromptFacts
+
+
+@dataclass(frozen=True)
 class CommandHelpItemFacts:
     """One command entry exposed by the shared command catalog."""
 

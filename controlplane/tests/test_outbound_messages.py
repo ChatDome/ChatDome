@@ -385,6 +385,26 @@ class OutboundMessageTests(unittest.TestCase):
         self.assertEqual(message.outcome, "round_limit")
         self.assertTrue(all(action.params["run_id"] == "RUN-1" for action in message.actions))
 
+    def test_round_limit_renderers_share_decision_prompt(self):
+        message = OutboundMessageBuilder().from_agent_result(
+            AgentResult.round_limit({"rounds": 10, "window": 10, "run_id": "RUN-1"})
+        )
+        expected = (
+            "ChatDome 还需要继续处理当前任务。"
+            "当前任务已执行 10 轮，尚未完成。"
+            "继续后，ChatDome 最多再运行 10 轮。"
+            "是否让 ChatDome 继续处理？"
+        )
+
+        rendered = (
+            TelegramOutboundRenderer().render(message).text_parts[0],
+            TerminalOutboundRenderer().render(message).text_parts[0],
+            PlainTextOutboundRenderer().render(message).text_parts[0],
+        )
+
+        for text in rendered:
+            self.assertIn(expected, text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,10 +17,16 @@ from chatdome.outbound.models import (
     CommandBreakdownGroup,
     CommandBreakdownItem,
     DecisionUncertainty,
+    DecisionEffect,
+    DecisionEffectKind,
+    DecisionIntentStyle,
+    DecisionPromptFacts,
+    DecisionQuestion,
     EnvironmentFacts,
     OutboundAction,
     OutboundMessage,
     OutboundMessageKind,
+    TaskPausedFacts,
 )
 from chatdome.outbound.policy import apply_outbound_policy, normalize_text
 
@@ -537,6 +543,23 @@ class OutboundMessageBuilder:
                 ),
             )
             rounds = int(payload.get("rounds") or 0)
+            window = int(payload.get("window") or 0)
+            facts = TaskPausedFacts(
+                rounds=rounds,
+                window=window,
+                decision=DecisionPromptFacts(
+                    intent="继续处理当前任务",
+                    intent_style=DecisionIntentStyle.CONTINUE,
+                    effects=(
+                        DecisionEffect(
+                            DecisionEffectKind.TASK_WINDOW,
+                            target=str(rounds),
+                            detail=str(window),
+                        ),
+                    ),
+                    question=DecisionQuestion.CONTINUE_TASK,
+                ),
+            )
             return OutboundMessage(
                 kind=OutboundMessageKind.TASK_PAUSED,
                 title="Task paused",
@@ -545,7 +568,7 @@ class OutboundMessageBuilder:
                 status="continuation_required",
                 outcome="round_limit",
                 refs=_refs(payload),
-                facts=MappingProxyType(payload),
+                facts=facts,
                 actions=actions,
             )
         return OutboundMessage(
