@@ -88,6 +88,14 @@ if not token_file and legacy_path.exists():
 - 配置读写通过 `chatdome-cli.py` 的子命令完成，不要在 Bash 菜单中直接操作 `config.yaml`。
 - 遵循 `ChatDome-docs/docs/00-governance/coding-standards.md` 中的 Python 规范。
 
+## 文档归属
+
+- 架构设计、模块规范、实施计划、ADR、RFC、技术调研等长篇工程文档必须保存到相邻的 `../ChatDome-docs` 仓库，并遵循 `../ChatDome-docs/docs/00-governance/documentation-standards.md` 的分层、命名、Front Matter 和索引规则。
+- 该约束适用于人工编写、AI 生成以及任何 Skill 或工作流生成的文档。Superpowers 的 `brainstorming`、`writing-plans` 等技能即使默认要求写入 `docs/superpowers/specs` 或 `docs/superpowers/plans`，也必须改写到 `../ChatDome-docs` 的对应正式目录；不得在 ChatDome 代码仓库新增或继续维护此类 Superpowers 文档。
+- 设计规范写入 `../ChatDome-docs/docs/03-module-specs/`，实施计划写入 `../ChatDome-docs/docs/04-implementation-plans/`，架构决策写入 `../ChatDome-docs/docs/05-decision-log/`；其他文档按文档仓库的目录归属决策树处理。
+- 新增长篇文档时同步更新 `../ChatDome-docs/README.md` 的文件索引和修订历史。
+- ChatDome 代码仓库只保留仓库入口和维护文档、用户直接阅读的项目文档、运行时资源及平台元数据，例如 `README.md`、`README_ZH.md`、`CHANGELOG.md`、`SECURITY.md`、`CONTRIBUTING.md`、`AGENTS.md`、运行时 Agent manual 和 `.github/` 下的模板。
+
 ## 提交与协作规范
 
 - 开始代码、文档、CI、发布或仓库维护改动前，先阅读并遵守 `CONTRIBUTING.md`。
