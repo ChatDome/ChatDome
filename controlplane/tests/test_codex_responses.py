@@ -244,6 +244,32 @@ class CodexResponsesClientTests(unittest.TestCase):
         self.assertEqual(res.prompt_tokens, 3)
         self.assertEqual(res.completion_tokens, 4)
         self.assertEqual(res.total_tokens, 7)
+        self.assertEqual(res.finish_reason, "stop")
+
+    def test_chat_completion_stream_incomplete_event_preserves_reason(self):
+        asyncio.run(self._run_chat_completion_stream_incomplete_event_preserves_reason())
+
+    async def _run_chat_completion_stream_incomplete_event_preserves_reason(self):
+        incomplete_response = SimpleNamespace(
+            output=[],
+            usage=SimpleNamespace(input_tokens=3, output_tokens=2000, total_tokens=2003),
+            incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+        )
+
+        async def mock_stream():
+            yield SimpleNamespace(type="response.output_text.delta", delta="残缺摘要：114.24")
+            yield SimpleNamespace(type="response.incomplete", response=incomplete_response)
+
+        mock_client = MagicMock()
+        mock_client.responses.create = AsyncMock(return_value=mock_stream())
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            res = await self.client.chat_completion([{"role": "user", "content": "summarize"}])
+
+        self.assertEqual(res.content, "残缺摘要：114.24")
+        self.assertEqual(res.prompt_tokens, 3)
+        self.assertEqual(res.completion_tokens, 2000)
+        self.assertEqual(res.finish_reason, "max_output_tokens")
 
     def test_chat_completion_stream_falls_back_to_text_delta_when_completed_output_is_empty(self):
         asyncio.run(self._run_chat_completion_stream_falls_back_to_text_delta_when_completed_output_is_empty())
@@ -270,6 +296,7 @@ class CodexResponsesClientTests(unittest.TestCase):
         self.assertEqual(res.prompt_tokens, 2)
         self.assertEqual(res.completion_tokens, 3)
         self.assertEqual(res.total_tokens, 5)
+        self.assertEqual(res.finish_reason, "stop")
 
     def test_empty_stream_logs_metadata_without_payload(self):
         asyncio.run(self._run_empty_stream_logs_metadata_without_payload())
@@ -310,6 +337,7 @@ class CodexResponsesClientTests(unittest.TestCase):
             res = await self.client.chat_completion(messages)
 
         self.assertEqual(res.content, "done text")
+        self.assertEqual(res.finish_reason, "stop")
 
     def test_chat_completion_stream_falls_back_to_output_item_done(self):
         asyncio.run(self._run_chat_completion_stream_falls_back_to_output_item_done())
@@ -339,6 +367,7 @@ class CodexResponsesClientTests(unittest.TestCase):
         self.assertEqual(res.tool_calls[0].id, "call_stream")
         self.assertEqual(res.tool_calls[0].response_id, "fc_stream")
         self.assertEqual(res.tool_calls[0].arguments, '{"param": 3}')
+        self.assertEqual(res.finish_reason, "stop")
 
     def test_evaluate_command_safety(self):
         asyncio.run(self._run_evaluate_command_safety())

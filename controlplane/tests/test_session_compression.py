@@ -2,7 +2,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -20,7 +22,10 @@ class FakeCompressionLLM:
     async def chat_completion(self, messages):
         self.prompts.append(messages[0]["content"])
         index = min(len(self.prompts) - 1, len(self.contents) - 1)
-        return SimpleNamespace(content=self.contents[index])
+        response = self.contents[index]
+        if hasattr(response, "content"):
+            return response
+        return SimpleNamespace(content=response, finish_reason="stop")
 
 
 def test_session_cleanup_stop_awaits_task_and_clears_reference():
@@ -188,6 +193,186 @@ def test_existing_memory_summary_is_merged_after_repeated_updates():
     assert "旧摘要 A" in llm.prompts[1]
     assert "新摘要：8080 已确认是内部服务。" in llm.prompts[1]
     assert memory == "合并摘要：8080 是内部服务。"
+
+
+def test_memory_vault_last_updated_is_human_readable_local_time():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        memory_path = root / "memory" / "123.json"
+        compression_path = root / "compression" / "123.log"
+        session = AgentSession(chat_id=123)
+        session.messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "检查 SSH 登录"},
+            {"role": "assistant", "content": "正在检查"},
+            {"role": "user", "content": "继续"},
+            {"role": "assistant", "content": "检查完成"},
+        ]
+
+        with patch("chatdome.agent.session.memory_file_path", return_value=memory_path), patch(
+            "chatdome.agent.session.compression_log_path",
+            return_value=compression_path,
+        ):
+            asyncio.run(
+                session.summarize_and_trim_history(
+                    FakeCompressionLLM("摘要：SSH 登录检查完成。"),
+                    max_tokens=1,
+                )
+            )
+
+        payload = json.loads(memory_path.read_text(encoding="utf-8"))
+
+    assert isinstance(payload["last_updated"], str)
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}",
+        payload["last_updated"],
+    )
+    parsed = datetime.fromisoformat(payload["last_updated"])
+    assert parsed.utcoffset() == datetime.now().astimezone().utcoffset()
+
+
+def test_incomplete_summary_is_retried_and_only_complete_result_is_persisted():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        memory_path = root / "memory" / "123.json"
+        compression_path = root / "compression" / "123.log"
+        session = AgentSession(chat_id=123)
+        session.messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "确认北京联通 SSH 登录 IP"},
+            {"role": "assistant", "content": "已发现多个近期地址"},
+            {"role": "user", "content": "继续"},
+            {"role": "assistant", "content": "等待确认"},
+        ]
+        llm = FakeCompressionLLM(
+            [
+                SimpleNamespace(content="残缺摘要：114.24", finish_reason="length"),
+                SimpleNamespace(content="完整摘要：等待确认北京联通 SSH 登录 IP。", finish_reason="stop"),
+            ]
+        )
+
+        with patch("chatdome.agent.session.memory_file_path", return_value=memory_path), patch(
+            "chatdome.agent.session.compression_log_path",
+            return_value=compression_path,
+        ):
+            asyncio.run(session.summarize_and_trim_history(llm, max_tokens=1))
+
+        payload = json.loads(memory_path.read_text(encoding="utf-8"))
+
+    assert len(llm.prompts) == 2
+    assert "上一次摘要未完整输出" in llm.prompts[1]
+    assert payload["summary"] == "完整摘要：等待确认北京联通 SSH 登录 IP。"
+    assert "114.24" not in payload["summary"]
+
+
+def test_repeated_incomplete_summary_does_not_overwrite_existing_vault():
+    existing_payload = {"summary": "原有完整摘要。", "last_updated": 1}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        memory_path = root / "memory" / "123.json"
+        compression_path = root / "compression" / "123.log"
+        memory_path.parent.mkdir(parents=True, exist_ok=True)
+        memory_path.write_text(
+            json.dumps(existing_payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        session = AgentSession(chat_id=123)
+        session.messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "旧问题"},
+            {"role": "assistant", "content": "旧回答"},
+            {"role": "user", "content": "新问题"},
+            {"role": "assistant", "content": "新回答"},
+        ]
+        llm = FakeCompressionLLM(
+            [
+                SimpleNamespace(content="第一次残缺", finish_reason="length"),
+                SimpleNamespace(content="第二次仍残缺", finish_reason="max_tokens"),
+            ]
+        )
+
+        with patch("chatdome.agent.session.memory_file_path", return_value=memory_path), patch(
+            "chatdome.agent.session.compression_log_path",
+            return_value=compression_path,
+        ):
+            asyncio.run(session.summarize_and_trim_history(llm, max_tokens=1))
+
+        persisted = json.loads(memory_path.read_text(encoding="utf-8"))
+
+    assert len(llm.prompts) == 2
+    assert persisted == existing_payload
+
+
+def test_summary_without_explicit_completion_does_not_create_vault():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        memory_path = root / "memory" / "123.json"
+        compression_path = root / "compression" / "123.log"
+        session = AgentSession(chat_id=123)
+        session.messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "旧问题"},
+            {"role": "assistant", "content": "旧回答"},
+            {"role": "user", "content": "新问题"},
+            {"role": "assistant", "content": "新回答"},
+        ]
+        llm = FakeCompressionLLM(
+            [
+                SimpleNamespace(content="没有完成状态的摘要"),
+                SimpleNamespace(content="仍然没有完成状态"),
+            ]
+        )
+
+        with patch("chatdome.agent.session.memory_file_path", return_value=memory_path), patch(
+            "chatdome.agent.session.compression_log_path",
+            return_value=compression_path,
+        ):
+            asyncio.run(session.summarize_and_trim_history(llm, max_tokens=1))
+
+        assert len(llm.prompts) == 2
+        assert not memory_path.exists()
+
+
+def test_incomplete_merge_falls_back_to_complete_append_only_summary():
+    existing_summary = "旧摘要 A\n\n[UPDATE]\n旧摘要 B\n\n[UPDATE]\n旧摘要 C"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        memory_path = root / "memory" / "123.json"
+        compression_path = root / "compression" / "123.log"
+        memory_path.parent.mkdir(parents=True, exist_ok=True)
+        memory_path.write_text(
+            json.dumps({"summary": existing_summary, "last_updated": 1}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        session = AgentSession(chat_id=123)
+        session.messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "排查 SSH 登录"},
+            {"role": "assistant", "content": "发现北京联通地址"},
+            {"role": "user", "content": "继续"},
+            {"role": "assistant", "content": "等待确认"},
+        ]
+        llm = FakeCompressionLLM(
+            [
+                SimpleNamespace(content="新完整摘要。", finish_reason="stop"),
+                SimpleNamespace(content="残缺合并 114.24", finish_reason="length"),
+                SimpleNamespace(content="再次残缺合并", finish_reason="max_output_tokens"),
+            ]
+        )
+
+        with patch("chatdome.agent.session.memory_file_path", return_value=memory_path), patch(
+            "chatdome.agent.session.compression_log_path",
+            return_value=compression_path,
+        ):
+            asyncio.run(session.summarize_and_trim_history(llm, max_tokens=1))
+
+        summary = json.loads(memory_path.read_text(encoding="utf-8"))["summary"]
+
+    assert len(llm.prompts) == 3
+    assert summary == existing_summary + "\n\n[UPDATE]\n新完整摘要。"
+    assert "残缺合并" not in summary
 
 def test_visible_context_uses_messages_and_pending_followups():
     session = AgentSession(chat_id=123)

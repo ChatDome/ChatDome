@@ -177,13 +177,15 @@ class CodexResponsesClient(LLMClient):
         prompt_tokens = self._event_value(usage, "input_tokens", 0) if usage else 0
         completion_tokens = self._event_value(usage, "output_tokens", 0) if usage else 0
         total_tokens = self._event_value(usage, "total_tokens", 0) if usage else 0
+        finish_reason = self._response_finish_reason(response)
         
         return LLMResponse(
             content=content,
             tool_calls=tool_calls,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            total_tokens=total_tokens
+            total_tokens=total_tokens,
+            finish_reason=finish_reason,
         )
 
     @staticmethod
@@ -197,6 +199,17 @@ class CodexResponsesClient(LLMClient):
     def _has_response_payload(response: LLMResponse) -> bool:
         """Return True when the parsed response has model-visible output."""
         return bool(response.content or response.tool_calls)
+
+    def _response_finish_reason(self, response: Any) -> str:
+        """Normalize Responses API terminal state for downstream integrity checks."""
+        status = str(self._event_value(response, "status", "") or "").strip().lower()
+        if status == "completed":
+            return "stop"
+        if status == "incomplete":
+            details = self._event_value(response, "incomplete_details", None)
+            reason = self._event_value(details, "reason", "") if details else ""
+            return str(reason or "incomplete")
+        return ""
 
     @staticmethod
     def _item_type(item: Any) -> str:
@@ -253,6 +266,7 @@ class CodexResponsesClient(LLMClient):
             return self._parse_responses_output(stream)
 
         completed_response: Any | None = None
+        incomplete_response: Any | None = None
         text_parts: list[str] = []
         done_text_parts: list[str] = []
         done_output_items: list[Any] = []
@@ -265,6 +279,8 @@ class CodexResponsesClient(LLMClient):
             event_counts[event_type or "<missing>"] = event_counts.get(event_type or "<missing>", 0) + 1
             if event_type == "response.completed":
                 completed_response = self._event_value(event, "response")
+            elif event_type == "response.incomplete":
+                incomplete_response = self._event_value(event, "response")
             elif event_type == "response.output_text.delta":
                 delta = self._event_value(event, "delta", "")
                 if delta:
@@ -305,8 +321,55 @@ class CodexResponsesClient(LLMClient):
         )
         completed_output_len = len(completed_output) if isinstance(completed_output, list) else None
 
+        if incomplete_response is not None:
+            incomplete_parsed = self._parse_responses_output(incomplete_response)
+            if not incomplete_parsed.finish_reason:
+                details = self._event_value(incomplete_response, "incomplete_details", None)
+                reason = self._event_value(details, "reason", "") if details else ""
+                incomplete_parsed.finish_reason = str(reason or "incomplete")
+            if self._has_response_payload(incomplete_parsed):
+                self._log_stream_summary(
+                    event_counts=event_counts,
+                    delta_chars=delta_chars,
+                    done_text_chars=done_text_chars,
+                    done_output_items=done_output_items,
+                    completed_output_len=completed_output_len,
+                    final_source="incomplete",
+                    empty=False,
+                )
+                return incomplete_parsed
+
+            if self._has_response_payload(streamed_response):
+                streamed_response.prompt_tokens = incomplete_parsed.prompt_tokens
+                streamed_response.completion_tokens = incomplete_parsed.completion_tokens
+                streamed_response.total_tokens = incomplete_parsed.total_tokens
+                streamed_response.finish_reason = incomplete_parsed.finish_reason
+                self._log_stream_summary(
+                    event_counts=event_counts,
+                    delta_chars=delta_chars,
+                    done_text_chars=done_text_chars,
+                    done_output_items=done_output_items,
+                    completed_output_len=completed_output_len,
+                    final_source="incomplete_streamed_fallback",
+                    empty=False,
+                )
+                return streamed_response
+
+            self._log_stream_summary(
+                event_counts=event_counts,
+                delta_chars=delta_chars,
+                done_text_chars=done_text_chars,
+                done_output_items=done_output_items,
+                completed_output_len=completed_output_len,
+                final_source="incomplete_empty",
+                empty=True,
+            )
+            return incomplete_parsed
+
         if completed_response is not None:
             completed_parsed = self._parse_responses_output(completed_response)
+            if not completed_parsed.finish_reason:
+                completed_parsed.finish_reason = "stop"
             if self._has_response_payload(completed_parsed):
                 self._log_stream_summary(
                     event_counts=event_counts,
@@ -326,6 +389,7 @@ class CodexResponsesClient(LLMClient):
                 streamed_response.prompt_tokens = completed_parsed.prompt_tokens
                 streamed_response.completion_tokens = completed_parsed.completion_tokens
                 streamed_response.total_tokens = completed_parsed.total_tokens
+                streamed_response.finish_reason = completed_parsed.finish_reason
                 self._log_stream_summary(
                     event_counts=event_counts,
                     delta_chars=delta_chars,
@@ -349,6 +413,7 @@ class CodexResponsesClient(LLMClient):
             return completed_parsed
 
         # Fallback for minimal streams that only carry text deltas.
+        streamed_response.finish_reason = "stream_ended_without_terminal"
         self._log_stream_summary(
             event_counts=event_counts,
             delta_chars=delta_chars,

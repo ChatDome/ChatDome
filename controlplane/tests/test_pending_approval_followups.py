@@ -1372,7 +1372,7 @@ class PendingApprovalFollowupTests(unittest.TestCase):
                         refs={"check_id": "ssh_success_login", "IP": "114.246.239.99"},
                     )
                     await asyncio.sleep(0)
-                    return SimpleNamespace(content="压缩摘要：旧上下文。")
+                    return SimpleNamespace(content="压缩摘要：旧上下文。", finish_reason="stop")
                 return LLMResponse(content="final answer", prompt_tokens=1, completion_tokens=1, total_tokens=2)
 
         with tempfile.TemporaryDirectory() as tmp:

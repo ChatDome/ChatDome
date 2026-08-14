@@ -13,6 +13,7 @@ import re
 import time
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,27 @@ _MEMORY_MERGE_THRESHOLD_CHARS = 1500
 _MEMORY_UPDATE_MERGE_THRESHOLD = 2
 _DEFERRED_VISIBLE_CONTEXT_LIMIT = 5
 _CONTROL_EVENT_LIMIT = 200
+_MEMORY_SUMMARY_MAX_ATTEMPTS = 2
+_COMPLETE_SUMMARY_FINISH_REASONS = frozenset(
+    {"stop", "completed", "end_turn", "eos", "eos_token"}
+)
+_MEMORY_SUMMARY_LENGTH_GUIDANCE = (
+    "\n\n输出限制：摘要不超过 1200 个汉字；使用完整句子；"
+    "如果内容较多，优先保留用户目标、关键结论、重要对象和待办事项。"
+)
+_MEMORY_SUMMARY_RETRY_GUIDANCE = (
+    "\n\n上一次摘要未完整输出。请重新生成一份不超过 800 个汉字的完整摘要，"
+    "删除次要过程信息，不要续写上一次的残缺文本。"
+)
+
+
+class _IncompleteMemorySummaryError(RuntimeError):
+    """Prevent incomplete model output from reaching the Memory Vault."""
+
+
+def _memory_last_updated() -> str:
+    """Return a readable local timestamp with an explicit UTC offset."""
+    return datetime.now().astimezone().isoformat(sep=" ", timespec="seconds")
 
 
 def redact_sensitive_text(text: str) -> str:
@@ -912,15 +934,52 @@ class AgentSession:
             + summary
         )
         try:
-            merge_response = await llm_client.chat_completion(
-                [{"role": "user", "content": redact_sensitive_text(prompt)}]
+            return await self._request_complete_memory_summary(
+                llm_client,
+                prompt,
+                operation="merge",
             )
-            merged = redact_sensitive_text(merge_response.content or "").strip()
-            if merged:
-                return merged
         except Exception as e:
             logger.warning("Failed to merge Memory Vault summary: %s", e)
         return appended_summary
+
+    async def _request_complete_memory_summary(
+        self,
+        llm_client,
+        prompt: str,
+        *,
+        operation: str,
+    ) -> str:
+        """Generate one complete summary, retrying once with a tighter limit."""
+        base_prompt = redact_sensitive_text(prompt) + _MEMORY_SUMMARY_LENGTH_GUIDANCE
+        last_reason = "empty"
+
+        for attempt in range(1, _MEMORY_SUMMARY_MAX_ATTEMPTS + 1):
+            request_prompt = base_prompt
+            if attempt > 1:
+                request_prompt += _MEMORY_SUMMARY_RETRY_GUIDANCE
+
+            response = await llm_client.chat_completion(
+                [{"role": "user", "content": request_prompt}]
+            )
+            finish_reason = str(getattr(response, "finish_reason", "") or "").strip().lower()
+            summary = redact_sensitive_text(getattr(response, "content", "") or "").strip()
+            if summary and finish_reason in _COMPLETE_SUMMARY_FINISH_REASONS:
+                return summary
+
+            last_reason = finish_reason or "empty"
+            logger.warning(
+                "Memory Vault summary response incomplete: operation=%s attempt=%d/%d finish_reason=%s",
+                operation,
+                attempt,
+                _MEMORY_SUMMARY_MAX_ATTEMPTS,
+                last_reason,
+            )
+
+        raise _IncompleteMemorySummaryError(
+            f"incomplete {operation} response after {_MEMORY_SUMMARY_MAX_ATTEMPTS} attempts "
+            f"(finish_reason={last_reason})"
+        )
 
     def _format_compression_log(self, summary: str, compressed_messages: int) -> str:
         safe_summary = redact_sensitive_text(summary).strip() or "(empty summary)"
@@ -972,8 +1031,11 @@ class AgentSession:
         prompt = COMPRESSION_PROMPT + f"\n\n{redact_sensitive_text(history_text)}"
 
         try:
-            summary_response = await llm_client.chat_completion([{"role": "user", "content": prompt}])
-            summary = redact_sensitive_text(summary_response.content or "")
+            summary = await self._request_complete_memory_summary(
+                llm_client,
+                prompt,
+                operation="compress",
+            )
 
             summarized_msg = {
                 "role": "system",
@@ -996,7 +1058,12 @@ class AgentSession:
 
             memory_file.parent.mkdir(parents=True, exist_ok=True)
             with open(memory_file, "w", encoding="utf-8") as f:
-                json.dump({"summary": new_summary, "last_updated": time.time()}, f, ensure_ascii=False, indent=2)
+                json.dump(
+                    {"summary": new_summary, "last_updated": _memory_last_updated()},
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
 
             self.append_raw_log(self._format_compression_log(summary, len(messages_to_compress)))
             logger.info("Context compressed successfully to Vault.")
