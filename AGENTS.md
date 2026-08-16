@@ -96,6 +96,20 @@ if not token_file and legacy_path.exists():
 - 新增长篇文档时同步更新 `../ChatDome-docs/README.md` 的文件索引和修订历史。
 - ChatDome 代码仓库只保留仓库入口和维护文档、用户直接阅读的项目文档、运行时资源及平台元数据，例如 `README.md`、`README_ZH.md`、`CHANGELOG.md`、`SECURITY.md`、`CONTRIBUTING.md`、`AGENTS.md`、运行时 Agent manual 和 `.github/` 下的模板。
 
+## Agent skills
+
+### Issue tracker
+
+工作项保存在 `ChatDome/ChatDome` 的 GitHub Issues 中。操作规则见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+Issue 使用 `needs-triage`、`needs-info`、`ready-for-agent`、`ready-for-human` 和 `wontfix` 状态标签。映射规则见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+本仓库采用单上下文模型。领域词汇、设计文档、实施计划和 ADR 位于相邻的 `../ChatDome-docs` 仓库；不得在代码仓库创建 `CONTEXT.md` 或 `docs/adr/`。读取与写入规则见 `docs/agents/domain.md`。
+
 ## 提交与协作规范
 
 - 开始代码、文档、CI、发布或仓库维护改动前，先阅读并遵守 `CONTRIBUTING.md`。
