@@ -12,6 +12,7 @@ from chatdome.outbound.models import (
     CodexAuthorizationFacts,
     CommandEchoFacts,
     CommandHelpFacts,
+    ContextUsageFacts,
     DecisionOperationFacts,
     EnvironmentFacts,
     ModelProfilesFacts,
@@ -283,11 +284,16 @@ class TerminalOutboundRenderer:
         facts: SessionControlFacts,
     ) -> RenderedMessage:
         if facts.operation == "clear_session":
-            text = (
-                self._status("✅", "[ok]", "Session cleared.")
-                if facts.changed
-                else self._status("ℹ️", "[i]", "No active session.")
-            )
+            if facts.status == "running_task":
+                text = "当前任务仍在运行。请先使用 /stop。"
+            elif facts.status in {"event_write_failed", "save_failed"}:
+                text = "会话清除失败。请重试。"
+            else:
+                text = (
+                    self._status("✅", "[ok]", "Session cleared.")
+                    if facts.changed
+                    else self._status("ℹ️", "[i]", "No active session.")
+                )
         else:
             text = (
                 self._status("⏹️", "[stop]", "Task stopped.")
@@ -311,6 +317,29 @@ class TerminalOutboundRenderer:
             )
         )
 
+    @staticmethod
+    def _render_context_usage(facts: ContextUsageFacts) -> RenderedMessage:
+        filled = min(12, max(0, round(facts.current_tokens / max(1, facts.limit_tokens) * 12)))
+        bar = "█" * filled + "░" * (12 - filled)
+        latest = (
+            f"{facts.last_tokens_before:,} → {facts.last_tokens_after:,} tokens"
+            f"（减少 {facts.last_reduction_percent}%）"
+            if facts.last_tokens_before
+            else "暂无"
+        )
+        return RenderedMessage(
+            text_parts=(
+                "\n".join(
+                    [
+                        f"上下文 {bar} {facts.current_tokens:,} / {facts.limit_tokens:,} tokens（{facts.usage_percent}%）",
+                        f"状态：{facts.status}",
+                        f"Working Summary：{facts.working_summary_tokens:,} tokens",
+                        f"最近压缩：{latest}",
+                    ]
+                ),
+            )
+        )
+
     def _render_command_echo(self, facts: CommandEchoFacts) -> RenderedMessage:
         state = "enabled" if facts.enabled else "disabled"
         return RenderedMessage(
@@ -325,6 +354,8 @@ class TerminalOutboundRenderer:
             return self._render_session_control(message.facts)
         if isinstance(message.facts, TokenUsageFacts):
             return self._render_token_usage(message.facts)
+        if isinstance(message.facts, ContextUsageFacts):
+            return self._render_context_usage(message.facts)
         if isinstance(message.facts, CommandEchoFacts):
             return self._render_command_echo(message.facts)
         if isinstance(message.facts, EnvironmentFacts):

@@ -27,6 +27,7 @@ from telegram.ext import (
 )
 
 from chatdome.agent.core import Agent
+from chatdome.agent.progress import progress_label
 from chatdome.agent.result import AgentResult, coerce_agent_result
 from chatdome.command_handlers import (
     CommandHandlerRuntime,
@@ -947,6 +948,14 @@ class TelegramBot:
                     show_elapsed=True,
                 )
                 return
+            if stage == "context_compacting":
+                await self._set_progress_stage(
+                    progress,
+                    symbol="◌",
+                    label=progress_label(stage),
+                    show_elapsed=False,
+                )
+                return
             await self._set_progress_stage(
                 progress,
                 symbol="◌",
@@ -1491,6 +1500,35 @@ class TelegramBot:
             },
         )
 
+    async def _handle_memory_admin_callback(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        callback_data: str,
+    ) -> None:
+        query = update.callback_query
+        if query is None or query.message is None:
+            return
+        parts = callback_data.split(":", 2)
+        if len(parts) != 3:
+            await query.message.reply_text("该记忆操作已失效。请重新执行 /memory。")
+            return
+        _, action, nonce = parts
+        await self._clear_callback_message_markup(query, "memory command callback message")
+        await self._dispatch_callback_command(
+            query.message,
+            data=callback_data,
+            command_name="/memory",
+            command_context=self._command_context_for_update(update, context),
+            action=action,
+            interaction_id=nonce,
+            params={
+                "command": "/memory",
+                "action": action,
+                "interaction_id": nonce,
+            },
+        )
+
     async def _dispatch_sentinel_alert_action(
         self,
         update: Update,
@@ -1583,6 +1621,10 @@ class TelegramBot:
 
             if callback_data.startswith("llm_admin:"):
                 await self._handle_llm_admin_callback(update, context, callback_data)
+                return
+
+            if callback_data.startswith("memory_admin:"):
+                await self._handle_memory_admin_callback(update, context, callback_data)
                 return
 
             if callback_data.startswith(

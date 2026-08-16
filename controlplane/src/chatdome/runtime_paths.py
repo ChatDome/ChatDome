@@ -69,14 +69,6 @@ def event_log_path(chat_id: int | str) -> Path:
     return data_path("events", f"{chat_id}.jsonl")
 
 
-def compression_log_path(chat_id: int | str) -> Path:
-    """Return the context compression event log for one chat."""
-    return _migrate_legacy_file(
-        data_path("compression", f"{chat_id}.log"),
-        [data_path(f"{chat_id}_raw.log")],
-    )
-
-
 def engram_store_path() -> Path:
     """Return the Agent long-term memory store path."""
     return _migrate_legacy_file(

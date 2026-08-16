@@ -77,7 +77,7 @@ ChatDome 不打算做“另一个泛化 Main-Agent”，而是定位为 **主机
 - **沙箱执行** — 所有命令在安全沙箱中执行，强制超时、输出截断、危险命令正则表达式拦截。
 - **Telegram 原生** — 随时随地用手机管理服务器。
 - **多 LLM Profile** — 默认支持 Codex OAuth Responses API，也可切换到 OpenAI-compatible API（OpenAI、DeepSeek、LiteLLM 网关等）。
-- **上下文管理与长线记忆** — 内置轻量级的智能记忆库和上下文压缩引擎，能够记住历史排查重点与对话上下文，无需外挂数据库。
+- **上下文管理与长线记忆** — 使用 32K token 阈值、结构化 Working Summary、可验证 Memory Vault 和 `events/` 事件归档延续任务；压缩期间会在 CLI 与 Telegram 显示统一进度。
 - **零基础设施，低侵入性** — 单个 Python 进程，无数据库，不在目标环境写入 Agent 文件；Codex 默认通过 `/codex_login` 完成 OAuth，API Key 仅在启用 OpenAI-compatible profile 时需要。
 - **Sub-Agent 化方向** — 正在沿“可被 Main-Agent 调用的专业安全能力模块”演进，强调可集成、可编排、可审计。
 
@@ -275,6 +275,8 @@ chatdome:
   agent:
     command_approval_mode: require_approval_for_risky_commands
     session_timeout: 600                      # 会话空闲超时（秒）
+    max_history_tokens: 32000                 # 上下文压缩触发阈值
+    event_retention_days: 30                  # Events 保留天数，0 表示永久
     max_rounds_per_turn: 10                   # 单次消息最多触发的工具调用轮数
     command_timeout: 10                       # 命令执行超时（秒）
     max_output_chars: 4000                    # 命令输出超过此长度会被截断
@@ -352,9 +354,11 @@ chatdome hello
 | `/stop` | 中止运行中、分析中或待审批的当前任务 |
 | `/env` | 查看当前运行环境摘要 |
 | `/token` | 查看当前终端会话 Token 消耗统计 |
+| `/context` | 查看当前上下文用量、上限和最近压缩结果 |
 | `/cmd_echo` | 切换底层命令回显模式 |
 | `/audit [N]` | 查看最近的命令审计事件 |
 | `/engram [delete <id>]` | 查看或删除持久记忆 |
+| `/memory [delete <id>\|clear]` | 查看或管理压缩产生的长期记忆 |
 | `/model [profile]` | 查看或切换 model profile |
 | `/model_list` | 查看已配置 model profile 与鉴权状态 |
 | `/model_add` | 新增 OpenAI-compatible 或 Codex model profile |
@@ -384,9 +388,11 @@ CLI 与 Telegram 加载同一命令目录并调用同一业务服务。每个已
 | `/stop` | 中止运行中、分析中或待审批的当前任务 |
 | `/env` | 查看当前运行环境摘要 |
 | `/token` | 查看当前会话 Token 消耗统计 |
+| `/context` | 查看当前上下文用量、上限和最近压缩结果 |
 | `/cmd_echo` | 切换底层命令回显模式 |
 | `/audit [N]` | 查看最近 N 条命令审计事件 |
 | `/engram [delete <id>]` | 查看或删除持久记忆 |
+| `/memory [delete <id>\|clear]` | 查看或管理压缩产生的长期记忆 |
 | `/model [profile]` | 查看 profile；管理员可切换当前 model |
 | `/model_list` | 查看已配置 model profile 与鉴权状态 |
 | `/model_add` | 管理员新增或覆盖 model profile |

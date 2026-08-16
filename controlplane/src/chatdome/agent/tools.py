@@ -362,10 +362,21 @@ class ToolDispatcher:
             limit=limit,
             max_chars_per_item=900,
         )
+        hit_event_ids = ",".join(
+            str(item.get("event_id") or "-") for item in matches
+        ) or "-"
+        logger.info(
+            "Context retrieval completed: chat_id=%s trigger_reason=tool_request "
+            "query=%s match_count=%d hit_event_ids=%s",
+            chat_id,
+            json.dumps(query, ensure_ascii=False),
+            len(matches),
+            hit_event_ids,
+        )
         payload = {
             "ok": True,
             "query": query,
-            "source": f"sessions/{chat_id}.json",
+            "source": f"events/{chat_id}.jsonl",
             "matches": matches,
             "priority_note": "Historical session snippets are reference context. Current user input, current alerts, and current tool results take priority.",
         }

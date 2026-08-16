@@ -1471,6 +1471,14 @@ async def _send_terminal_user_message(
             for parameter in params.values()
         )
         kwargs: dict[str, Any] = {}
+        if "progress_callback" in params or supports_kwargs:
+            from chatdome.agent.progress import progress_label
+
+            async def publish_progress(stage: str) -> None:
+                if stage == "context_compacting":
+                    _print_chatdome_message(progress_label(stage))
+
+            kwargs["progress_callback"] = publish_progress
         if "user_id" in params or supports_kwargs:
             kwargs["user_id"] = runtime.chat_id if user_id is None else user_id
         if "deferred" in params or supports_kwargs:

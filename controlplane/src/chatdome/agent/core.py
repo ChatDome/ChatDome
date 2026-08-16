@@ -13,6 +13,7 @@ import logging
 import inspect
 import secrets
 import time
+from datetime import datetime
 from typing import Any
 
 from chatdome.agent.approval_input import (
@@ -20,10 +21,13 @@ from chatdome.agent.approval_input import (
     classify_approval_input,
 )
 from chatdome.agent.audit import CommandAuditTracker
+from chatdome.agent.context_budget import ContextBudgetService, ContextTokenCounter
+from chatdome.agent.context_compactor import CompactionResult, ContextCompactor
+from chatdome.agent.context_retrieval import ContextRetrievalPolicy
 from chatdome.agent.global_turn import GlobalTurnCoordinator, GlobalTurnLease
 from chatdome.agent.prompts import build_system_prompt, build_tools
 from chatdome.agent.result import AgentResult, coerce_agent_result
-from chatdome.agent.session import SessionManager
+from chatdome.agent.session import ClearSessionResult, SessionManager
 from chatdome.agent.tools import ToolDispatcher
 from chatdome.agent.turns import TurnContext
 from chatdome.config import AgentConfig
@@ -79,10 +83,27 @@ class Agent:
             pending_approval_timeout=config.pending_approval_timeout,
             persisted_session_ttl=config.persisted_session_ttl,
             max_history_tokens=config.max_history_tokens,
+            event_retention_days=getattr(config, "event_retention_days", 30),
             system_prompt=build_system_prompt(
                 runtime_environment_context=runtime_environment_context,
             ),
             engram_store=engram_store,
+        )
+        self.event_store = self.session_manager.event_store
+        self.memory_vault_store = self.session_manager.memory_vault_store
+        self.context_retrieval_policy = ContextRetrievalPolicy()
+        counter = ContextTokenCounter(model=getattr(llm, "model", ""))
+        self.context_budget_service = ContextBudgetService(
+            counter,
+            limit_tokens=config.max_history_tokens,
+            target_ratio=0.70,
+        )
+        self.memory_vault_store.token_counter = counter
+        self.context_compactor = ContextCompactor(
+            budget_service=self.context_budget_service,
+            event_store=self.event_store,
+            memory_vault_store=self.memory_vault_store,
+            session_saver=self.session_manager.save_session,
         )
         if hasattr(self.tool_dispatcher, "set_session_manager"):
             self.tool_dispatcher.set_session_manager(self.session_manager)
@@ -117,6 +138,268 @@ class Agent:
             raise
         except Exception:
             logger.debug("Failed to publish agent progress stage=%s", stage, exc_info=True)
+
+    def _append_context_event(
+        self,
+        session: Any,
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        source: str = "chatdome",
+    ) -> str | None:
+        store = getattr(self, "event_store", None) or getattr(
+            getattr(self, "session_manager", None),
+            "event_store",
+            None,
+        )
+        if store is None:
+            return None
+        active_turn = getattr(session, "active_turn", None)
+        try:
+            event = store.append(
+                session.chat_id,
+                event_type,
+                payload,
+                turn_id=(active_turn.turn_id if active_turn is not None else None),
+                source=source,
+            )
+            return event.event_id
+        except OSError:
+            logger.exception(
+                "Context event persistence failed: chat_id=%s event_type=%s",
+                getattr(session, "chat_id", "?"),
+                event_type,
+            )
+            return None
+
+    def _add_user_message(
+        self,
+        session: Any,
+        content: str,
+        *,
+        turn_id: int | None = None,
+        source: str = "unknown",
+    ) -> str | None:
+        event_id = self._append_context_event(
+            session,
+            "message.user",
+            {"content": content},
+            source=source,
+        )
+        try:
+            session.add_user_message(content, turn_id=turn_id, event_id=event_id)
+        except TypeError:
+            session.add_user_message(content, turn_id=turn_id)
+        return event_id
+
+    def _add_assistant_message(self, session: Any, content: str) -> str | None:
+        event_id = self._append_context_event(
+            session,
+            "message.assistant",
+            {"content": content},
+        )
+        try:
+            session.add_assistant_message(content, event_id=event_id)
+        except TypeError:
+            session.add_assistant_message(content)
+        return event_id
+
+    def _add_assistant_tool_calls(
+        self,
+        session: Any,
+        tool_calls: list[dict[str, Any]],
+    ) -> str | None:
+        event_id = self._append_context_event(
+            session,
+            "tool.call",
+            {"tool_calls": tool_calls},
+        )
+        try:
+            session.add_assistant_tool_calls(tool_calls, event_id=event_id)
+        except TypeError:
+            session.add_assistant_tool_calls(tool_calls)
+        return event_id
+
+    def _add_tool_result(
+        self,
+        session: Any,
+        tool_call_id: str,
+        content: str,
+    ) -> str | None:
+        text = str(content or "")
+        max_event_chars = 20_000
+        payload = {
+            "tool_call_id": tool_call_id,
+            "content": text[:max_event_chars],
+            "truncated": len(text) > max_event_chars,
+            "original_chars": len(text),
+        }
+        event_id = self._append_context_event(session, "tool.result", payload)
+        try:
+            session.add_tool_result(tool_call_id, content, event_id=event_id)
+        except TypeError:
+            session.add_tool_result(tool_call_id, content)
+        return event_id
+
+    def _configure_context_counter(self, llm: Any) -> None:
+        service = getattr(self, "context_budget_service", None)
+        compactor = getattr(self, "context_compactor", None)
+        if service is None or compactor is None:
+            return
+        model = str(getattr(llm, "model", "") or "")
+        if service.counter.model == model:
+            return
+        counter = ContextTokenCounter(model=model)
+        service.counter = counter
+        memory_store = getattr(self, "memory_vault_store", None)
+        if memory_store is not None:
+            memory_store.token_counter = counter
+
+    def refresh_context_settings(self) -> None:
+        """Apply reloadable context limits to the active runtime services."""
+        limit_tokens = max(1, int(getattr(self.config, "max_history_tokens", 32_000)))
+        retention_days = max(0, int(getattr(self.config, "event_retention_days", 30)))
+        self.session_manager.max_history_tokens = limit_tokens
+        self.session_manager.event_store.retention_days = retention_days
+        service = getattr(self, "context_budget_service", None)
+        if service is not None:
+            service.limit_tokens = limit_tokens
+            service.target_tokens = max(1, int(limit_tokens * 0.70))
+
+    async def _ensure_context_budget(
+        self,
+        *,
+        session: Any,
+        snapshot: LLMSnapshot,
+        progress_callback: Any,
+        trigger_reason: str,
+    ) -> CompactionResult | None:
+        compactor = getattr(self, "context_compactor", None)
+        if compactor is None:
+            return None
+        self._configure_context_counter(snapshot.client)
+        result = await compactor.ensure_budget(
+            session,
+            snapshot.client,
+            tools=self.tools,
+            trigger_reason=trigger_reason,
+            progress_callback=progress_callback,
+        )
+        logger.info(
+            "Context budget preflight: chat_id=%s trigger_reason=%s status=%s "
+            "tokens_before=%d working_summary_tokens=%d preserved_tail_tokens=%d "
+            "tokens_after=%d reduction_percent=%d token_count_method=%s",
+            getattr(session, "chat_id", "?"),
+            trigger_reason,
+            result.status,
+            result.tokens_before,
+            result.working_summary_tokens,
+            result.preserved_tail_tokens,
+            result.tokens_after,
+            result.reduction_percent,
+            compactor.budget_service.counter.method,
+        )
+        return result
+
+    def _prepare_context_retrieval(
+        self,
+        session: Any,
+        user_text: str,
+        *,
+        current_event_id: str | None,
+    ) -> None:
+        if hasattr(session, "clear_transient_contexts"):
+            session.clear_transient_contexts()
+        policy = getattr(self, "context_retrieval_policy", None)
+        store = getattr(self, "event_store", None)
+        if policy is None or store is None:
+            return
+        decision = policy.evaluate(user_text, session)
+        if not decision.should_retrieve:
+            return
+        retrieval_id = f"RT-{secrets.token_hex(6).upper()}"
+        clear_boundary = store.latest_clear_event_id(session.chat_id)
+        self._append_context_event(
+            session,
+            "context.retrieval_triggered",
+            {
+                "retrieval_id": retrieval_id,
+                "trigger_reason": decision.reason,
+                "query": decision.query,
+                "clear_boundary_event_id": clear_boundary,
+            },
+        )
+        try:
+            result = store.search(session.chat_id, decision.query, limit=6)
+            matches = [
+                event
+                for event in result.matches
+                if event.event_id != current_event_id
+            ][:5]
+            hit_ids = [event.event_id for event in matches]
+            if matches and hasattr(session, "set_transient_contexts"):
+                payload = {
+                    "retrieval_id": retrieval_id,
+                    "matches": [
+                        {
+                            "event_id": event.event_id,
+                            "timestamp": event.timestamp,
+                            "type": event.type,
+                            "excerpt": str(
+                                event.payload.get("content")
+                                or json.dumps(event.payload, ensure_ascii=False)
+                            )[:900],
+                        }
+                        for event in matches
+                    ],
+                }
+                session.set_transient_contexts(
+                    [
+                        "[Retrieved Session Events - 临时历史证据，仅供当前回合参考]\n"
+                        + json.dumps(payload, ensure_ascii=False, indent=2)
+                    ]
+                )
+            self._append_context_event(
+                session,
+                "context.retrieval_completed",
+                {
+                    "retrieval_id": retrieval_id,
+                    "trigger_reason": decision.reason,
+                    "query": decision.query,
+                    "clear_boundary_event_id": result.clear_boundary_event_id,
+                    "match_count": len(matches),
+                    "hit_event_ids": hit_ids,
+                },
+            )
+            logger.info(
+                "Context retrieval completed: chat_id=%s retrieval_id=%s "
+                "trigger_reason=%s query=%s clear_boundary_event_id=%s "
+                "match_count=%d hit_event_ids=%s",
+                session.chat_id,
+                retrieval_id,
+                decision.reason,
+                json.dumps(decision.query, ensure_ascii=False),
+                result.clear_boundary_event_id or "-",
+                len(matches),
+                ",".join(hit_ids) or "-",
+            )
+        except Exception as exc:
+            self._append_context_event(
+                session,
+                "context.retrieval_failed",
+                {
+                    "retrieval_id": retrieval_id,
+                    "trigger_reason": decision.reason,
+                    "query": decision.query,
+                    "reason": str(exc),
+                },
+            )
+            logger.exception(
+                "Context retrieval failed: chat_id=%s retrieval_id=%s trigger_reason=%s",
+                session.chat_id,
+                retrieval_id,
+                decision.reason,
+            )
 
     async def _run_loop_compat(
         self,
@@ -238,6 +521,8 @@ class Agent:
             }
         )
         logger.info("Turn completed: outcome=%s rounds=%d", outcome, session.round_count)
+        if hasattr(session, "clear_transient_contexts"):
+            session.clear_transient_contexts()
         self._global_turn_release_pending_chat_id = session.chat_id
 
     def _claim_global_turn(
@@ -292,7 +577,11 @@ class Agent:
             try:
                 chat_id = int(path.stem)
                 document = json.loads(path.read_text(encoding="utf-8"))
-                saved_at = float(document.get("saved_at", 0)) if isinstance(document, dict) else 0
+                raw_saved_at = document.get("saved_at", 0) if isinstance(document, dict) else 0
+                try:
+                    saved_at = float(raw_saved_at)
+                except (TypeError, ValueError):
+                    saved_at = datetime.fromisoformat(str(raw_saved_at)).timestamp()
                 session = self.session_manager.load_persisted_session(chat_id)
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 continue
@@ -648,7 +937,17 @@ class Agent:
                     if deferred_user_id is not None:
                         user_id = deferred_user_id
                 turn_context = session.begin_turn(user_message, user_id=user_id)
-                session.add_user_message(user_message, turn_id=turn_context.turn_id)
+                user_event_id = self._add_user_message(
+                    session,
+                    user_message,
+                    turn_id=turn_context.turn_id,
+                    source=source,
+                )
+                self._prepare_context_retrieval(
+                    session,
+                    user_message,
+                    current_event_id=user_event_id,
+                )
                 with log_context(
                     chat_id=chat_id,
                     user_id=turn_context.user_id,
@@ -668,6 +967,12 @@ class Agent:
         }
 
         if route == "approval":
+            self._append_context_event(
+                session,
+                "message.user",
+                {"content": user_message},
+                source=source,
+            )
             with log_context(**context_fields):
                 return await self._handle_pending_input(
                     chat_id,
@@ -677,6 +982,12 @@ class Agent:
                 )
 
         if route == "round_limit":
+            self._append_context_event(
+                session,
+                "message.user",
+                {"content": user_message},
+                source=source,
+            )
             with log_context(**context_fields):
                 if self._is_reject_intent(user_message):
                     return await self.resolve_round_limit(chat_id, "ABANDON")
@@ -693,13 +1004,11 @@ class Agent:
                 snapshot = await self.get_active_llm_snapshot()
             except Exception as e:
                 content = await self._llm_unavailable_message(e)
-                session.add_assistant_message(content)
+                self._add_assistant_message(session, content)
                 self._finish_turn(session, "failed")
                 self._persist_session(session)
                 return AgentResult.reply(content)
 
-            await session.summarize_and_trim_history(snapshot.client, self.config.max_history_tokens)
-            self._persist_session(session)
             return await self._run_loop_compat(
                 chat_id,
                 session,
@@ -739,7 +1048,7 @@ class Agent:
                     snapshot = await self.get_active_llm_snapshot()
                 except Exception as e:
                     content = await self._llm_unavailable_message(e)
-                    session.add_assistant_message(content)
+                    self._add_assistant_message(session, content)
                     self._finish_turn(session, "failed")
                     self._persist_session(session)
                     return AgentResult.reply(content)
@@ -754,7 +1063,7 @@ class Agent:
             session.task_auto_approve = False
             session.clear_pending_round_limit()
             final_text = f"已放弃当前任务（累计执行 {reached} 轮）。如需继续，请发送新的指令。"
-            session.add_assistant_message(final_text)
+            self._add_assistant_message(session, final_text)
             self._finish_turn(session, "cancelled")
             self._persist_session(session)
             logger.info("User abandoned task after %d rounds (chat_id=%d)", reached, chat_id)
@@ -875,13 +1184,14 @@ class Agent:
                 )
                 session.task_auto_approve = False
                 session.clear_pending_state()
-                session.add_tool_result(
+                self._add_tool_result(
+                    session,
                     tool_call_id,
                     "审批恢复失败：待执行命令的哈希与审批单不一致。"
                     "该命令未执行，当前任务已终止。",
                 )
                 final_text = "命令校验失败，任务已终止。"
-                session.add_assistant_message(final_text)
+                self._add_assistant_message(session, final_text)
                 self._finish_turn(session, "failed")
                 result = self._release_deferred_after_terminal(
                     session,
@@ -892,6 +1202,15 @@ class Agent:
 
             if normalized_action == "REJECT":
                 session.task_auto_approve = False
+                self._append_context_event(
+                    session,
+                    "approval.rejected",
+                    {
+                        "approval_id": pending_approval_id,
+                        "tool_call_id": tool_call_id,
+                        "command": command,
+                    },
+                )
                 logger.info(
                     "User rejected command: approval_id=%s tool_call_id=%s command_hash=%s",
                     pending_approval_id or "-",
@@ -915,9 +1234,9 @@ class Agent:
                         f"{followup_summary}"
                     )
                 session.clear_pending_state()
-                session.add_tool_result(tool_call_id, tool_result_for_llm)
+                self._add_tool_result(session, tool_call_id, tool_result_for_llm)
                 final_text = "已拒绝当前命令，任务已取消。"
-                session.add_assistant_message(final_text)
+                self._add_assistant_message(session, final_text)
                 self._finish_turn(session, "cancelled")
                 result = self._release_deferred_after_terminal(
                     session,
@@ -927,6 +1246,15 @@ class Agent:
                 return "用户已拒绝执行该命令。", result
 
             session.task_auto_approve = False
+            self._append_context_event(
+                session,
+                "approval.approved",
+                {
+                    "approval_id": pending_approval_id,
+                    "tool_call_id": tool_call_id,
+                    "command": command,
+                },
+            )
             logger.info(
                 "User approved command: approval_id=%s tool_call_id=%s command_hash=%s",
                 pending_approval_id,
@@ -964,14 +1292,14 @@ class Agent:
                     "\n\n[审批等待阶段的补充对话]\n"
                     f"{followup_summary}"
                 )
-            session.add_tool_result(tool_call_id, tool_result_for_llm)
+            self._add_tool_result(session, tool_call_id, tool_result_for_llm)
             self._persist_session(session)
 
             try:
                 snapshot = await self.get_active_llm_snapshot()
             except Exception as e:
                 content = await self._llm_unavailable_message(e)
-                session.add_assistant_message(content)
+                self._add_assistant_message(session, content)
                 self._finish_turn(session, "failed")
                 result = self._release_deferred_after_terminal(
                     session,
@@ -1019,7 +1347,7 @@ class Agent:
             source="control",
             user_id=None,
         ):
-            return False
+            return ClearSessionResult("running_task")
         session = self.session_manager.get_or_create(chat_id)
         if session.approval_processing or not session.pending_approval:
             if session.active_turn is None and not session.pending_round_limit:
@@ -1037,7 +1365,8 @@ class Agent:
         command_hash = session.pending_command_hash or self._command_hash(command)
 
         if tool_call_id:
-            session.add_tool_result(
+            self._add_tool_result(
+                session,
                 tool_call_id,
                 (
                     "The user stopped the current task with /stop. This command was not "
@@ -1439,6 +1768,18 @@ class Agent:
         window_limit = max(1, int(self.config.max_rounds_per_turn))
         end_round_exclusive = start_round + window_limit + 1
         for round_num in range(start_round + 1, end_round_exclusive):
+            compaction = await self._ensure_context_budget(
+                session=session,
+                snapshot=snapshot,
+                progress_callback=progress_callback,
+                trigger_reason=f"before_round_{round_num}",
+            )
+            if compaction is not None and compaction.status in {"failed", "rejected"}:
+                final_content = "上下文压缩未完成。请重试，或使用 /clear 清除当前上下文。"
+                self._add_assistant_message(session, final_content)
+                self._finish_turn(session, "failed")
+                self._persist_session(session)
+                return AgentResult.reply(final_content)
             await self._publish_progress(progress_callback, "processing")
             logger.info(
                 "Agent loop progress %d/%d for chat_id=%d",
@@ -1459,7 +1800,7 @@ class Agent:
                 logger.error("LLM call failed: %s", e)
                 detail = user_facing_error_message(e, fallback="LLM 调用失败，请稍后重试。")
                 final_content = f"⚠️ {detail}"
-                session.add_assistant_message(final_content)
+                self._add_assistant_message(session, final_content)
                 self._finish_turn(session, "failed")
                 self._persist_session(session)
                 return AgentResult.reply(final_content)
@@ -1513,7 +1854,7 @@ class Agent:
                     }
                     for tc in response.tool_calls
                 ]
-                session.add_assistant_tool_calls(tool_calls_for_session)
+                self._add_assistant_tool_calls(session, tool_calls_for_session)
                 self._persist_session(session)
 
                 # Execute each tool call
@@ -1527,7 +1868,7 @@ class Agent:
                     if is_duplicate:
                         cached_result = prior_tool_results.get(signature, "")
                         result = self._duplicate_tool_result(signature, repeat_count, cached_result)
-                        session.add_tool_result(tc.id, result)
+                        self._add_tool_result(session, tc.id, result)
                         self._persist_session(session)
                         logger.warning(
                             "Suppressed duplicate tool call for chat_id=%d repeat_count=%d signature=%s",
@@ -1550,7 +1891,7 @@ class Agent:
                             chat_id,
                             llm,
                         )
-                        session.add_tool_result(tc.id, result)
+                        self._add_tool_result(session, tc.id, result)
                         prior_tool_results[signature] = result
                         self._persist_session(session)
                         logger.debug("Tool result for %s: %s", tc.id, result[:200])
@@ -1578,6 +1919,17 @@ class Agent:
                         session.pending_analysis = None
                         session.pending_since = time.time()
                         session.pending_followups.clear()
+                        self._append_context_event(
+                            session,
+                            "approval.requested",
+                            {
+                                "approval_id": approval_id,
+                                "tool_call_id": e.tool_call_id,
+                                "command": e.command,
+                                "reason": getattr(e, "reason", ""),
+                                "risk_level": getattr(e, "risk_level", ""),
+                            },
+                        )
                         self._transition_turn(session, "waiting_approval")
                         CommandAuditTracker.record_event(
                             "command_approval_created",
@@ -1601,7 +1953,7 @@ class Agent:
                                 "for user approval. Re-request this tool call after the approval "
                                 "decision if the result is still needed."
                             )
-                            session.add_tool_result(skipped_tc.id, skipped_result)
+                            self._add_tool_result(session, skipped_tc.id, skipped_result)
                             logger.info(
                                 "Deferred tool call due to pending approval: %s",
                                 skipped_tc.id,
@@ -1637,7 +1989,7 @@ class Agent:
                     )
                     session.task_auto_approve = False
                     session.clear_pending_round_limit()
-                    session.add_assistant_message(final_content)
+                    self._add_assistant_message(session, final_content)
                     self._finish_turn(session, "completed")
                     self._persist_session(session)
                     logger.warning(
@@ -1663,7 +2015,7 @@ class Agent:
                         
                 session.task_auto_approve = False
                 session.clear_pending_round_limit()
-                session.add_assistant_message(final_content)
+                self._add_assistant_message(session, final_content)
                 self._finish_turn(session, "completed")
                 self._persist_session(session)
                 logger.info("Agent completed for chat_id=%d in %d rounds", chat_id, round_num)
@@ -1678,15 +2030,65 @@ class Agent:
         logger.warning("Round limit window reached for chat_id=%d (rounds=%d)", chat_id, reached_rounds)
         return AgentResult.round_limit({"rounds": reached_rounds, "window": window_limit})
 
-    def clear_session(self, chat_id: int) -> bool:
-        """Clear a chat session. Returns True if it existed."""
+    def get_context_status(self, chat_id: int) -> dict[str, Any]:
+        """Calculate `/context` from the same request counter used by preflight."""
+        session = self.session_manager.get_or_create(chat_id)
+        service = getattr(self, "context_budget_service", None)
+        if service is None:
+            counter = ContextTokenCounter(model=getattr(self.llm, "model", ""))
+            service = ContextBudgetService(
+                counter,
+                limit_tokens=getattr(self.config, "max_history_tokens", 32_000),
+                target_ratio=0.70,
+            )
+        snapshot = service.snapshot(session.build_llm_messages(), self.tools)
+        summary = getattr(session, "working_summary", None)
+        summary_tokens = int(getattr(summary, "token_count", 0) or 0)
+        if summary is not None and summary_tokens <= 0:
+            summary_tokens = service.counter.count_text(summary.to_prompt_block()).tokens
+        last = getattr(getattr(session, "context_state", None), "last_compaction", None)
+        latest_compaction_event = next(
+            (
+                event.type
+                for event in reversed(self.event_store.read_events(chat_id))
+                if event.type.startswith("context.compaction_")
+            ),
+            "",
+        )
+        if snapshot.usage_percent < 80:
+            status = "正常"
+        elif snapshot.current_tokens < snapshot.limit_tokens:
+            status = "接近压缩阈值"
+        elif getattr(session, "agent_running", False):
+            status = "正在压缩"
+        elif latest_compaction_event in {
+            "context.compaction_failed",
+            "context.compaction_rejected",
+        }:
+            status = "压缩待重试"
+        else:
+            status = "达到压缩阈值"
+        return {
+            "current_tokens": snapshot.current_tokens,
+            "limit_tokens": snapshot.limit_tokens,
+            "usage_percent": snapshot.usage_percent,
+            "status": status,
+            "working_summary_tokens": summary_tokens,
+            "last_tokens_before": int(getattr(last, "tokens_before", 0) or 0),
+            "last_tokens_after": int(getattr(last, "tokens_after", 0) or 0),
+            "last_reduction_percent": int(getattr(last, "reduction_percent", 0) or 0),
+            "token_count_method": snapshot.method,
+        }
+
+    def clear_session(self, chat_id: int) -> Any:
+        """Clear a chat session after acquiring the global task lease."""
         if not self._claim_global_turn_identity(
             chat_id,
             source="control",
             user_id=None,
         ):
             return False
-        cleared = self.session_manager.clear_session(chat_id)
+        cleared = self.session_manager.clear_session(chat_id, source="control")
         self._release_global_turn_lease(chat_id)
         return cleared
 

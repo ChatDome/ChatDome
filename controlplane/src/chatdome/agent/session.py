@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,39 +27,18 @@ from chatdome.agent.turns import (
     create_turn_context,
 )
 from chatdome.agent.redaction import redact_field_value, redact_sensitive_text
-from chatdome.runtime_paths import compression_log_path, data_dir, memory_file_path
+from chatdome.agent.context_budget import ContextTokenCounter
+from chatdome.agent.context_models import ContextState, WorkingSummary, local_timestamp
+from chatdome.agent.event_store import EventStore
+from chatdome.agent.memory_vault import MemoryVaultStore
+from chatdome.runtime_paths import data_dir
 
 logger = logging.getLogger(__name__)
 
 _SESSION_SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9_.:/@-]{2,}|[\u4e00-\u9fff]{2,}")
 
-_TOOL_RESULT_SNIPPET_CHARS = 500
-_TOOL_ARGUMENT_SNIPPET_CHARS = 600
-_MEMORY_MERGE_THRESHOLD_CHARS = 1500
-_MEMORY_UPDATE_MERGE_THRESHOLD = 2
 _DEFERRED_VISIBLE_CONTEXT_LIMIT = 5
 _CONTROL_EVENT_LIMIT = 200
-_MEMORY_SUMMARY_MAX_ATTEMPTS = 2
-_COMPLETE_SUMMARY_FINISH_REASONS = frozenset(
-    {"stop", "completed", "end_turn", "eos", "eos_token"}
-)
-_MEMORY_SUMMARY_LENGTH_GUIDANCE = (
-    "\n\n输出限制：摘要不超过 1200 个汉字；使用完整句子；"
-    "如果内容较多，优先保留用户目标、关键结论、重要对象和待办事项。"
-)
-_MEMORY_SUMMARY_RETRY_GUIDANCE = (
-    "\n\n上一次摘要未完整输出。请重新生成一份不超过 800 个汉字的完整摘要，"
-    "删除次要过程信息，不要续写上一次的残缺文本。"
-)
-
-
-class _IncompleteMemorySummaryError(RuntimeError):
-    """Prevent incomplete model output from reaching the Memory Vault."""
-
-
-def _memory_last_updated() -> str:
-    """Return a readable local timestamp with an explicit UTC offset."""
-    return datetime.now().astimezone().isoformat(sep=" ", timespec="seconds")
 
 
 def _redact_control_field(key: str, value: Any) -> str:
@@ -78,114 +58,6 @@ def _compact_context_value(value: Any, max_chars: int = 240) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 1].rstrip() + "…"
-
-
-def _parse_tool_arguments(arguments: Any) -> Any:
-    if isinstance(arguments, (dict, list)):
-        return arguments
-    if arguments in (None, ""):
-        return {}
-    text = str(arguments).strip()
-    if not text:
-        return {}
-    try:
-        return json.loads(text)
-    except (TypeError, ValueError):
-        return text
-
-
-def _format_tool_argument_value(
-    value: Any,
-    max_chars: int = _TOOL_ARGUMENT_SNIPPET_CHARS,
-) -> str:
-    if isinstance(value, (dict, list)):
-        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    elif value is None:
-        text = ""
-    else:
-        text = str(value)
-    text = " ".join(redact_sensitive_text(text).split()).replace('"', "'")
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 12].rstrip() + "...(已截断)"
-
-
-def _format_tool_arguments(arguments: Any) -> str:
-    parsed = _parse_tool_arguments(arguments)
-    if isinstance(parsed, dict):
-        parts = []
-        for key, value in parsed.items():
-            key_text = _compact_context_value(key, 80)
-            if not key_text:
-                continue
-            value_text = _format_tool_argument_value(value)
-            if isinstance(value, (dict, list)):
-                parts.append(f"{key_text}={value_text}")
-            else:
-                parts.append(f'{key_text}="{value_text}"')
-        return "; ".join(parts) if parts else "{}"
-    return _format_tool_argument_value(parsed)
-
-
-def _tool_call_id(tool_call: Any) -> str:
-    if not isinstance(tool_call, dict):
-        return ""
-    return str(tool_call.get("call_id") or tool_call.get("id") or "")
-
-
-def _tool_call_function(tool_call: Any) -> tuple[str, Any]:
-    if not isinstance(tool_call, dict):
-        return "unknown_tool", {}
-    function = tool_call.get("function")
-    if not isinstance(function, dict):
-        function = {}
-    name = function.get("name") or tool_call.get("name") or "unknown_tool"
-    arguments = function.get("arguments", tool_call.get("arguments", {}))
-    return str(name), arguments
-
-
-def _format_tool_call_for_compression(tool_call: Any) -> str:
-    name, arguments = _tool_call_function(tool_call)
-    return f"AI 调用工具: {redact_sensitive_text(name)}\n  参数: {_format_tool_arguments(arguments)}"
-
-
-def _format_tool_result_for_compression(
-    message: dict[str, Any],
-    tool_names: dict[str, str],
-) -> str:
-    call_id = str(message.get("tool_call_id") or "")
-    tool_label = tool_names.get(call_id) or call_id or "unknown_tool"
-    content = _truncate_context_text(message.get("content", ""), _TOOL_RESULT_SNIPPET_CHARS)
-    if not content:
-        content = "(empty)"
-    return f"工具结果: {tool_label}\n  结果: {content}"
-
-
-def _format_compression_history(messages: list[dict[str, Any]]) -> str:
-    lines: list[str] = []
-    tool_names: dict[str, str] = {}
-
-    for msg in messages:
-        role = msg.get("role", "unknown")
-        if role == "user":
-            lines.append(f"User: {msg.get('content')}")
-        elif role == "assistant":
-            if msg.get("content"):
-                lines.append(f"AI: {msg.get('content')}")
-            tool_calls = msg.get("tool_calls") or []
-            if isinstance(tool_calls, dict):
-                tool_calls = [tool_calls]
-            if isinstance(tool_calls, list):
-                for tool_call in tool_calls:
-                    call_id = _tool_call_id(tool_call)
-                    name, _arguments = _tool_call_function(tool_call)
-                    if call_id:
-                        tool_names[call_id] = name
-                    lines.append(_format_tool_call_for_compression(tool_call))
-        elif role == "tool":
-            lines.append(_format_tool_result_for_compression(msg, tool_names))
-
-    return "\n".join(lines)
 
 
 def _extract_search_terms(query: str) -> list[str]:
@@ -278,6 +150,8 @@ class AgentSession:
     chat_id: int
     messages: list[dict[str, Any]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
+    working_summary: WorkingSummary | None = None
+    context_state: ContextState = field(default_factory=ContextState)
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
     round_count: int = 0
@@ -311,6 +185,7 @@ class AgentSession:
     command_echo: bool = False
     agent_running: bool = False
     _deferred_visible_contexts: list[dict[str, Any]] = field(default_factory=list)
+    _transient_contexts: list[str] = field(default_factory=list)
 
     def to_snapshot(self) -> dict[str, Any]:
         """Serialize this session to a JSON-safe payload."""
@@ -318,6 +193,10 @@ class AgentSession:
             "chat_id": self.chat_id,
             "messages": self.messages,
             "events": self.events,
+            "working_summary": (
+                self.working_summary.to_dict() if self.working_summary is not None else None
+            ),
+            "context_state": self.context_state.to_dict(),
             "created_at": self.created_at,
             "last_active": self.last_active,
             "round_count": self.round_count,
@@ -361,6 +240,14 @@ class AgentSession:
 
         raw_followups = payload.get("pending_followups", [])
         pending_followups = raw_followups if isinstance(raw_followups, list) else []
+
+        working_summary = None
+        if isinstance(payload.get("working_summary"), dict):
+            try:
+                working_summary = WorkingSummary.from_dict(payload["working_summary"])
+            except ValueError:
+                working_summary = None
+        context_state = ContextState.from_dict(payload.get("context_state"))
 
         try:
             chat_id = int(payload.get("chat_id", 0))
@@ -423,6 +310,8 @@ class AgentSession:
             chat_id=chat_id,
             messages=messages,
             events=events,
+            working_summary=working_summary,
+            context_state=context_state,
             created_at=float(payload.get("created_at", time.time())),
             last_active=float(payload.get("last_active", time.time())),
             round_count=int(payload.get("round_count", 0)),
@@ -562,11 +451,19 @@ class AgentSession:
         message, _ = self.take_deferred_input()
         return message
 
-    def add_user_message(self, content: str, *, turn_id: int | None = None) -> None:
+    def add_user_message(
+        self,
+        content: str,
+        *,
+        turn_id: int | None = None,
+        event_id: str | None = None,
+    ) -> None:
         """Append a user message and reset round counter."""
         message: dict[str, Any] = {"role": "user", "content": content}
         if turn_id is not None:
             message["_chatdome_turn_id"] = turn_id
+        if event_id:
+            message["_chatdome_event_id"] = event_id
         self.messages.append(message)
         self.last_active = time.time()
         self.round_count = 0
@@ -579,7 +476,7 @@ class AgentSession:
         from chatdome.agent.turns import frame_current_turn
 
         messages: list[dict[str, Any]] = []
-        for item in self.messages:
+        for index, item in enumerate(self.messages):
             message = {
                 key: value
                 for key, value in item.items()
@@ -594,29 +491,70 @@ class AgentSession:
                     str(item.get("content", "") or ""),
                 )
             messages.append(message)
+            if index == 0 and self.working_summary is not None:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": self.working_summary.to_prompt_block(),
+                    }
+                )
+            if index == 0:
+                messages.extend(
+                    {"role": "system", "content": block}
+                    for block in self._transient_contexts
+                    if block
+                )
         return messages
 
-    def add_assistant_message(self, content: str) -> None:
+    def set_transient_contexts(self, blocks: list[str]) -> None:
+        """Set request-only context that must not enter the Session snapshot."""
+        self._transient_contexts = [str(block).strip() for block in blocks if str(block).strip()]
+
+    def clear_transient_contexts(self) -> None:
+        """Remove request-only retrieval context after the active turn."""
+        self._transient_contexts.clear()
+
+    def add_assistant_message(self, content: str, *, event_id: str | None = None) -> None:
         """Append an assistant text response."""
-        self.messages.append({"role": "assistant", "content": content})
+        message = {"role": "assistant", "content": content}
+        if event_id:
+            message["_chatdome_event_id"] = event_id
+        self.messages.append(message)
         self.last_active = time.time()
 
-    def add_assistant_tool_calls(self, tool_calls: list[dict[str, Any]]) -> None:
+    def add_assistant_tool_calls(
+        self,
+        tool_calls: list[dict[str, Any]],
+        *,
+        event_id: str | None = None,
+    ) -> None:
         """Append an assistant message containing tool calls."""
-        self.messages.append({
+        message = {
             "role": "assistant",
             "content": None,
             "tool_calls": tool_calls,
-        })
+        }
+        if event_id:
+            message["_chatdome_event_id"] = event_id
+        self.messages.append(message)
         self.last_active = time.time()
 
-    def add_tool_result(self, tool_call_id: str, content: str) -> None:
+    def add_tool_result(
+        self,
+        tool_call_id: str,
+        content: str,
+        *,
+        event_id: str | None = None,
+    ) -> None:
         """Append a tool result message."""
-        self.messages.append({
+        message = {
             "role": "tool",
             "tool_call_id": tool_call_id,
             "content": content,
-        })
+        }
+        if event_id:
+            message["_chatdome_event_id"] = event_id
+        self.messages.append(message)
         self.last_active = time.time()
 
     def add_control_event(self, event: dict[str, Any]) -> None:
@@ -857,207 +795,6 @@ class AgentSession:
         """Check if this session has been idle for too long."""
         return (time.time() - self.last_active) > timeout
 
-    def estimate_tokens(self) -> int:
-        """
-        Rough token estimate for the current message history.
-
-        Uses a simple heuristic: ~2 tokens per Chinese character,
-        ~0.75 tokens per English word, ~4 chars per token average.
-        """
-        total_chars = sum(
-            len(str(msg.get("content", "") or ""))
-            for msg in self.messages
-        )
-        # Also account for tool call arguments
-        for msg in self.messages:
-            if msg.get("tool_calls"):
-                for tc in msg["tool_calls"]:
-                    fn = tc.get("function", {})
-                    total_chars += len(fn.get("arguments", ""))
-        return total_chars // 3  # rough: ~3 chars per token for mixed content
-
-    def append_raw_log(self, text: str) -> None:
-        """Append raw interaction text to persistent log file."""
-        try:
-            path = compression_log_path(self.chat_id)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as f:
-                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
-        except Exception as e:
-            logger.error("Failed to write raw log: %s", e)
-
-    async def _build_memory_summary(
-        self,
-        llm_client,
-        existing_summary: str,
-        summary: str,
-    ) -> str:
-        if not existing_summary:
-            return summary
-
-        appended_summary = existing_summary + "\n\n[UPDATE]\n" + summary
-        if (
-            len(existing_summary) <= _MEMORY_MERGE_THRESHOLD_CHARS
-            and existing_summary.count("[UPDATE]") < _MEMORY_UPDATE_MERGE_THRESHOLD
-        ):
-            return appended_summary
-
-        from chatdome.agent.prompts import MEMORY_MERGE_PROMPT
-
-        prompt = (
-            MEMORY_MERGE_PROMPT
-            + "\n\n旧摘要:\n"
-            + existing_summary
-            + "\n\n新摘要:\n"
-            + summary
-        )
-        try:
-            return await self._request_complete_memory_summary(
-                llm_client,
-                prompt,
-                operation="merge",
-            )
-        except Exception as e:
-            logger.warning("Failed to merge Memory Vault summary: %s", e)
-        return appended_summary
-
-    async def _request_complete_memory_summary(
-        self,
-        llm_client,
-        prompt: str,
-        *,
-        operation: str,
-    ) -> str:
-        """Generate one complete summary, retrying once with a tighter limit."""
-        base_prompt = redact_sensitive_text(prompt) + _MEMORY_SUMMARY_LENGTH_GUIDANCE
-        last_reason = "empty"
-
-        for attempt in range(1, _MEMORY_SUMMARY_MAX_ATTEMPTS + 1):
-            request_prompt = base_prompt
-            if attempt > 1:
-                request_prompt += _MEMORY_SUMMARY_RETRY_GUIDANCE
-
-            response = await llm_client.chat_completion(
-                [{"role": "user", "content": request_prompt}]
-            )
-            finish_reason = str(getattr(response, "finish_reason", "") or "").strip().lower()
-            summary = redact_sensitive_text(getattr(response, "content", "") or "").strip()
-            if summary and finish_reason in _COMPLETE_SUMMARY_FINISH_REASONS:
-                return summary
-
-            last_reason = finish_reason or "empty"
-            logger.warning(
-                "Memory Vault summary response incomplete: operation=%s attempt=%d/%d finish_reason=%s",
-                operation,
-                attempt,
-                _MEMORY_SUMMARY_MAX_ATTEMPTS,
-                last_reason,
-            )
-
-        raise _IncompleteMemorySummaryError(
-            f"incomplete {operation} response after {_MEMORY_SUMMARY_MAX_ATTEMPTS} attempts "
-            f"(finish_reason={last_reason})"
-        )
-
-    def _format_compression_log(self, summary: str, compressed_messages: int) -> str:
-        safe_summary = redact_sensitive_text(summary).strip() or "(empty summary)"
-        indented_summary = "\n".join(
-            f"  {line}" if line else ""
-            for line in safe_summary.splitlines()
-        )
-        return (
-            "=== Context Compressed ===\n"
-            f"Chat ID : {self.chat_id}\n"
-            f"Messages: {compressed_messages} compressed\n"
-            "Summary :\n"
-            f"{indented_summary}\n"
-            "=========================================="
-        )
-
-    async def summarize_and_trim_history(self, llm_client, max_tokens: int) -> None:
-        """Compress the oldest valid block when estimated context exceeds the limit."""
-        estimated_tokens = self.estimate_tokens()
-        if estimated_tokens <= max_tokens:
-            return
-
-        from chatdome.agent.prompts import COMPRESSION_PROMPT
-
-        if len(self.messages) <= 3:
-            return
-
-        logger.info(
-            "Context window limit reached (%d estimated tokens > %d), compressing history...",
-            estimated_tokens,
-            max_tokens,
-        )
-
-        cut_idx = len(self.messages) - 2
-        while cut_idx > 1:
-            if self.messages[cut_idx].get("role") == "tool":
-                cut_idx -= 1
-            elif self.messages[cut_idx].get("role") == "assistant" and self.messages[cut_idx].get("tool_calls"):
-                cut_idx -= 1
-            else:
-                break
-
-        if cut_idx <= 2:
-            self.messages.pop(1)
-            return
-
-        messages_to_compress = self.messages[1:cut_idx]
-        history_text = _format_compression_history(messages_to_compress)
-        prompt = COMPRESSION_PROMPT + f"\n\n{redact_sensitive_text(history_text)}"
-
-        try:
-            summary = await self._request_complete_memory_summary(
-                llm_client,
-                prompt,
-                operation="compress",
-            )
-
-            summarized_msg = {
-                "role": "system",
-                "content": f"[System Context: The following is a summary of earlier conversation turns]\n{summary}",
-            }
-
-            self.messages = [self.messages[0], summarized_msg] + self.messages[cut_idx:]
-
-            memory_file = memory_file_path(self.chat_id)
-            existing_summary = ""
-            if memory_file.exists():
-                try:
-                    with open(memory_file, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        existing_summary = redact_sensitive_text(data.get("summary", ""))
-                except Exception:
-                    pass
-
-            new_summary = await self._build_memory_summary(llm_client, existing_summary, summary)
-
-            memory_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(memory_file, "w", encoding="utf-8") as f:
-                json.dump(
-                    {"summary": new_summary, "last_updated": _memory_last_updated()},
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-
-            self.append_raw_log(self._format_compression_log(summary, len(messages_to_compress)))
-            logger.info("Context compressed successfully to Vault.")
-
-        except Exception as e:
-            logger.error("Failed to compress context: %s. Falling back to simple trim.", e)
-            self.messages.pop(1)
-
-    def trim_history(self, max_tokens: int) -> None:
-        """
-        Remove oldest non-system messages to stay within token budget.
-        """
-        while self.estimate_tokens() > max_tokens and len(self.messages) > 2:
-            removed = self.messages.pop(1)
-            logger.debug("Trimmed message from session %d: role=%s", self.chat_id, removed.get("role"))
-
     def clear(self) -> None:
         """Clear all messages except the system prompt."""
         system_msg = None
@@ -1065,11 +802,14 @@ class AgentSession:
             system_msg = self.messages[0]
         self.messages.clear()
         self.events.clear()
+        self.working_summary = None
+        self.context_state = ContextState()
         if system_msg:
             self.messages.append(system_msg)
         self.round_count = 0
         self.agent_running = False
         self._deferred_visible_contexts.clear()
+        self._transient_contexts.clear()
         self.active_turn = None
         self.deferred_user_message = None
         self.deferred_user_id = None
@@ -1106,6 +846,16 @@ class AgentSession:
 # Session Manager
 # ---------------------------------------------------------------------------
 
+
+@dataclass(frozen=True)
+class ClearSessionResult:
+    status: str
+    clear_event_id: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.status == "cleared"
+
+
 class SessionManager:
     """
     Manages all active chat sessions.
@@ -1121,9 +871,13 @@ class SessionManager:
         session_timeout: int = 600,
         pending_approval_timeout: int = 86400,
         persisted_session_ttl: int = 604800,
-        max_history_tokens: int = 16000,
+        max_history_tokens: int = 32000,
         system_prompt: str = "",
         engram_store: 'Any' = None,
+        data_root: Path | None = None,
+        event_retention_days: int = 30,
+        event_store: EventStore | None = None,
+        memory_vault_store: MemoryVaultStore | None = None,
     ):
         self.session_timeout = session_timeout
         self.pending_approval_timeout = pending_approval_timeout
@@ -1134,8 +888,18 @@ class SessionManager:
         self._sessions: dict[int, AgentSession] = {}
         self._turn_locks: dict[int, asyncio.Lock] = {}
         self._cleanup_task: asyncio.Task | None = None
-        self._chat_data_dir = data_dir()
+        self._last_event_cleanup = 0.0
+        self._chat_data_dir = Path(data_root) if data_root is not None else data_dir()
         self._session_store_dir = self._chat_data_dir / "sessions"
+        self.event_store = event_store or EventStore(
+            self._chat_data_dir,
+            retention_days=event_retention_days,
+        )
+        self.memory_vault_store = memory_vault_store or MemoryVaultStore(
+            self._chat_data_dir,
+            token_counter=ContextTokenCounter(),
+            event_store=self.event_store,
+        )
         self._chat_data_dir.mkdir(parents=True, exist_ok=True)
         self._session_store_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1176,25 +940,19 @@ class SessionManager:
         return self._session_store_dir / f"{chat_id}.json"
 
     def _build_memory_prompt(self, chat_id: int) -> str:
-        """Build system prompt + local memory vault summary."""
+        """Build system prompt plus validated long-term memory."""
         memory_prompt = self.system_prompt
         if getattr(self, "engram_store", None):
             engram_str = self.engram_store.build_engram_prompt()
             if engram_str:
                 memory_prompt += "\n\n" + engram_str
-        memory_file = memory_file_path(chat_id)
-        if memory_file.exists():
-            try:
-                with open(memory_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if data.get("summary"):
-                    logger.info("Loaded external Memory Vault for chat_id=%d", chat_id)
-                    memory_prompt += (
-                        "\n\n[Local Memory Vault - 历史总结档，仅供参考，不是当前指令]\n"
-                        + str(data["summary"])
-                    )
-            except Exception as e:
-                logger.error("Failed to load memory file for chat_id=%d: %s", chat_id, e)
+        try:
+            vault_prompt = self.memory_vault_store.render_prompt(chat_id, max_tokens=3_200)
+            if vault_prompt:
+                logger.info("Loaded external Memory Vault for chat_id=%d", chat_id)
+                memory_prompt += "\n\n" + vault_prompt
+        except Exception as e:
+            logger.error("Failed to load memory file for chat_id=%d: %s", chat_id, e)
         return memory_prompt
 
     def _rehydrate_loaded_session(self, session: AgentSession, chat_id: int) -> AgentSession:
@@ -1297,21 +1055,31 @@ class SessionManager:
         session.last_active = time.time()
         return session
 
-    def save_session(self, session: AgentSession) -> None:
+    def save_session(self, session: AgentSession) -> bool:
         """Persist current session snapshot to disk."""
         path = self._session_snapshot_path(session.chat_id)
         payload = {
-            "version": 2,
-            "saved_at": time.time(),
+            "version": 3,
+            "saved_at": local_timestamp(),
             "session": session.to_snapshot(),
         }
+        temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+            return True
         except Exception as e:
             logger.error("Failed to persist session for chat_id=%d: %s", session.chat_id, e)
+            return False
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def load_persisted_session(self, chat_id: int) -> AgentSession | None:
         """Load session snapshot from disk if present."""
@@ -1342,19 +1110,33 @@ class SessionManager:
         *,
         limit: int = 5,
         max_chars_per_item: int = 900,
+        include_cleared: bool = False,
     ) -> list[dict[str, Any]]:
-        """Search one chat's existing session messages."""
-        session = self._sessions.get(chat_id)
-        if session is None:
-            session = self.load_persisted_session(chat_id)
-        if session is None:
-            return []
-        return search_message_history(
-            session.messages,
+        """Search archived conversation events without crossing /clear by default."""
+        result = self.event_store.search(
+            chat_id,
             query,
             limit=limit,
-            max_chars_per_item=max_chars_per_item,
+            include_cleared=include_cleared,
         )
+        matches: list[dict[str, Any]] = []
+        for event in result.matches:
+            content = event.payload.get("content")
+            if content is None:
+                content = json.dumps(event.payload, ensure_ascii=False, sort_keys=True)
+            text = _truncate_context_text(content, max_chars_per_item)
+            matches.append(
+                {
+                    "event_id": event.event_id,
+                    "timestamp": event.timestamp,
+                    "type": event.type,
+                    "role": event.type.partition(".")[2],
+                    "score": 1.0,
+                    "match_type": "event_archive",
+                    "content": text,
+                }
+            )
+        return matches
 
     def delete_persisted_session(self, chat_id: int) -> None:
         """Delete persisted snapshot for a chat."""
@@ -1376,8 +1158,8 @@ class SessionManager:
                         path.write_text(
                             json.dumps(
                                 {
-                                    "version": 2,
-                                    "saved_at": 0,
+                                    "version": 3,
+                                    "saved_at": "1970-01-01 00:00:00+00:00",
                                     "session": tombstone.to_snapshot(),
                                 },
                                 ensure_ascii=False,
@@ -1443,22 +1225,47 @@ class SessionManager:
             )
         self.save_session(session)
 
-    def clear_session(self, chat_id: int) -> bool:
-        """Clear a specific chat session. Returns True if it existed."""
+    def clear_session(
+        self,
+        chat_id: int,
+        *,
+        source: str = "chatdome",
+    ) -> ClearSessionResult:
+        """Clear resumable state after writing a durable retrieval boundary."""
         session = self._sessions.get(chat_id)
-        if session:
-            session.clear()
-            session.add_system_message(self._build_memory_prompt(chat_id))
-            self.save_session(session)
-            logger.info("Session cleared for chat_id=%d", chat_id)
-            return True
-
-        persisted = self.load_persisted_session(chat_id)
-        if persisted is not None:
-            self.delete_persisted_session(chat_id)
-            logger.info("Cleared persisted session for chat_id=%d", chat_id)
-            return True
-        return False
+        if session is None:
+            session = self.load_persisted_session(chat_id)
+        if session is None:
+            return ClearSessionResult("not_found")
+        active_state = session.active_turn.state if session.active_turn is not None else ""
+        if session.agent_running or active_state in {
+            "running",
+            "answering_approval_question",
+            "waiting_approval_decision",
+        }:
+            return ClearSessionResult("running_task")
+        try:
+            event = self.event_store.append(
+                chat_id,
+                "session.cleared",
+                {},
+                turn_id=(session.active_turn.turn_id if session.active_turn is not None else None),
+                source=source,
+            )
+        except OSError:
+            logger.exception("Failed to append session clear boundary for chat_id=%d", chat_id)
+            return ClearSessionResult("event_write_failed")
+        session.clear()
+        session.add_system_message(self._build_memory_prompt(chat_id))
+        self._sessions[chat_id] = session
+        if not self.save_session(session):
+            return ClearSessionResult("save_failed", clear_event_id=event.event_id)
+        logger.info(
+            "Session cleared for chat_id=%d clear_event_id=%s",
+            chat_id,
+            event.event_id,
+        )
+        return ClearSessionResult("cleared", clear_event_id=event.event_id)
 
     def remove_session(self, chat_id: int, delete_persisted: bool = False) -> None:
         """Completely remove a session, optionally including persisted snapshot."""
@@ -1473,6 +1280,7 @@ class SessionManager:
 
     def start_cleanup_task(self) -> None:
         """Start the background session cleanup task."""
+        self._cleanup_events_if_due(force=True)
         if self._cleanup_task is None or self._cleanup_task.done():
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
             logger.info("Session cleanup task started (timeout=%ds)", self.session_timeout)
@@ -1500,10 +1308,28 @@ class SessionManager:
                 await asyncio.sleep(60)  # check every minute
                 self._expire_sessions()
                 self._cleanup_persisted_sessions()
+                self._cleanup_events_if_due()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("Error in session cleanup: %s", e)
+
+    def _cleanup_events_if_due(self, *, force: bool = False) -> None:
+        """Run Event Archive retention cleanup at most once per day."""
+        now = time.time()
+        if not force and now - self._last_event_cleanup < 86_400:
+            return
+        result = self.event_store.cleanup()
+        self._last_event_cleanup = now
+        logger.info(
+            "Event retention cleanup: scanned_files=%d removed_events=%d "
+            "kept_events=%d skipped=%s errors=%d",
+            result.scanned_files,
+            result.removed_events,
+            result.kept_events,
+            result.skipped,
+            len(result.errors),
+        )
 
     def _expire_sessions(self) -> None:
         """Evict expired in-memory sessions while keeping persisted snapshots."""

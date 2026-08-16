@@ -1364,16 +1364,34 @@ class PendingApprovalFollowupTests(unittest.TestCase):
                         "response_format": response_format,
                     }
                 )
-                if len(self.calls) == 1:
-                    self.session.add_visible_context(
-                        event_type="sentinel_alert_push",
-                        user_action="收到 Sentinel 告警推送",
-                        assistant_summary="SSH 成功登录告警。",
-                        refs={"check_id": "ssh_success_login", "IP": "114.246.239.99"},
-                    )
-                    await asyncio.sleep(0)
-                    return SimpleNamespace(content="压缩摘要：旧上下文。", finish_reason="stop")
                 return LLMResponse(content="final answer", prompt_tokens=1, completion_tokens=1, total_tokens=2)
+
+        class InjectingCompactor:
+            def __init__(self):
+                self.budget_service = SimpleNamespace(
+                    counter=SimpleNamespace(method="heuristic"),
+                )
+
+            async def ensure_budget(
+                self,
+                current_session,
+                llm_client,
+                *,
+                tools,
+                trigger_reason,
+                progress_callback=None,
+            ):
+                del llm_client, tools, trigger_reason, progress_callback
+                current_session.add_visible_context(
+                    event_type="sentinel_alert_push",
+                    user_action="收到 Sentinel 告警推送",
+                    assistant_summary="SSH 成功登录告警。",
+                    refs={"check_id": "ssh_success_login", "IP": "114.246.239.99"},
+                )
+                await asyncio.sleep(0)
+                from chatdome.agent.context_compactor import CompactionResult
+
+                return CompactionResult("completed", 33_000, 20_000)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1394,6 +1412,7 @@ class PendingApprovalFollowupTests(unittest.TestCase):
             agent.tools = []
             agent.session_manager = FakeSessionManager(session)
             agent.tool_dispatcher = CountingToolDispatcher()
+            agent.context_compactor = InjectingCompactor()
             agent._persist_session = lambda saved_session: agent.session_manager.save_session(saved_session)
 
             async def fake_snapshot():
@@ -1401,16 +1420,13 @@ class PendingApprovalFollowupTests(unittest.TestCase):
 
             agent.get_active_llm_snapshot = fake_snapshot
 
-            with patch("chatdome.agent.session.memory_file_path", return_value=memory_path), patch(
-                "chatdome.agent.session.compression_log_path",
-                return_value=compression_path,
-            ), patch("chatdome.agent.tracker.TokenTracker.record_usage"):
+            with patch("chatdome.agent.tracker.TokenTracker.record_usage"):
                 response = asyncio.run(agent.handle_message(123, "分析当前状态"))
 
         self.assertEqual(response.kind, "reply")
         self.assertEqual(response.content, "final answer")
-        self.assertEqual(len(llm.calls), 2)
-        react_messages = llm.calls[1]["messages"]
+        self.assertEqual(len(llm.calls), 1)
+        react_messages = llm.calls[0]["messages"]
         encoded_react_messages = json.dumps(react_messages, ensure_ascii=False)
         self.assertNotIn("sentinel_alert_push", encoded_react_messages)
         self.assertNotIn("114.246.239.99", encoded_react_messages)

@@ -1,8 +1,10 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from chatdome.agent.context_budget import ContextTokenCounter
+from chatdome.agent.context_budget import ContextBudgetService, ContextTokenCounter
+from chatdome.agent.core import Agent
 from chatdome.agent.context_models import ContextState, WorkingSummary
 from chatdome.config import AgentConfig, parse_config_document
 
@@ -154,3 +156,23 @@ def test_event_retention_zero_is_preserved_by_config_parser() -> None:
     )
 
     assert config.agent.event_retention_days == 0
+
+
+def test_refresh_context_settings_updates_live_budget_and_retention() -> None:
+    agent = Agent.__new__(Agent)
+    agent.config = SimpleNamespace(max_history_tokens=48_000, event_retention_days=0)
+    agent.context_budget_service = ContextBudgetService(
+        ContextTokenCounter(encoder=CharacterEncoder()),
+        limit_tokens=32_000,
+    )
+    agent.session_manager = SimpleNamespace(
+        max_history_tokens=32_000,
+        event_store=SimpleNamespace(retention_days=30),
+    )
+
+    agent.refresh_context_settings()
+
+    assert agent.context_budget_service.limit_tokens == 48_000
+    assert agent.context_budget_service.target_tokens == 33_600
+    assert agent.session_manager.max_history_tokens == 48_000
+    assert agent.session_manager.event_store.retention_days == 0

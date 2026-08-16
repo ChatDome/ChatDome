@@ -71,7 +71,7 @@ ChatDome is positioned as a **host-security sub-agent**, not a generic main-agen
 - **AI Agent with Tool Use** — Multi-turn reasoning: the AI plans, executes host commands, analyzes output, and iterates until it has a complete answer.
 - **Built-in Security Audit Commands** — Pre-defined checks for SSH brute force, login history, open ports, disk usage, suspicious processes, and more.
 - **Sandboxed Execution** — Commands run in a security sandbox with timeouts, output truncation, and dangerous command regex blocking.
-- **Long-term Memory & Context Management** — Features an intelligent, automatic AI-compression memory vault. It remembers past alerts and server diagnostics across multiple sessions without blowing up token limits or requiring an external database.
+- **Long-term Memory & Context Management** — Uses a 32K-token trigger, structured Working Summary, validated Memory Vault, and an `events/` archive. CLI and Telegram show the same temporary progress while compression runs.
 - **Telegram-Native** — Manage your server from your phone, anywhere.
 - **Multi-LLM Profiles** — Supports Codex OAuth Responses API by default, with OpenAI-compatible API profiles available for OpenAI, DeepSeek, LiteLLM gateways, and similar endpoints.
 - **Zero Infrastructure & Low Intrusion** — Single Python process, no database, no agent installation on target filespaces; Codex uses `/codex_login` OAuth by default, and API keys are only needed for API-key profiles.
@@ -271,6 +271,8 @@ chatdome:
   agent:
     command_approval_mode: require_approval_for_risky_commands
     session_timeout: 600                      # seconds of inactivity before session expires
+    max_history_tokens: 32000                 # context compression trigger
+    event_retention_days: 30                  # Events retention; 0 keeps events permanently
     max_rounds_per_turn: 10                   # max tool calls per user message
     command_timeout: 10                       # seconds before a command is killed
     max_output_chars: 4000                    # truncate command output beyond this
@@ -348,6 +350,7 @@ chatdome hello
 | `/stop` | Stop the current running, analyzing, or approval-waiting task |
 | `/env` | Show the runtime environment summary |
 | `/token` | Show token usage for the current terminal session |
+| `/context` | Show current context usage, limit, and latest compression |
 | `/cmd_echo` | Toggle command echo mode |
 | `/audit [N]` | Show recent command audit events |
 | `/model <profile>` | Switch the model profile for this terminal session |
@@ -357,6 +360,7 @@ chatdome hello
 | `/reject` | Reject the current pending command and cancel its task |
 | `/continue` | Continue a paused task |
 | `/engram [delete <id>]` | List or delete persistent memory |
+| `/memory [delete <id>\|clear]` | List or manage compression-derived long-term memory |
 | `/model_add` | Add an OpenAI-compatible or Codex model profile |
 | `/model_delete <profile>` | Delete an inactive model profile |
 | `/model_cancel` | Cancel the current model operation |
@@ -384,9 +388,11 @@ CLI and Telegram load the same command catalog and call the same business servic
 | `/continue` | Continue a paused task |
 | `/env` | Show runtime environment summary from `/var/lib/chatdome/environment/profile.md` |
 | `/token` | Show token usage statistics for current chat |
+| `/context` | Show current context usage, limit, and latest compression |
 | `/cmd_echo` | Toggle command echo mode in replies |
 | `/audit [N]` | Show latest command audit events for current chat (default 10, max 30) |
 | `/engram [delete <id>]` | List or delete persistent memory |
+| `/memory [delete <id>\|clear]` | List or manage compression-derived long-term memory |
 | `/sentinel_status` | Show Sentinel status |
 | `/sentinel_trigger` | Run all Sentinel checks |
 | `/sentinel_history` | Show recent Sentinel alerts |

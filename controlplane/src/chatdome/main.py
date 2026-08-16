@@ -402,7 +402,7 @@ def main() -> None:
         agent.session_manager.session_timeout = config.agent.session_timeout
         agent.session_manager.pending_approval_timeout = config.agent.pending_approval_timeout
         agent.session_manager.persisted_session_ttl = config.agent.persisted_session_ttl
-        agent.session_manager.max_history_tokens = config.agent.max_history_tokens
+        agent.refresh_context_settings()
         agent.session_manager.system_prompt = _agent_system_prompt()
         agent.tool_dispatcher.command_approval_mode = config.agent.command_approval_mode
 

@@ -30,6 +30,7 @@ dependencies = [
     "pyyaml>=6.0",
     "httpx>=0.25.0",
     "prompt_toolkit>=3.0.43,<4.0",
+    "tiktoken>=0.7.0",
 ]
 
 [project.urls]

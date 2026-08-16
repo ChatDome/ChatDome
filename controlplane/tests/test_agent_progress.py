@@ -2,6 +2,8 @@ import asyncio
 from types import SimpleNamespace
 
 from chatdome.agent.core import Agent
+from chatdome.agent.context_compactor import CompactionResult
+from chatdome.agent.progress import progress_label
 from chatdome.agent.session import AgentSession
 from chatdome.llm.client import LLMResponse, ToolCall
 
@@ -52,6 +54,27 @@ class Dispatcher:
         return "读取完成"
 
 
+class RecordingCompactor:
+    def __init__(self):
+        self.calls = []
+        self.budget_service = SimpleNamespace(
+            counter=SimpleNamespace(method="heuristic"),
+        )
+
+    async def ensure_budget(
+        self,
+        session,
+        llm_client,
+        *,
+        tools,
+        trigger_reason,
+        progress_callback=None,
+    ):
+        del session, llm_client, tools, progress_callback
+        self.calls.append(trigger_reason)
+        return CompactionResult("not_needed", 10, 10)
+
+
 def test_agent_reports_real_processing_and_execution_stages():
     session = AgentSession(
         chat_id=1,
@@ -80,3 +103,29 @@ def test_agent_reports_real_processing_and_execution_stages():
 
     assert result.content == "处理完成"
     assert stages == ["processing", "executing", "processing"]
+
+
+def test_agent_checks_context_budget_before_every_llm_round():
+    session = AgentSession(
+        chat_id=1,
+        messages=[{"role": "system", "content": "system"}],
+    )
+    llm = SequenceLLM()
+    compactor = RecordingCompactor()
+    agent = object.__new__(Agent)
+    agent.llm = llm
+    agent.llm_manager = None
+    agent.config = SimpleNamespace(max_history_tokens=32000, max_rounds_per_turn=10)
+    agent.tools = []
+    agent.session_manager = SessionManager(session)
+    agent.tool_dispatcher = Dispatcher()
+    agent.context_compactor = compactor
+
+    result = asyncio.run(agent.handle_message(1, "读取文件"))
+
+    assert result.content == "处理完成"
+    assert compactor.calls == ["before_round_1", "before_round_2"]
+
+
+def test_context_compaction_progress_uses_shared_platform_text():
+    assert progress_label("context_compacting") == "正在进行上下文压缩"

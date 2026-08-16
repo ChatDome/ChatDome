@@ -13,6 +13,7 @@ from chatdome.outbound.models import (
     CommandEchoFacts,
     CommandHelpFacts,
     CommandHelpItemFacts,
+    ContextUsageFacts,
     OutboundAction,
     OutboundMessage,
     OutboundMessageKind,
@@ -126,6 +127,7 @@ COMMAND_CATALOG: tuple[CommandDef, ...] = (
     CommandDef("/env", "Show the runtime environment", "context"),
     CommandDef("/audit", "Show recent command audit events", "context", args_hint="[N]"),
     CommandDef("/token", "Show token usage", "context"),
+    CommandDef("/context", "Show current context usage", "context"),
     CommandDef("/cmd_echo", "Toggle command echo", "context"),
     CommandDef(
         "/engram",
@@ -172,6 +174,12 @@ COMMAND_CATALOG: tuple[CommandDef, ...] = (
         "Show pending approval details",
         "approval",
         args_hint="[full]",
+    ),
+    CommandDef(
+        "/memory",
+        "List or manage compressed long-term memory",
+        "memory",
+        args_hint="[delete <id>|clear]",
     ),
     CommandDef(
         "/confirm",
@@ -651,23 +659,37 @@ def _default_event_summary(
     return f"命令 {command_name} 结果：{result.outcome}。"
 
 
-def clear_agent_session(agent: Any, chat_id: int) -> bool:
+def clear_agent_session(agent: Any, chat_id: int) -> Any:
     """Clear one Agent session through the shared command operation."""
 
-    return bool(agent.clear_session(chat_id))
+    return agent.clear_session(chat_id)
 
 
 def clear_session_command_result(agent: Any, context: CommandContext) -> CommandResult:
     """Clear one session and return platform-neutral result content."""
 
-    cleared = clear_agent_session(agent, context.chat_id)
+    clear_result = clear_agent_session(agent, context.chat_id)
+    cleared = bool(clear_result)
+    status = str(getattr(clear_result, "status", "cleared" if cleared else "not_found"))
     return CommandResult(
-        outcome="session_cleared" if cleared else "no_active_session",
+        outcome=(
+            "session_cleared"
+            if cleared
+            else "task_running"
+            if status == "running_task"
+            else "session_clear_failed"
+            if status in {"event_write_failed", "save_failed"}
+            else "no_active_session"
+        ),
         event_summary=(
             "用户清空了当前会话。" if cleared else "当前没有可清空的会话。"
         ),
         text="Session cleared." if cleared else "No active session.",
-        facts=SessionControlFacts(operation="clear_session", changed=cleared),
+        facts=SessionControlFacts(
+            operation="clear_session",
+            changed=cleared,
+            status=status,
+        ),
     )
 
 
@@ -1070,6 +1092,30 @@ def token_usage_command_result(context: CommandContext) -> CommandResult:
         event_summary="用户查看了当前会话的 Token 用量。",
         title="Token usage",
         text=f"Prompt: {facts.prompt_tokens:,}\nCompletion: {facts.completion_tokens:,}\nTotal: {facts.total_tokens:,}",
+        facts=facts,
+    )
+
+
+def context_usage_command_result(agent: Any, context: CommandContext) -> CommandResult:
+    """Return the current full-request token budget without calling the LLM."""
+    getter = getattr(agent, "get_context_status", None)
+    if not callable(getter):
+        return CommandResult(outcome="unavailable", text="Context status is unavailable.")
+    values = getter(context.chat_id)
+    facts = ContextUsageFacts(
+        current_tokens=int(values.get("current_tokens", 0)),
+        limit_tokens=int(values.get("limit_tokens", 32_000)),
+        usage_percent=int(values.get("usage_percent", 0)),
+        status=str(values.get("status") or "正常"),
+        working_summary_tokens=int(values.get("working_summary_tokens", 0)),
+        last_tokens_before=int(values.get("last_tokens_before", 0)),
+        last_tokens_after=int(values.get("last_tokens_after", 0)),
+        last_reduction_percent=int(values.get("last_reduction_percent", 0)),
+        token_count_method=str(values.get("token_count_method") or "heuristic"),
+    )
+    return CommandResult(
+        outcome="context_status_shown",
+        event_summary="用户查看了当前上下文用量。",
         facts=facts,
     )
 

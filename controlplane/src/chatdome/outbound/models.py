@@ -221,6 +221,7 @@ class SessionControlFacts:
 
     operation: str
     changed: bool
+    status: str = ""
 
 
 @dataclass(frozen=True)
@@ -231,6 +232,21 @@ class TokenUsageFacts:
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+
+
+@dataclass(frozen=True)
+class ContextUsageFacts:
+    """Current LLM request budget and the latest successful compaction."""
+
+    current_tokens: int
+    limit_tokens: int
+    usage_percent: int
+    status: str
+    working_summary_tokens: int = 0
+    last_tokens_before: int = 0
+    last_tokens_after: int = 0
+    last_reduction_percent: int = 0
+    token_count_method: str = "heuristic"
 
 
 @dataclass(frozen=True)

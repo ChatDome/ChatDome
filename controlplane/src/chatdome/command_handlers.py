@@ -16,6 +16,15 @@ from chatdome.llm.codex_oauth_service import CodexOAuthService, CodexOAuthSessio
 from chatdome.llm.profile_admin import ProfileActor
 from chatdome.model_commands import ModelCommandService
 from chatdome.model_workflow import CodexWorkflowRequest, ModelCommandWorkflow
+from chatdome.outbound.models import (
+    ActionKind,
+    DecisionEffect,
+    DecisionEffectKind,
+    DecisionOperationFacts,
+    DecisionPromptFacts,
+    DecisionQuestion,
+    OutboundAction,
+)
 from chatdome.runtime_paths import environment_profile_path
 from chatdome.slash_commands import (
     CommandDef,
@@ -26,6 +35,7 @@ from chatdome.slash_commands import (
     approve_command_result,
     audit_command_result,
     clear_session_command_result,
+    context_usage_command_result,
     command_echo_command_result,
     command_help_result,
     continue_command_result,
@@ -135,9 +145,14 @@ class CommandHandlerService:
         ] = {
             "sentinel_alert_detail": self._sentinel_alert_detail,
             "sentinel_alert_analysis": self._sentinel_alert_analysis,
+            "memory_delete_yes": self._memory,
+            "memory_delete_no": self._memory,
+            "memory_clear_yes": self._memory,
+            "memory_clear_no": self._memory,
         }
         self._sentinel_alerts: dict[str, dict[str, Any]] = {}
         self._sentinel_alert_limit = 200
+        self._memory_confirmations: dict[str, dict[str, Any]] = {}
         self._handlers: dict[str, Callable[[CommandInvocation, CommandHandlerRuntime], Any]] = {
             "/help": self._help,
             "/clear": self._clear,
@@ -145,8 +160,10 @@ class CommandHandlerService:
             "/env": self._env,
             "/audit": self._audit,
             "/token": self._token,
+            "/context": self._context,
             "/cmd_echo": self._cmd_echo,
             "/engram": self._engram,
+            "/memory": self._memory,
             "/model": self._model,
             "/model_list": self._model_list,
             "/model_add": self._model_add,
@@ -342,11 +359,182 @@ class CommandHandlerService:
     def _token(invocation: CommandInvocation, _runtime: CommandHandlerRuntime) -> CommandResult:
         return token_usage_command_result(invocation.context)
 
+    @staticmethod
+    def _context(invocation: CommandInvocation, runtime: CommandHandlerRuntime) -> CommandResult:
+        return context_usage_command_result(
+            CommandHandlerService._require(runtime.agent, "agent"),
+            invocation.context,
+        )
+
     async def _cmd_echo(self, invocation: CommandInvocation, runtime: CommandHandlerRuntime) -> CommandResult:
         return command_echo_command_result(self._require(runtime.agent, "agent"), invocation.context)
 
     async def _engram(self, invocation: CommandInvocation, runtime: CommandHandlerRuntime) -> CommandResult:
         return execute_engram_command(self._require(runtime.agent, "agent"), invocation.args)
+
+    async def _memory(
+        self,
+        invocation: CommandInvocation,
+        runtime: CommandHandlerRuntime,
+    ) -> CommandResult:
+        """List Memory Vault entries or run one confirmed deletion."""
+        agent = self._require(runtime.agent, "agent")
+        store = getattr(agent, "memory_vault_store", None) or getattr(
+            getattr(agent, "session_manager", None),
+            "memory_vault_store",
+            None,
+        )
+        if store is None:
+            return CommandResult(outcome="unavailable", text="Memory Vault is unavailable.")
+        chat_id = invocation.context.chat_id
+        action = str(invocation.action or "")
+        if action in {
+            "memory_delete_yes",
+            "memory_delete_no",
+            "memory_clear_yes",
+            "memory_clear_no",
+        }:
+            nonce = str(invocation.interaction_id or "")
+            pending = self._memory_confirmations.pop(nonce, None)
+            if (
+                pending is None
+                or float(pending.get("expires_at", 0)) < time.time()
+                or int(pending.get("chat_id", 0)) != chat_id
+            ):
+                return CommandResult(
+                    outcome="invalid_interaction_state",
+                    text="该记忆操作已失效。请重新执行 /memory。",
+                )
+            if action.endswith("_no"):
+                return CommandResult(outcome="memory_operation_cancelled", text="已取消。")
+            return self._execute_memory_mutation(
+                store,
+                chat_id,
+                str(pending["operation"]),
+                str(pending.get("entry_id") or ""),
+            )
+
+        values = tuple(str(value).strip() for value in invocation.args if str(value).strip())
+        if values and values[0].lower() == "delete":
+            if len(values) not in {2, 3} or (len(values) == 3 and values[2].lower() != "confirm"):
+                return CommandResult(
+                    outcome="invalid_arguments",
+                    text="Usage: /memory delete <id> [confirm]",
+                )
+            entry_id = values[1]
+            if not any(entry.id == entry_id for entry in store.load(chat_id).entries):
+                return CommandResult(outcome="memory_not_found", text=f"Memory not found: {entry_id}")
+            if len(values) == 3:
+                return self._execute_memory_mutation(store, chat_id, "delete", entry_id)
+            return self._memory_confirmation(invocation, "delete", entry_id)
+        if values and values[0].lower() == "clear":
+            if len(values) not in {1, 2} or (len(values) == 2 and values[1].lower() != "confirm"):
+                return CommandResult(
+                    outcome="invalid_arguments",
+                    text="Usage: /memory clear [confirm]",
+                )
+            if not store.load(chat_id).entries:
+                return CommandResult(outcome="memory_empty", text="Memory Vault is empty.")
+            if len(values) == 2:
+                return self._execute_memory_mutation(store, chat_id, "clear", "")
+            return self._memory_confirmation(invocation, "clear", "")
+        if values:
+            return CommandResult(
+                outcome="invalid_arguments",
+                text="Usage: /memory [delete <id>|clear]",
+            )
+
+        vault = store.load(chat_id)
+        if not vault.entries:
+            return CommandResult(outcome="memory_empty", text="Memory Vault is empty.")
+        lines = ["Memory Vault", ""]
+        for entry in vault.entries:
+            lines.append(f"- [{entry.category}] {entry.content}")
+            lines.append(f"  ID: {entry.id} | {entry.status} | {entry.updated_at}")
+        lines.extend(["", "Delete: /memory delete <id>", "Clear: /memory clear"])
+        return CommandResult(
+            outcome="memory_listed",
+            event_summary=f"用户查看了 {len(vault.entries)} 条 Memory Vault 记录。",
+            text="\n".join(lines),
+        )
+
+    def _memory_confirmation(
+        self,
+        invocation: CommandInvocation,
+        operation: str,
+        entry_id: str,
+    ) -> CommandResult:
+        nonce = uuid.uuid4().hex[:12]
+        self._memory_confirmations[nonce] = {
+            "chat_id": invocation.context.chat_id,
+            "operation": operation,
+            "entry_id": entry_id,
+            "expires_at": time.time() + 300,
+        }
+        target = f"长期记忆 {entry_id}" if operation == "delete" else "全部 Memory Vault 长期记忆"
+        yes_action = "memory_delete_yes" if operation == "delete" else "memory_clear_yes"
+        no_action = "memory_delete_no" if operation == "delete" else "memory_clear_no"
+        typed_confirmation = (
+            f"/memory delete {entry_id} confirm"
+            if operation == "delete"
+            else "/memory clear confirm"
+        )
+        return CommandResult(
+            outcome="memory_confirmation_requested",
+            event_refs={"interaction_id": nonce, "memory_id": entry_id},
+            text=f"CLI 确认命令：{typed_confirmation}",
+            facts=DecisionOperationFacts(
+                operation=f"memory_{operation}",
+                stage="confirm_delete",
+                decision=DecisionPromptFacts(
+                    intent=f"删除{target}",
+                    effects=(DecisionEffect(DecisionEffectKind.DELETE, target),),
+                    question=DecisionQuestion.CONFIRM_DELETE,
+                ),
+            ),
+            actions=tuple(
+                OutboundAction(
+                    kind,
+                    label,
+                    f"memory_admin:{action}:{nonce}",
+                    destructive=destructive,
+                    params={
+                        "command": "/memory",
+                        "action": action,
+                        "interaction_id": nonce,
+                    },
+                )
+                for kind, label, action, destructive in (
+                    (ActionKind.CONFIRM, "确认删除", yes_action, True),
+                    (ActionKind.CANCEL, "取消", no_action, False),
+                )
+            ),
+        )
+
+    @staticmethod
+    def _execute_memory_mutation(
+        store: Any,
+        chat_id: int,
+        operation: str,
+        entry_id: str,
+    ) -> CommandResult:
+        if operation == "delete":
+            changed = bool(store.delete(chat_id, entry_id))
+            return CommandResult(
+                outcome="memory_deleted" if changed else "memory_not_found",
+                event_summary=(
+                    f"用户删除了 Memory Vault 记录 {entry_id}。"
+                    if changed
+                    else f"用户尝试删除不存在的 Memory Vault 记录 {entry_id}。"
+                ),
+                text=f"Memory deleted: {entry_id}" if changed else f"Memory not found: {entry_id}",
+            )
+        changed = bool(store.clear(chat_id))
+        return CommandResult(
+            outcome="memory_cleared" if changed else "memory_empty",
+            event_summary="用户清空了 Memory Vault。" if changed else "Memory Vault 已为空。",
+            text="Memory Vault cleared." if changed else "Memory Vault is empty.",
+        )
 
     async def _model(self, invocation: CommandInvocation, runtime: CommandHandlerRuntime) -> CommandResult:
         service = self._require(runtime.model_service, "model service")
