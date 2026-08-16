@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Protocol
+from typing import Any, Callable, Literal, Optional, Protocol
 
 
 TokenCountMethod = Literal["model_tokenizer", "family_tokenizer", "heuristic"]
@@ -35,7 +35,7 @@ class ContextBudgetSnapshot:
         return self.current_tokens >= self.limit_tokens
 
 
-EncoderLoader = Callable[[str], tuple[TextEncoder | None, TokenCountMethod]]
+EncoderLoader = Callable[[str], tuple[Optional[TextEncoder], TokenCountMethod]]
 
 
 def _load_encoder(model: str) -> tuple[TextEncoder | None, TokenCountMethod]:

@@ -1,9 +1,14 @@
 import json
 from types import SimpleNamespace
+from typing import Union, get_args, get_origin
 
 import pytest
 
-from chatdome.agent.context_budget import ContextBudgetService, ContextTokenCounter
+from chatdome.agent.context_budget import (
+    ContextBudgetService,
+    ContextTokenCounter,
+    EncoderLoader,
+)
 from chatdome.agent.core import Agent
 from chatdome.agent.context_models import ContextState, WorkingSummary
 from chatdome.config import AgentConfig, parse_config_document
@@ -12,6 +17,13 @@ from chatdome.config import AgentConfig, parse_config_document
 class CharacterEncoder:
     def encode(self, text: str) -> list[int]:
         return list(range(len(text)))
+
+
+def test_encoder_loader_alias_uses_python39_compatible_optional() -> None:
+    return_type = get_args(EncoderLoader)[1]
+    optional_encoder = get_args(return_type)[0]
+
+    assert get_origin(optional_encoder) is Union
 
 
 def _valid_summary_payload() -> dict:

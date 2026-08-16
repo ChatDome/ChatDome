@@ -8,7 +8,7 @@ import logging
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal, Union
 
 from chatdome.agent.context_budget import ContextBudgetService
 from chatdome.agent.context_models import LastCompaction, WorkingSummary, local_timestamp
@@ -60,7 +60,7 @@ _RETRY_SUFFIX = """
 
 
 CompactionStatus = Literal["not_needed", "completed", "failed", "rejected"]
-SessionSaver = Callable[[AgentSession], bool | Awaitable[bool]]
+SessionSaver = Callable[[AgentSession], Union[bool, Awaitable[bool]]]
 
 
 @dataclass(frozen=True)
