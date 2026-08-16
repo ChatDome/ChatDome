@@ -10,6 +10,7 @@ def test_runtime_paths_use_grouped_data_and_run_dirs(monkeypatch, tmp_path: Path
     monkeypatch.setenv("CHATDOME_RUN_DIR", str(run_dir))
 
     assert runtime_paths.memory_file_path(123) == data_dir / "memory" / "123.json"
+    assert runtime_paths.event_log_path(123) == data_dir / "events" / "123.jsonl"
     assert runtime_paths.compression_log_path(123) == data_dir / "compression" / "123.log"
     assert runtime_paths.engram_store_path() == data_dir / "memory" / "engram.json"
     assert runtime_paths.sentinel_alerts_path() == data_dir / "sentinel" / "alerts.jsonl"

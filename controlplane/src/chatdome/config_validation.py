@@ -29,6 +29,7 @@ _AI_FIELDS = {
 _AGENT_FIELDS = {
     "command_approval_mode", "session_timeout", "pending_approval_timeout",
     "persisted_session_ttl", "max_rounds_per_turn", "max_history_tokens",
+    "event_retention_days",
     "command_timeout", "max_output_chars", "persist_command_outputs",
     "command_output_retention_days", "command_output_max_chars",
 }
@@ -277,6 +278,7 @@ class _Validator:
         ):
             self.positive_int(data, key, "chatdome.agent")
         self.positive_int(data, "persisted_session_ttl", "chatdome.agent", allow_zero=True)
+        self.positive_int(data, "event_retention_days", "chatdome.agent", allow_zero=True)
         self.optional_type(data, "persist_command_outputs", bool, "chatdome.agent")
 
     def _sentinel(self, root: dict[str, Any]) -> None:

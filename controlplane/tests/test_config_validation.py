@@ -125,6 +125,19 @@ chatdome:
             config.agent.command_approval_mode,
             "require_approval_for_risky_commands",
         )
+        self.assertEqual(config.agent.max_history_tokens, 32000)
+        self.assertEqual(config.agent.event_retention_days, 30)
+
+    def test_event_retention_allows_zero_for_permanent_storage(self):
+        config = self._load_text(
+            VALID_CONFIG.replace(
+                "    command_approval_mode: require_approval_for_risky_commands\n",
+                "    command_approval_mode: require_approval_for_risky_commands\n"
+                "    event_retention_days: 0\n",
+            )
+        )
+
+        self.assertEqual(config.agent.event_retention_days, 0)
 
     def test_optional_telegram_and_llm_can_be_empty(self):
         config = self._load_text(

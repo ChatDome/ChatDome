@@ -60,7 +60,8 @@ class AgentConfig:
     pending_approval_timeout: int = 86400
     persisted_session_ttl: int = 604800
     max_rounds_per_turn: int = 10
-    max_history_tokens: int = 16000
+    max_history_tokens: int = 32000
+    event_retention_days: int = 30
     command_timeout: int = 10
     max_output_chars: int = 4000
     persist_command_outputs: bool = False

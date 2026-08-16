@@ -64,6 +64,11 @@ def memory_file_path(chat_id: int | str) -> Path:
     )
 
 
+def event_log_path(chat_id: int | str) -> Path:
+    """Return the append-only conversation event archive for one chat."""
+    return data_path("events", f"{chat_id}.jsonl")
+
+
 def compression_log_path(chat_id: int | str) -> Path:
     """Return the context compression event log for one chat."""
     return _migrate_legacy_file(

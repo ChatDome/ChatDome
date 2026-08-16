@@ -8,10 +8,10 @@ idle timeout, and automatic cleanup.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
-import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -25,21 +25,11 @@ from chatdome.agent.turns import (
     TurnState,
     create_turn_context,
 )
+from chatdome.agent.redaction import redact_field_value, redact_sensitive_text
 from chatdome.runtime_paths import compression_log_path, data_dir, memory_file_path
 
 logger = logging.getLogger(__name__)
 
-_REDACTED = "[REDACTED]"
-_PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
-    re.DOTALL,
-)
-_SENSITIVE_KEY_VALUE_RE = re.compile(
-    r"(?i)([\"']?\b(?:telegram[_-]?bot[_-]?token|bot[_-]?token|api[_-]?key|openai[_-]?api[_-]?key|password|passwd|secret|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|codex[_-]?token)\b[\"']?\s*[:=]\s*[\"']?)([^\"'\s,;}]+)([\"']?)"
-)
-_AUTH_BEARER_RE = re.compile(r"(?i)\b(authorization\s*[:=]\s*bearer\s+)([A-Za-z0-9._~+/=-]{10,})")
-_TELEGRAM_BOT_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
-_OPENAI_STYLE_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b")
 _SESSION_SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9_.:/@-]{2,}|[\u4e00-\u9fff]{2,}")
 
 _TOOL_RESULT_SNIPPET_CHARS = 500
@@ -71,21 +61,9 @@ def _memory_last_updated() -> str:
     return datetime.now().astimezone().isoformat(sep=" ", timespec="seconds")
 
 
-def redact_sensitive_text(text: str) -> str:
-    """Redact secrets before conversation summaries are persisted."""
-    redacted = str(text or "")
-    redacted = _PRIVATE_KEY_RE.sub(_REDACTED, redacted)
-    redacted = _SENSITIVE_KEY_VALUE_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}{m.group(3)}", redacted)
-    redacted = _AUTH_BEARER_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}", redacted)
-    redacted = _TELEGRAM_BOT_TOKEN_RE.sub(_REDACTED, redacted)
-    redacted = _OPENAI_STYLE_KEY_RE.sub(_REDACTED, redacted)
-    return redacted
-
-
 def _redact_control_field(key: str, value: Any) -> str:
     """Redact an event value using both its field name and content."""
-    composite = redact_sensitive_text(f"{key}={value}")
-    return composite.partition("=")[2]
+    return redact_field_value(key, value)
 
 def _truncate_context_text(text: Any, max_chars: int) -> str:
     value = redact_sensitive_text(str(text or "")).strip()

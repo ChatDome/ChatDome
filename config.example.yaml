@@ -42,7 +42,9 @@ chatdome:
     # Set 0 to disable TTL cleanup for persisted snapshots.
     persisted_session_ttl: 604800
     max_rounds_per_turn: 10
-    max_history_tokens: 16000
+    max_history_tokens: 32000
+    # Retain searchable conversation events for 30 days. Set 0 to keep forever.
+    event_retention_days: 30
     command_timeout: 10
     max_output_chars: 4000
     # Debug/forensics only. When false, command stdout/stderr are not archived;
