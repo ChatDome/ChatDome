@@ -95,11 +95,11 @@ DANGEROUS_PATTERNS: list[tuple[re.Pattern, str]] = CRITICAL_PATTERNS + RISKY_PAT
 # ---------------------------------------------------------------------------
 
 READ_ONLY_COMMANDS = {
-    "awk", "grep", "egrep", "fgrep", "cat", "head", "tail", "sort", "uniq",
-    "wc", "find", "ls", "ps", "ss", "netstat", "journalctl", "dmesg",
-    "df", "free", "uptime", "last", "who", "id", "uname", "hostnamectl",
-    "ip", "whois", "dig", "nslookup", "top", "lsof", "stat", "file",
-    "strings", "hexdump", "md5sum", "sha256sum", "date", "hostname",
+    "grep", "egrep", "fgrep", "cat", "head", "tail",
+    "wc", "ls", "ps", "netstat",
+    "df", "free", "uptime", "last", "who", "id", "uname",
+    "whois", "dig", "nslookup", "lsof", "stat",
+    "strings", "hexdump", "md5sum", "sha256sum",
 }
 
 _SHELL_COMMAND_SEPARATORS = {"|", "||", "&&", ";", "&"}
@@ -120,9 +120,8 @@ WRITE_INTENT_PATTERNS: list[re.Pattern] = [
     re.compile(r"\bsed\b[^\n\r;|&]*\s-i(?:\s|$)"),
     re.compile(r"\bperl\b[^\n\r;|&]*\s-pi(?:\s|$)"),
 
-    # Shell write redirection
-    re.compile(r">>"),
-    re.compile(r">\s"),
+    re.compile(r"\d*>{1,2}"),
+    re.compile(r"<>"),
 
     # Common file mutation commands
     re.compile(r"\btouch\b"),
@@ -166,6 +165,8 @@ def _extract_command_names(command: str) -> tuple[list[str], str]:
     for token in tokens:
         if token in _SHELL_STRUCTURE_TOKENS:
             return [], "命令包含无法静态确认的 Shell 结构"
+        if "<" in token or ">" in token:
+            return [], "命令包含无法静态确认的重定向结构"
         if token in _SHELL_COMMAND_SEPARATORS:
             expects_command = True
             continue
@@ -173,8 +174,6 @@ def _extract_command_names(command: str) -> tuple[list[str], str]:
             continue
         if token == "!" or _ASSIGNMENT_PATTERN.match(token):
             continue
-        if token in {"<", ">", ">>", "<<", "<<<"}:
-            return [], "命令包含无法静态确认的重定向结构"
         names.append(token.rsplit("/", 1)[-1])
         expects_command = False
 

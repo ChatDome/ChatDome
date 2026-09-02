@@ -524,13 +524,63 @@ class PendingApprovalFollowupTests(unittest.TestCase):
         asyncio.run(
             dispatcher.dispatch(
                 "run_shell_command",
-                '{"command":"df -h; ss -tlnH","reason":"inspect"}',
+                '{"command":"df -h; free -m","reason":"inspect"}',
                 "call-safe",
                 7,
             )
         )
 
-        self.assertEqual(sandbox.commands[0]["command"], "df -h; ss -tlnH")
+        self.assertEqual(sandbox.commands[0]["command"], "df -h; free -m")
+
+    def test_risky_mode_requires_approval_for_multimode_and_write_commands(self):
+        sandbox = FakeSandbox()
+        dispatcher = ToolDispatcher(
+            sandbox,
+            command_approval_mode="require_approval_for_risky_commands",
+        )
+
+        dangerous = [
+            "ip link set eth0 down",
+            "find /tmp/x -delete",
+            "uniq /tmp/input /tmp/output",
+            "file -C -m /tmp/custom-magic",
+            "cat>/tmp/x",
+            "ls>/tmp/listing",
+        ]
+        for cmd in dangerous:
+            with self.assertRaises(PendingApprovalError, msg=cmd):
+                asyncio.run(
+                    dispatcher.dispatch(
+                        "run_shell_command",
+                        json.dumps({"command": cmd, "reason": "test"}),
+                        "call-1",
+                        7,
+                    )
+                )
+
+        self.assertEqual(len(sandbox.commands), 0)
+
+        asyncio.run(
+            dispatcher.dispatch(
+                "run_shell_command",
+                json.dumps({"command": "ps aux", "reason": "test"}),
+                "call-2",
+                7,
+            )
+        )
+        self.assertEqual(len(sandbox.commands), 1)
+        self.assertEqual(sandbox.commands[0]["command"], "ps aux")
+
+    def test_redirect_commands_have_unsafe_static_gate(self):
+        dispatcher = ToolDispatcher(
+            FakeSandbox(),
+            command_approval_mode="require_approval_for_risky_commands",
+        )
+        for cmd in ["cat>/tmp/x", "ls>/tmp/listing"]:
+            gate = dispatcher._analyze_command_static_gate(cmd)
+            self.assertFalse(gate["static_is_safe"], msg=cmd)
+            self.assertTrue(gate["mutation_detected"], msg=cmd)
+            self.assertEqual(gate["safety_status"], "UNSAFE", msg=cmd)
 
     def test_risky_mode_requires_approval_for_unknown_command(self):
         sandbox = FakeSandbox()
